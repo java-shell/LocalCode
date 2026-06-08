@@ -1,0 +1,5 @@
+llm-ide/node_modules/
+llm-ide/out/
+node_modules/
+out/
+*.log

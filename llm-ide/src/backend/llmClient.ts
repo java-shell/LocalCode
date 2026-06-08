@@ -1,0 +1,252 @@
+import axios from 'axios';
+import { ChatMessage, LLMConfig, ToolDefinition } from '../shared/types';
+
+interface CompletionResponse {
+  choices?: Array<{
+    message?: ChatMessage;
+  }>;
+}
+
+interface StreamChunk {
+  choices?: Array<{
+    delta?: {
+      content?: string;
+    };
+  }>;
+}
+
+interface ModelsResponse {
+  data?: Array<{
+    id?: string;
+  }>;
+}
+
+function deriveModelsEndpoint(chatEndpoint: string): string {
+  const normalized = chatEndpoint.trim();
+  if (!normalized) {
+    throw new Error('Endpoint is required.');
+  }
+
+  try {
+    const url = new URL(normalized);
+    if (url.pathname.endsWith('/chat/completions')) {
+      url.pathname = url.pathname.replace(/\/chat\/completions$/, '/models');
+      return url.toString();
+    }
+    if (url.pathname.endsWith('/v1')) {
+      url.pathname = `${url.pathname}/models`;
+      return url.toString();
+    }
+    if (!url.pathname.endsWith('/models')) {
+      url.pathname = `${url.pathname.replace(/\/$/, '')}/models`;
+    }
+    return url.toString();
+  } catch {
+    if (normalized.endsWith('/chat/completions')) {
+      return normalized.replace(/\/chat\/completions$/, '/models');
+    }
+    if (normalized.endsWith('/v1')) {
+      return `${normalized}/models`;
+    }
+    return `${normalized.replace(/\/$/, '')}/models`;
+  }
+}
+
+function buildHeaders(config: LLMConfig): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json'
+  };
+  if (config.apiKey) {
+    headers.Authorization = `Bearer ${config.apiKey}`;
+  }
+  return headers;
+}
+
+function payloadBase(config: LLMConfig, messages: ChatMessage[]): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    model: config.model,
+    messages,
+    temperature: config.temperature
+  };
+  if ((config.maxTokens ?? 0) > 0) {
+    payload.max_tokens = config.maxTokens;
+  }
+  return payload;
+}
+
+export async function streamChat(
+  config: LLMConfig,
+  messages: ChatMessage[],
+  onToken: (token: string) => void
+): Promise<string> {
+  const response = await axios.post(
+    config.endpoint,
+    {
+      ...payloadBase(config, messages),
+      stream: true
+    },
+    {
+      headers: { ...buildHeaders(config), Accept: 'text/event-stream' },
+      responseType: 'stream'
+    }
+  );
+
+  return await new Promise<string>((resolve, reject) => {
+    let total = '';
+    let pending = '';
+
+    response.data.on('data', (buffer: Buffer) => {
+      pending += buffer.toString('utf8');
+      const parts = pending.split('\n\n');
+      pending = parts.pop() ?? '';
+
+      for (const part of parts) {
+        const lines = part
+          .split('\n')
+          .map(line => line.trim())
+          .filter(line => line.startsWith('data:'));
+
+        for (const line of lines) {
+          const data = line.replace(/^data:\s*/, '');
+          if (!data || data === '[DONE]') {
+            continue;
+          }
+          try {
+            const chunk = JSON.parse(data) as StreamChunk;
+            const token = chunk.choices?.[0]?.delta?.content ?? '';
+            if (token) {
+              total += token;
+              onToken(token);
+            }
+          } catch {
+            // Ignore partial/non-json chunks.
+          }
+        }
+      }
+    });
+
+    response.data.on('end', () => resolve(total));
+    response.data.on('error', (err: Error) => reject(err));
+  });
+}
+
+export async function listModels(config: Pick<LLMConfig, 'endpoint' | 'apiKey'>): Promise<string[]> {
+  const endpoint = deriveModelsEndpoint(config.endpoint);
+  const headers: Record<string, string> = {};
+  if (config.apiKey) {
+    headers.Authorization = `Bearer ${config.apiKey}`;
+  }
+
+  const response = await axios.get<ModelsResponse>(endpoint, { headers });
+  const models = (response.data?.data ?? [])
+    .map(item => item.id)
+    .filter((value): value is string => Boolean(value));
+
+  return models.sort((a, b) => a.localeCompare(b));
+}
+
+export async function chatWithTools(
+  config: LLMConfig,
+  initialMessages: ChatMessage[],
+  tools: ToolDefinition[],
+  executeTool: (name: string, args: unknown) => Promise<unknown>,
+  onEvent?: (message: string) => void,
+  maxToolTurns = 40
+): Promise<string> {
+  const messages = [...initialMessages];
+  const maxTurns = Math.max(1, Math.min(200, Math.floor(maxToolTurns || 40)));
+
+  function intentSummary(name: string, args: Record<string, unknown>): string {
+    switch (name) {
+      case 'list_dir':
+        return `list directory ${String(args.path ?? '.')}`;
+      case 'file_search':
+        return `search files for ${String(args.query ?? '')}`;
+      case 'read_file':
+        return `read ${String(args.path ?? '')}`;
+      case 'create_file':
+        return `create ${String(args.path ?? '')}`;
+      case 'write_file':
+        return `write ${String(args.path ?? '')}`;
+      case 'replace_in_file':
+        return `replace text in ${String(args.path ?? '')}`;
+      case 'insert_in_file':
+        return `insert text in ${String(args.path ?? '')}`;
+      case 'create_directory':
+        return `create directory ${String(args.path ?? '')}`;
+      case 'move_path':
+        return `move ${String(args.from ?? '')} -> ${String(args.to ?? '')}`;
+      case 'delete_path':
+        return `delete ${String(args.path ?? '')}`;
+      case 'grep_search':
+        return `grep search for ${String(args.query ?? '')}`;
+      case 'git_status':
+        return 'read git status';
+      case 'git_diff':
+        return args.path ? `read git diff for ${String(args.path)}` : 'read git diff';
+      case 'git_add':
+        return args.all ? 'stage all changes' : `stage ${String(args.path ?? '')}`;
+      case 'git_commit':
+        return `commit with message ${String(args.message ?? '')}`;
+      case 'run_terminal_command':
+        return `run command ${String(args.command ?? '')}`;
+      default:
+        return 'execute requested operation';
+    }
+  }
+
+  for (let i = 0; i < maxTurns; i += 1) {
+    const payload: Record<string, unknown> = {
+      ...payloadBase(config, messages),
+      stream: false
+    };
+    if (tools.length > 0) {
+      payload.tools = tools;
+      payload.tool_choice = 'auto';
+    }
+
+    const response = await axios.post<CompletionResponse>(config.endpoint, payload, {
+      headers: buildHeaders(config)
+    });
+
+    const assistant = response.data.choices?.[0]?.message;
+    if (!assistant) {
+      return '';
+    }
+
+    messages.push(assistant);
+
+    if (!assistant.tool_calls || assistant.tool_calls.length === 0) {
+      return assistant.content ?? '';
+    }
+
+    for (const call of assistant.tool_calls) {
+      const toolName = call.function.name;
+      let parsedArgs: unknown = {};
+      try {
+        parsedArgs = call.function.arguments ? JSON.parse(call.function.arguments) : {};
+      } catch {
+        parsedArgs = {};
+      }
+
+      const summarizedArgs = (parsedArgs && typeof parsedArgs === 'object')
+        ? (parsedArgs as Record<string, unknown>)
+        : {};
+      onEvent?.(`tool:${toolName} | intent: ${intentSummary(toolName, summarizedArgs)}`);
+      let result: unknown;
+      try {
+        result = await executeTool(toolName, parsedArgs);
+      } catch (error) {
+        result = { error: error instanceof Error ? error.message : String(error) };
+      }
+
+      messages.push({
+        role: 'tool',
+        tool_call_id: call.id,
+        content: JSON.stringify(result)
+      });
+    }
+  }
+
+  return `Stopped after max tool turns (${maxTurns}).`;
+}

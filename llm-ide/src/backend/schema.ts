@@ -1,0 +1,97 @@
+import { OrchestrationPlan } from '../shared/types';
+
+export const defaultPlan: OrchestrationPlan = {
+  version: 1,
+  name: 'Planner -> Coder',
+  description: 'Plan, inspect files, then implement with safe tools.',
+  steps: [
+    {
+      id: 'planner',
+      name: 'Planner',
+      provider: 'openai-compatible',
+      endpoint: 'http://localhost:11434/v1/chat/completions',
+      model: 'llama3',
+      systemPrompt: 'Plan how to solve the user request and call tools as needed.',
+      temperature: 0.2,
+      maxTokens: 1200,
+      tools: [
+        { name: 'list_dir', enabled: true },
+        { name: 'read_file', enabled: true },
+        { name: 'grep_search', enabled: true },
+        { name: 'git_status', enabled: true },
+        { name: 'run_terminal_command', enabled: true }
+      ],
+      passOutputToNext: true
+    },
+    {
+      id: 'coder',
+      name: 'Coder',
+      provider: 'openai-compatible',
+      endpoint: 'http://localhost:11434/v1/chat/completions',
+      model: 'llama3',
+      systemPrompt: 'Generate concrete implementation output and perform safe code edits using available tools.',
+      temperature: 0.1,
+      maxTokens: 2200,
+      tools: [
+        { name: 'file_search', enabled: true },
+        { name: 'read_file', enabled: true },
+        { name: 'create_file', enabled: true },
+        { name: 'write_file', enabled: true },
+        { name: 'replace_in_file', enabled: true },
+        { name: 'insert_in_file', enabled: true },
+        { name: 'create_directory', enabled: true },
+        { name: 'move_path', enabled: true },
+        { name: 'delete_path', enabled: false },
+        { name: 'grep_search', enabled: true },
+        { name: 'git_status', enabled: true },
+        { name: 'git_diff', enabled: true },
+        { name: 'run_terminal_command', enabled: true },
+        { name: 'git_add', enabled: false },
+        { name: 'git_commit', enabled: false }
+      ],
+      passOutputToNext: true
+    }
+  ]
+};
+
+export function validatePlan(value: unknown): string[] {
+  const errors: string[] = [];
+  if (!value || typeof value !== 'object') {
+    return ['Plan must be a JSON object.'];
+  }
+
+  const plan = value as Partial<OrchestrationPlan>;
+  if (plan.version !== 1) {
+    errors.push('version must be 1.');
+  }
+  if (!plan.name || typeof plan.name !== 'string') {
+    errors.push('name is required.');
+  }
+  if (!plan.description || typeof plan.description !== 'string') {
+    errors.push('description is required.');
+  }
+  if (!Array.isArray(plan.steps) || plan.steps.length === 0) {
+    errors.push('steps must contain at least one step.');
+    return errors;
+  }
+
+  for (const [i, step] of plan.steps.entries()) {
+    if (!step.id) {
+      errors.push(`steps[${i}].id is required.`);
+    }
+    if (!step.name) {
+      errors.push(`steps[${i}].name is required.`);
+    }
+    if (!step.endpoint) {
+      errors.push(`steps[${i}].endpoint is required.`);
+    }
+    if (!step.model) {
+      errors.push(`steps[${i}].model is required.`);
+    }
+    if (!Array.isArray(step.tools)) {
+      errors.push(`steps[${i}].tools must be an array.`);
+    }
+  }
+
+  return errors;
+}

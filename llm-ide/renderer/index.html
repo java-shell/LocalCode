@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LocalCode LLM IDE</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">LocalCode</div>
+      <div class="topbar-actions">
+        <div class="meta">Standalone LLM IDE Platform</div>
+        <button id="openSettings" type="button">Settings</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="filetree-panel">
+        <div class="filetree-header">
+          <strong>Workspace</strong>
+          <div class="filetree-actions">
+            <button id="workspaceSelect">Select</button>
+            <button id="workspaceRefresh">Refresh</button>
+          </div>
+        </div>
+        <div id="workspacePath" class="workspace-path"></div>
+        <div id="filetree" class="filetree"></div>
+      </section>
+
+      <section class="editor-panel">
+        <div class="editor-header">
+          <span>Monaco Editor</span>
+          <div class="editor-actions">
+            <button id="saveFile">Save File</button>
+            <button id="saveAllFiles">Save All</button>
+            <button id="openSample">Load Sample</button>
+          </div>
+        </div>
+        <div id="editorTabs" class="editor-tabs"></div>
+        <div id="editor"></div>
+        <div class="terminal-panel">
+          <div class="terminal-header">
+            <span>Model Terminal</span>
+            <button id="terminalClear" type="button">Clear</button>
+          </div>
+          <pre id="terminalOutput" class="terminal-output"></pre>
+          <div class="terminal-input-row">
+            <input id="terminalInput" placeholder="Type terminal input or (ctrl+c)" />
+            <button id="terminalSend" type="button">Send</button>
+          </div>
+        </div>
+      </section>
+
+      <aside class="side-panel">
+        <div class="tabs">
+          <button id="chatTab" class="tab active">Chat</button>
+          <button id="orchTab" class="tab">Orchestration</button>
+        </div>
+
+        <section id="chatView" class="view active">
+          <div id="chatStatus" class="status">Idle</div>
+          <div id="chatConversation" class="log chat-log"></div>
+          <button id="chatSettingsToggle" type="button" class="chat-settings-toggle">Model Settings</button>
+          <div id="chatSettingsPanel" class="chat-settings-panel">
+            <label class="label">Endpoint</label>
+            <input id="chatEndpoint" value="http://localhost:11434/v1/chat/completions" />
+            <label class="label">Model</label>
+            <div class="row-inline">
+              <select id="chatModel"></select>
+              <button id="chatRefreshModels" type="button">Refresh Models</button>
+            </div>
+            <label class="label">API Key (optional)</label>
+            <input id="chatApiKey" type="password" placeholder="sk-..." />
+          </div>
+          <label class="label">Prompt</label>
+          <textarea id="chatPrompt" placeholder="Ask for code, analysis, or generation..."></textarea>
+          <button id="chatSend">Send</button>
+        </section>
+
+        <section id="orchView" class="view">
+          <div id="orchStatus" class="status">Plan ready</div>
+          <label class="label">Orchestration Prompt</label>
+          <textarea id="orchPrompt" placeholder="What should this orchestration accomplish?"></textarea>
+          <div class="actions">
+            <button id="orchLoad">Load</button>
+            <button id="orchValidate">Validate</button>
+            <button id="orchSave">Save</button>
+            <button id="orchRun">Run</button>
+          </div>
+          <label class="label" for="orchPlanName">Workflow Name</label>
+          <input id="orchPlanName" placeholder="Planner -> Coder" />
+          <label class="label" for="orchPlanDescription">Workflow Description</label>
+          <textarea id="orchPlanDescription" placeholder="Describe what this workflow does"></textarea>
+          <div class="orch-workflow-header">
+            <span class="label">Workflow Steps</span>
+            <button id="orchAddStep" type="button">Add Step</button>
+          </div>
+          <div id="orchWorkflow" class="orch-workflow"></div>
+          <textarea id="orchPlan" class="plan orch-plan-hidden"></textarea>
+          <label class="label">Run Events</label>
+          <div id="orchEvents" class="log"></div>
+          <label class="label">Run Output</label>
+          <div id="orchOutput" class="log"></div>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <div id="settingsModal" class="settings-modal" aria-hidden="true">
+    <div class="settings-card">
+      <div class="settings-header">
+        <strong>Settings</strong>
+      </div>
+      <label class="label" for="settingMaxToolTurns">Max Tool Turns (Chat)</label>
+      <input id="settingMaxToolTurns" type="number" min="1" max="200" step="1" />
+      <label class="label" for="settingEndpoint">Default Endpoint</label>
+      <input id="settingEndpoint" placeholder="http://localhost:11434/v1/chat/completions" />
+      <label class="label" for="settingModel">Default Model</label>
+      <input id="settingModel" placeholder="llama3" />
+      <label class="label" for="settingApiKey">Default API Key (optional)</label>
+      <input id="settingApiKey" type="password" placeholder="sk-..." />
+      <div class="settings-help">Default is 40. Higher values allow longer tool-calling runs.</div>
+      <div class="settings-actions">
+        <button id="settingsCancel" type="button">Cancel</button>
+        <button id="settingsSave" type="button">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="apiKeyModal" class="settings-modal" aria-hidden="true">
+    <div class="settings-card">
+      <div class="settings-header">
+        <strong>OpenWeatherMap API Key</strong>
+      </div>
+      <label class="label" for="openWeatherApiKeyInput">API Key</label>
+      <input id="openWeatherApiKeyInput" type="password" placeholder="sk-..." />
+      <div class="settings-actions">
+        <button id="openWeatherApiKeySave" type="button">Save</button>
+      </div>
+    </div>
+  </div>
+  <script src="./app.js"></script>
+</body>
+</html>
