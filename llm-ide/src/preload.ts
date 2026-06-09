@@ -18,6 +18,12 @@ const api = {
   listModels: async (payload: { endpoint: string; apiKey?: string }): Promise<{ models: string[] }> => {
     return ipcRenderer.invoke('chat:list-models', payload);
   },
+  getMemoryDiagnostics: async (payload?: { model?: string }): Promise<unknown> => {
+    return ipcRenderer.invoke('memory:diagnostics', payload);
+  },
+  clearMemoryNamespace: async (payload: { namespace: string }): Promise<unknown> => {
+    return ipcRenderer.invoke('memory:clear-namespace', payload);
+  },
   chatStream: async (payload: ChatStreamRequest): Promise<{ text: string }> => {
     return ipcRenderer.invoke('chat:stream', payload);
   },

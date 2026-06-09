@@ -9,17 +9,22 @@ import { loadPlan, savePlan } from './backend/planStore';
 import { ChatMessage, ChatStreamRequest, LLMConfig, OrchestrationPlan, WorkspaceState } from './shared/types';
 import { executeTool, getAllowedToolDefinitions, toolDefinitions } from './backend/toolRuntime';
 import { buildWorkspaceTree, readWorkspaceFile, writeWorkspaceFile } from './backend/workspaceFs';
+import { TurboVecMemory } from './backend/turboVecMemory';
 
 let mainWindow: BrowserWindow | null = null;
-const appRootDir = process.cwd();
-let selectedWorkspaceDir = appRootDir;
+let selectedWorkspaceDir = process.cwd();
 let activeTerminalProcess: ChildProcessWithoutNullStreams | null = null;
 const fileWatchRefs = new Map<string, { count: number; listener: (curr: fs.Stats, prev: fs.Stats) => void }>();
+let turboMemory: TurboVecMemory | null = null;
+
+function memoryNamespace(mode: 'chat' | 'orchestration', workspaceDir: string, model: string): string {
+  return `${mode}:${workspaceDir}:${model}`;
+}
 
 function runtimeContext(sender?: Electron.WebContents, eventChannel: 'chat:event' | 'orch:event' = 'chat:event') {
   return {
     workspaceDir: selectedWorkspaceDir,
-    rootDir: appRootDir,
+    rootDir: selectedWorkspaceDir,
     onTerminalOutput: sender
       ? (payload: { source: 'stdout' | 'stderr'; text: string }) => {
           sender.send('terminal:output', payload);
@@ -74,7 +79,7 @@ function runtimeContext(sender?: Electron.WebContents, eventChannel: 'chat:event
 function workspaceState(): WorkspaceState {
   return {
     workspaceDir: selectedWorkspaceDir,
-    rootDir: appRootDir
+    rootDir: selectedWorkspaceDir
   };
 }
 
@@ -111,6 +116,9 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  const memoryRoot = path.join(app.getPath('userData'), 'turbovec-memory');
+  const bridgeScript = path.join(process.cwd(), 'src', 'backend', 'turbovec_bridge.py');
+  turboMemory = new TurboVecMemory(memoryRoot, bridgeScript);
   createWindow();
 
   app.on('activate', () => {
@@ -130,7 +138,29 @@ ipcMain.handle(
   'chat:stream',
   async (event, payload: ChatStreamRequest) => {
   const config = payload.config;
-  const messages: ChatMessage[] = [{ role: 'user', content: payload.prompt }];
+  const messages: ChatMessage[] = [];
+
+    if (turboMemory) {
+      const recalled = await turboMemory.retrieve(config, payload.prompt, {
+        namespace: memoryNamespace('chat', selectedWorkspaceDir, config.model),
+        k: 6
+      });
+
+      if (recalled.length > 0) {
+        const memoryLines = recalled
+          .map((item, index) => `${index + 1}. [${item.source}] ${item.text}`)
+          .join('\n');
+        messages.push({
+          role: 'system',
+          content:
+            'Relevant long-term memory from prior interactions is available below. Use it only when useful and ignore stale items.\n\n' +
+            memoryLines
+        });
+        event.sender.send('chat:event', `[memory] injected ${recalled.length} memory item(s).`);
+      }
+    }
+
+    messages.push({ role: 'user', content: payload.prompt });
 
     const availableToolNames = toolDefinitions.map(def => def.function.name);
     const requestedToolNames = Array.isArray(payload.toolNames) && payload.toolNames.length > 0
@@ -155,6 +185,32 @@ ipcMain.handle(
       payload.maxToolTurns ?? 40
     );
 
+    if (turboMemory) {
+      try {
+        await turboMemory.store(
+          config,
+          [
+            {
+              text: payload.prompt.slice(0, 4000),
+              source: 'chat:user',
+              metadata: { workspaceDir: selectedWorkspaceDir }
+            },
+            {
+              text: text.slice(0, 6000),
+              source: 'chat:assistant',
+              metadata: { workspaceDir: selectedWorkspaceDir }
+            }
+          ],
+          {
+            namespace: memoryNamespace('chat', selectedWorkspaceDir, config.model)
+          }
+        );
+        event.sender.send('chat:event', '[memory] stored latest conversation turn in TurboVec memory.');
+      } catch (storeErr) {
+        event.sender.send('chat:event', `[memory] store failed: ${storeErr instanceof Error ? storeErr.message : String(storeErr)}`);
+      }
+    }
+
     // Keep renderer streaming behavior by emitting text in chunks.
     const chunkSize = 16;
     for (let i = 0; i < text.length; i += chunkSize) {
@@ -171,6 +227,42 @@ ipcMain.handle('chat:list-models', async (_event, payload: { endpoint: string; a
     apiKey: payload.apiKey
   });
   return { models };
+});
+
+ipcMain.handle('memory:diagnostics', async (_event, payload?: { model?: string }) => {
+  if (!turboMemory) {
+    return {
+      ok: false,
+      reason: 'memory_not_initialized'
+    };
+  }
+
+  const model = String(payload?.model ?? '').trim();
+  const filter = model ? `${selectedWorkspaceDir}:${model}` : selectedWorkspaceDir;
+  return turboMemory.diagnostics(filter);
+});
+
+ipcMain.handle('memory:clear-namespace', async (_event, payload?: { namespace?: string }) => {
+  if (!turboMemory) {
+    return {
+      ok: false,
+      reason: 'memory_not_initialized'
+    };
+  }
+
+  const namespace = String(payload?.namespace ?? '').trim();
+  if (!namespace) {
+    return {
+      ok: false,
+      reason: 'namespace_required'
+    };
+  }
+
+  const result = await turboMemory.clearNamespace(namespace);
+  return {
+    ok: true,
+    ...result
+  };
 });
 
 ipcMain.handle('terminal:send-input', async (_event, payload: { text: string }) => {
@@ -282,7 +374,38 @@ ipcMain.handle('orch:run', async (event, payload: { plan: OrchestrationPlan; pro
 
   const run = await runOrchestration(payload.plan ?? defaultPlan, payload.prompt, message => {
     event.sender.send('orch:event', message);
-  }, runtimeContext(event.sender, 'orch:event'));
+  }, runtimeContext(event.sender, 'orch:event'), {
+    retrieve: async (config, query, stepName) => {
+      if (!turboMemory) {
+        return [];
+      }
+      const items = await turboMemory.retrieve(config, query, {
+        namespace: memoryNamespace('orchestration', selectedWorkspaceDir, config.model),
+        k: 8
+      });
+      event.sender.send('orch:event', `[memory] ${stepName} retrieved ${items.length} memory item(s).`);
+      return items;
+    },
+    store: async (config, text, stepName) => {
+      if (!turboMemory) {
+        return;
+      }
+      await turboMemory.store(
+        config,
+        [
+          {
+            text: text.slice(0, 7000),
+            source: `orchestration:${stepName}`,
+            metadata: { workspaceDir: selectedWorkspaceDir }
+          }
+        ],
+        {
+          namespace: memoryNamespace('orchestration', selectedWorkspaceDir, config.model)
+        }
+      );
+      event.sender.send('orch:event', `[memory] ${stepName} stored output in TurboVec memory.`);
+    }
+  });
 
   return { output: run.output };
 });

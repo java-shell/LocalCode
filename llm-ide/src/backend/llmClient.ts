@@ -158,6 +158,10 @@ export async function chatWithTools(
 
   function intentSummary(name: string, args: Record<string, unknown>): string {
     switch (name) {
+      case 'browser_fetch':
+        return `fetch webpage ${String(args.url ?? '')}`;
+      case 'list_repo_tree':
+        return 'list full repository tree';
       case 'list_dir':
         return `list directory ${String(args.path ?? '.')}`;
       case 'file_search':

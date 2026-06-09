@@ -1,6 +1,7 @@
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import simpleGit from 'simple-git';
+import axios from 'axios';
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import { ToolDefinition } from '../shared/types';
 
@@ -72,6 +73,37 @@ const mutatingTools = new Set([
 ]);
 
 export const toolDefinitions: ToolDefinition[] = [
+  {
+    type: 'function',
+    function: {
+      name: 'browser_fetch',
+      description: 'Fetch a web page and return title, text content, and links for model browsing.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string' },
+          maxChars: { type: 'number' }
+        },
+        required: ['url']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_repo_tree',
+      description:
+        'Return a full repository directory tree as text (tracked files and optional untracked files).',
+      parameters: {
+        type: 'object',
+        properties: {
+          scope: scopeProperty,
+          includeUntracked: { type: 'boolean' },
+          maxEntries: { type: 'number' }
+        }
+      }
+    }
+  },
   {
     type: 'function',
     function: {
@@ -382,6 +414,184 @@ async function listDir(args: Record<string, unknown>, context?: RuntimeContext) 
   return entries.map(entry => ({ name: entry.name, type: entry.isDirectory() ? 'dir' : 'file' }));
 }
 
+async function browserFetch(args: Record<string, unknown>) {
+  const rawUrl = String(args.url ?? '').trim();
+  if (!rawUrl) {
+    throw new Error('url is required');
+  }
+
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error('url must be a valid absolute URL.');
+  }
+
+  if (!/^https?:$/.test(url.protocol)) {
+    throw new Error('Only http and https URLs are supported.');
+  }
+
+  const maxChars = Math.max(500, Math.min(200000, Number(args.maxChars ?? 12000)));
+  const response = await axios.get<string>(url.toString(), {
+    responseType: 'text',
+    timeout: 15000,
+    maxContentLength: 2_000_000,
+    validateStatus: () => true
+  });
+
+  const html = typeof response.data === 'string' ? response.data : String(response.data ?? '');
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const title = (titleMatch?.[1] ?? '').replace(/\s+/g, ' ').trim();
+  const textContent = html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const links = Array.from(html.matchAll(/href=["']([^"']+)["']/gi))
+    .map(match => match[1])
+    .filter(value => value.startsWith('http://') || value.startsWith('https://') || value.startsWith('/'))
+    .slice(0, 60);
+
+  return {
+    url: url.toString(),
+    status: response.status,
+    title,
+    content: textContent.slice(0, maxChars),
+    truncated: textContent.length > maxChars,
+    links
+  };
+}
+
+function renderTreeFromFilePaths(paths: string[], rootLabel: string): string {
+  interface TreeNode {
+    children: Map<string, TreeNode>;
+    isFile: boolean;
+  }
+
+  const root: TreeNode = { children: new Map(), isFile: false };
+
+  for (const rawPath of paths) {
+    const normalized = rawPath.replace(/\\/g, '/').replace(/^\.\//, '').trim();
+    if (!normalized) {
+      continue;
+    }
+
+    const parts = normalized.split('/').filter(Boolean);
+    let current = root;
+
+    for (let i = 0; i < parts.length; i += 1) {
+      const part = parts[i];
+      const isLeaf = i === parts.length - 1;
+      let next = current.children.get(part);
+      if (!next) {
+        next = { children: new Map(), isFile: isLeaf };
+        current.children.set(part, next);
+      }
+      if (isLeaf) {
+        next.isFile = true;
+      }
+      current = next;
+    }
+  }
+
+  function sortedEntries(node: TreeNode): Array<[string, TreeNode]> {
+    return Array.from(node.children.entries()).sort((a, b) => {
+      const aDir = a[1].children.size > 0 && !a[1].isFile;
+      const bDir = b[1].children.size > 0 && !b[1].isFile;
+      if (aDir !== bDir) {
+        return aDir ? -1 : 1;
+      }
+      return a[0].localeCompare(b[0]);
+    });
+  }
+
+  const lines: string[] = [rootLabel];
+
+  function walk(node: TreeNode, prefix: string): void {
+    const entries = sortedEntries(node);
+    entries.forEach(([name, child], index) => {
+      const isLast = index === entries.length - 1;
+      const connector = isLast ? '`-- ' : '|-- ';
+      const isDir = child.children.size > 0 && !child.isFile;
+      lines.push(`${prefix}${connector}${name}${isDir ? '/' : ''}`);
+      if (isDir) {
+        walk(child, `${prefix}${isLast ? '    ' : '|   '}`);
+      }
+    });
+  }
+
+  walk(root, '');
+  return lines.join('\n');
+}
+
+async function listRepoTree(args: Record<string, unknown>, context?: RuntimeContext) {
+  const scope = parseScope(args);
+  const base = scopeBaseDir(scope, context);
+  const includeUntracked = Boolean(args.includeUntracked ?? true);
+  const maxEntries = Math.max(200, Math.min(100000, Number(args.maxEntries ?? 30000)));
+
+  try {
+    const git = simpleGit(base);
+    const isRepo = await git.checkIsRepo();
+    if (isRepo) {
+      const trackedRaw = await git.raw(['ls-files']);
+      const tracked = trackedRaw.split(/\r?\n/).filter(Boolean);
+
+      const untracked = includeUntracked
+        ? (await git.raw(['ls-files', '--others', '--exclude-standard'])).split(/\r?\n/).filter(Boolean)
+        : [];
+
+      const files = Array.from(new Set([...tracked, ...untracked])).sort((a, b) => a.localeCompare(b));
+      const limited = files.slice(0, maxEntries);
+
+      return {
+        scope,
+        root: path.basename(base),
+        fileCount: files.length,
+        truncated: files.length > limited.length,
+        tree: renderTreeFromFilePaths(limited, path.basename(base) || '.')
+      };
+    }
+  } catch {
+    // Fallback to filesystem traversal below when git metadata is unavailable.
+  }
+
+  const files: string[] = [];
+  async function walk(dir: string): Promise<void> {
+    if (files.length >= maxEntries) {
+      return;
+    }
+
+    const entries = await fs.readdir(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === '.git') {
+        continue;
+      }
+
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full);
+      } else {
+        files.push(path.relative(base, full).replace(/\\/g, '/'));
+        if (files.length >= maxEntries) {
+          return;
+        }
+      }
+    }
+  }
+
+  await walk(base);
+  return {
+    scope,
+    root: path.basename(base),
+    fileCount: files.length,
+    truncated: files.length >= maxEntries,
+    tree: renderTreeFromFilePaths(files.sort((a, b) => a.localeCompare(b)), path.basename(base) || '.')
+  };
+}
+
 async function fileSearch(args: Record<string, unknown>, context?: RuntimeContext) {
   const scope = parseScope(args);
   const base = scopeBaseDir(scope, context);
@@ -626,8 +836,22 @@ async function runTerminalCommand(args: Record<string, unknown>, context?: Runti
   const scopeBase = scopeBaseDir(scope, context);
   const cwd = args.cwd ? resolveScopedPath(String(args.cwd), scope, context) : scopeBase;
   const timeoutMs = Math.max(1000, Math.min(120000, Number(args.timeoutMs ?? 30000)));
-  const shell = process.env.SHELL || '/bin/zsh';
+  const shell = process.env.SHELL || (process.platform === 'win32' ? 'cmd.exe' : '/bin/sh');
   const terminalCwd = path.relative(scopeBase, cwd) || '.';
+
+  // Validate the cwd exists before spawning — Node.js reports ENOENT on the
+  // shell binary when the cwd is missing, which is very confusing to debug.
+  if (!(await pathExists(cwd))) {
+    const errMsg = `Directory does not exist: ${cwd}`;
+    context?.onTerminalEvent?.({
+      type: 'start', command, cwd: terminalCwd
+    });
+    context?.onTerminalOutput?.({ source: 'stderr', text: errMsg + '\n' });
+    context?.onTerminalEvent?.({
+      type: 'end', command, cwd: terminalCwd, code: 1, signal: null
+    });
+    return { command, scope, cwd: terminalCwd, success: false, code: 1, signal: null, stdout: '', stderr: errMsg };
+  }
 
   context?.onTerminalEvent?.({
     type: 'start',
@@ -713,7 +937,10 @@ async function runTerminalCommand(args: Record<string, unknown>, context?: Runti
 
     child.on('error', err => {
       clearTimeout(timeoutHandle);
-      finish({ success: false, code: null, signal: null, stderrExtra: err.message });
+      const detail = (err as NodeJS.ErrnoException).code === 'ENOENT'
+        ? `${err.message} (shell: ${shell}, cwd: ${cwd})`
+        : err.message;
+      finish({ success: false, code: null, signal: null, stderrExtra: detail });
     });
 
     child.on('close', (code, signal) => {
@@ -730,6 +957,10 @@ export async function executeTool(name: string, args: unknown, context?: Runtime
   switch (name) {
     case 'list_dir':
       return listDir(safeArgs, context);
+    case 'browser_fetch':
+      return browserFetch(safeArgs);
+    case 'list_repo_tree':
+      return listRepoTree(safeArgs, context);
     case 'file_search':
       return fileSearch(safeArgs, context);
     case 'read_file':

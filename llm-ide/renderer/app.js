@@ -115,14 +115,21 @@ function inferLanguageFromPath(filePath) {
 function setActiveTab(which) {
   const chatTab = document.getElementById('chatTab');
   const orchTab = document.getElementById('orchTab');
+  const diagTab = document.getElementById('diagTab');
   const chatView = document.getElementById('chatView');
   const orchView = document.getElementById('orchView');
+  const diagView = document.getElementById('diagView');
 
   const chatOn = which === 'chat';
+  const orchOn = which === 'orchestration';
+  const diagOn = which === 'diagnostics';
+
   chatTab.classList.toggle('active', chatOn);
-  orchTab.classList.toggle('active', !chatOn);
+  orchTab.classList.toggle('active', orchOn);
+  diagTab.classList.toggle('active', diagOn);
   chatView.classList.toggle('active', chatOn);
-  orchView.classList.toggle('active', !chatOn);
+  orchView.classList.toggle('active', orchOn);
+  diagView.classList.toggle('active', diagOn);
 }
 
 function appendLog(el, line) {
@@ -669,6 +676,8 @@ async function initChat() {
         },
         maxToolTurns: settingsState.maxToolTurns,
         toolNames: [
+          'browser_fetch',
+          'list_repo_tree',
           'list_dir',
           'file_search',
           'read_file',
@@ -723,6 +732,8 @@ async function initOrchestration() {
   const outputEl = document.getElementById('orchOutput');
 
   const availableTools = [
+    'browser_fetch',
+    'list_repo_tree',
     'list_dir',
     'file_search',
     'read_file',
@@ -749,7 +760,10 @@ async function initOrchestration() {
   };
 
   function defaultTools() {
-    return availableTools.map(name => ({ name, enabled: ['list_dir', 'read_file', 'grep_search'].includes(name) }));
+    return availableTools.map(name => ({
+      name,
+      enabled: ['list_repo_tree', 'list_dir', 'read_file', 'grep_search'].includes(name)
+    }));
   }
 
   function makeStep(index) {
@@ -1168,10 +1182,152 @@ async function initWorkspaceTree() {
   await reloadTree();
 }
 
+function bytesToHuman(size) {
+  const value = Number(size || 0);
+  if (!Number.isFinite(value) || value <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let idx = 0;
+  let current = value;
+  while (current >= 1024 && idx < units.length - 1) {
+    current /= 1024;
+    idx += 1;
+  }
+  return `${current.toFixed(current >= 10 || idx === 0 ? 0 : 1)} ${units[idx]}`;
+}
+
+async function initDiagnostics() {
+  const status = document.getElementById('diagStatus');
+  const summary = document.getElementById('diagSummary');
+  const namespaces = document.getElementById('diagNamespaces');
+  const rawEl = document.getElementById('diagRaw');
+  const refreshBtn = document.getElementById('diagRefresh');
+  const copyBtn = document.getElementById('diagCopy');
+  const namespaceSelect = document.getElementById('diagNamespaceSelect');
+  const clearNamespaceBtn = document.getElementById('diagClearNamespace');
+  const modelEl = document.getElementById('chatModel');
+
+  let lastPayload = null;
+
+  function renderDiagnostics(payload) {
+    lastPayload = payload;
+    const healthOk = Boolean(payload?.health?.ok);
+    status.textContent = healthOk ? 'TurboVec bridge healthy.' : 'TurboVec bridge has issues.';
+
+    const totals = payload?.totals || {};
+    const lines = [
+      `Python: ${payload?.pythonExecutable || 'unknown'}`,
+      `Bridge: ${payload?.bridgeScriptPath || 'unknown'}`,
+      `Memory Root: ${payload?.memoryRoot || 'unknown'}`,
+      `Namespaces: ${totals.namespaces || 0}`,
+      `Records: ${totals.records || 0}`,
+      `Index Bytes: ${bytesToHuman(totals.indexBytes || 0)}`,
+      `Metadata Bytes: ${bytesToHuman(totals.metadataBytes || 0)}`,
+      `NumPy: ${payload?.health?.numpyVersion || 'n/a'}`,
+      `TurboVec: ${payload?.health?.turbovecVersion || 'n/a'}`
+    ];
+    if (payload?.health?.error) {
+      lines.push(`Health Error: ${payload.health.error}`);
+    }
+    summary.textContent = lines.join('\n');
+
+    const ns = Array.isArray(payload?.namespaces) ? payload.namespaces : [];
+    namespaceSelect.innerHTML = '';
+    if (!ns.length) {
+      const emptyOpt = document.createElement('option');
+      emptyOpt.value = '';
+      emptyOpt.textContent = 'No namespaces available';
+      namespaceSelect.appendChild(emptyOpt);
+      namespaceSelect.disabled = true;
+      clearNamespaceBtn.disabled = true;
+    } else {
+      const chooseOpt = document.createElement('option');
+      chooseOpt.value = '';
+      chooseOpt.textContent = 'Select namespace...';
+      namespaceSelect.appendChild(chooseOpt);
+
+      for (const item of ns) {
+        const option = document.createElement('option');
+        option.value = item.namespace;
+        option.textContent = item.namespace;
+        namespaceSelect.appendChild(option);
+      }
+      namespaceSelect.disabled = false;
+      clearNamespaceBtn.disabled = false;
+    }
+
+    if (!ns.length) {
+      namespaces.textContent = 'No memory namespaces found for current workspace/model filter yet.';
+    } else {
+      namespaces.textContent = ns.map(item => {
+        const updated = item.updatedAt ? new Date(item.updatedAt).toLocaleString() : 'never';
+        return [
+          `${item.namespace}`,
+          `  records=${item.records}`,
+          `  index=${bytesToHuman(item.indexBytes)}`,
+          `  metadata=${bytesToHuman(item.metadataBytes)}`,
+          `  updated=${updated}`
+        ].join('\n');
+      }).join('\n\n');
+    }
+
+    rawEl.textContent = JSON.stringify(payload || {}, null, 2);
+  }
+
+  async function refreshDiagnostics() {
+    status.textContent = 'Loading diagnostics...';
+    try {
+      const payload = await window.llmIde.getMemoryDiagnostics({
+        model: modelEl.value || settingsState.model
+      });
+      renderDiagnostics(payload);
+    } catch (error) {
+      status.textContent = 'Failed to load diagnostics.';
+      rawEl.textContent = String(error instanceof Error ? error.stack || error.message : error);
+    }
+  }
+
+  refreshBtn.addEventListener('click', refreshDiagnostics);
+  copyBtn.addEventListener('click', async () => {
+    if (!lastPayload) {
+      return;
+    }
+    await navigator.clipboard.writeText(JSON.stringify(lastPayload, null, 2));
+    status.textContent = 'Diagnostics JSON copied to clipboard.';
+  });
+
+  clearNamespaceBtn.addEventListener('click', async () => {
+    const namespace = namespaceSelect.value;
+    if (!namespace) {
+      status.textContent = 'Select a namespace to clear.';
+      return;
+    }
+
+    const confirmed = window.confirm(`Clear namespace ${namespace}? This action cannot be undone.`);
+    if (!confirmed) {
+      return;
+    }
+
+    status.textContent = `Clearing namespace ${namespace}...`;
+    try {
+      const result = await window.llmIde.clearMemoryNamespace({ namespace });
+      const cleared = Boolean(result?.cleared);
+      status.textContent = cleared
+        ? `Namespace ${namespace} cleared.`
+        : `Namespace ${namespace} not found.`;
+      await refreshDiagnostics();
+    } catch (error) {
+      status.textContent = `Failed to clear namespace: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  });
+
+  await refreshDiagnostics();
+}
+
 async function main() {
   loadSettings();
   document.getElementById('chatTab').addEventListener('click', () => setActiveTab('chat'));
   document.getElementById('orchTab').addEventListener('click', () => setActiveTab('orchestration'));
+  document.getElementById('diagTab').addEventListener('click', () => setActiveTab('diagnostics'));
   document.getElementById('openSample').addEventListener('click', () => {
     openScratchTab(
       "// Sample file\nexport async function run() {\n  return 'Edit code here with Monaco and ask the LLM to help.';\n}\n"
@@ -1191,6 +1347,7 @@ async function main() {
   await initWorkspaceTree();
   await initChat();
   await initOrchestration();
+  await initDiagnostics();
 }
 
 main().catch(error => {

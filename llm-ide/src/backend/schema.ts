@@ -15,6 +15,8 @@ export const defaultPlan: OrchestrationPlan = {
       temperature: 0.2,
       maxTokens: 1200,
       tools: [
+        { name: 'browser_fetch', enabled: true },
+        { name: 'list_repo_tree', enabled: true },
         { name: 'list_dir', enabled: true },
         { name: 'read_file', enabled: true },
         { name: 'grep_search', enabled: true },
@@ -33,6 +35,8 @@ export const defaultPlan: OrchestrationPlan = {
       temperature: 0.1,
       maxTokens: 2200,
       tools: [
+        { name: 'browser_fetch', enabled: true },
+        { name: 'list_repo_tree', enabled: true },
         { name: 'file_search', enabled: true },
         { name: 'read_file', enabled: true },
         { name: 'create_file', enabled: true },

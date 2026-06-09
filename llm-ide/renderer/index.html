@@ -63,6 +63,7 @@
         <div class="tabs">
           <button id="chatTab" class="tab active">Chat</button>
           <button id="orchTab" class="tab">Orchestration</button>
+          <button id="diagTab" class="tab">Diagnostics</button>
         </div>
 
         <section id="chatView" class="view active">
@@ -109,6 +110,24 @@
           <div id="orchEvents" class="log"></div>
           <label class="label">Run Output</label>
           <div id="orchOutput" class="log"></div>
+        </section>
+
+        <section id="diagView" class="view">
+          <div id="diagStatus" class="status">TurboVec diagnostics not loaded.</div>
+          <div class="actions actions-two">
+            <button id="diagRefresh" type="button">Refresh</button>
+            <button id="diagCopy" type="button">Copy JSON</button>
+          </div>
+          <label class="label" for="diagNamespaceSelect">Clear Namespace</label>
+          <div class="row-inline">
+            <select id="diagNamespaceSelect"></select>
+            <button id="diagClearNamespace" type="button">Clear</button>
+          </div>
+          <div id="diagSummary" class="diag-summary"></div>
+          <label class="label">Namespace Details</label>
+          <div id="diagNamespaces" class="log"></div>
+          <label class="label">Raw Diagnostics</label>
+          <pre id="diagRaw" class="diag-raw"></pre>
         </section>
       </aside>
     </main>

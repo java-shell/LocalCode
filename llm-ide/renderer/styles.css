@@ -58,6 +58,7 @@ body {
 .workspace {
   display: grid;
   grid-template-columns: minmax(240px, 280px) minmax(0, 1fr) minmax(360px, 440px);
+  grid-template-rows: 1fr;
   min-height: 0;
   overflow: hidden;
 }
@@ -280,8 +281,9 @@ body {
 }
 
 #chatView.view.active {
-  grid-template-rows: auto minmax(220px, 1fr) auto auto auto auto;
-  align-content: stretch;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 #orchView.view.active {
@@ -298,6 +300,11 @@ select,
 textarea,
 button {
   font-family: inherit;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 input,
@@ -411,14 +418,21 @@ button {
   gap: 8px;
 }
 
+.actions-two {
+  grid-template-columns: repeat(2, 1fr);
+}
+
 .status {
   color: var(--muted);
   font-size: 13px;
 }
 
-.chat-log {
-  min-height: 220px;
+#chatConversation.chat-log {
+  flex: 1 1 0;
+  min-height: 100px;
   max-height: none;
+  height: auto;
+  overflow: auto;
 }
 
 .chat-settings-toggle {
@@ -565,6 +579,30 @@ button {
 
 .assistant-markdown a {
   color: #61d5ff;
+}
+
+.diag-summary {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(6, 12, 22, 0.5);
+  padding: 10px;
+  white-space: pre-wrap;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.diag-raw {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(6, 12, 22, 0.5);
+  padding: 10px;
+  margin: 0;
+  min-height: 140px;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  line-height: 1.35;
+  font-size: 12px;
 }
 
 @media (max-width: 1100px) {
