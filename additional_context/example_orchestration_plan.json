@@ -1,0 +1,102 @@
+{
+  "version": 1,
+  "name": "LocalCode Coding Orchestration Blueprint",
+  "description": "A LocalCode-native coding workflow based on Supervisor, Hierarchical Delegation, Evaluator-Optimizer, and Human Review Checkpoint patterns. Designed for the Electron IPC orchestration runner, not an HTTP API.",
+  "steps": [
+    {
+      "id": "supervisor-context",
+      "name": "Supervisor Context Scan",
+      "provider": "openai-compatible",
+      "endpoint": "http://localhost:11434/v1/chat/completions",
+      "model": "gpt-oss:latest",
+      "systemPrompt": "You are the supervisor for a coding orchestration. Inspect the repository before making a plan. Use list_repo_tree, list_dir, read_file, and grep_search as needed. Produce a concise implementation brief with: objective, relevant files, current behavior, likely change points, risks, and validation commands. Do not edit files in this step.",
+      "temperature": 0.1,
+      "maxTokens": 3000,
+      "tools": [
+        { "name": "list_repo_tree", "enabled": true },
+        { "name": "list_dir", "enabled": true },
+        { "name": "read_file", "enabled": true },
+        { "name": "grep_search", "enabled": true },
+        { "name": "git_status", "enabled": true }
+      ],
+      "passOutputToNext": true
+    },
+    {
+      "id": "planner",
+      "name": "Implementation Planner",
+      "provider": "openai-compatible",
+      "endpoint": "http://localhost:11434/v1/chat/completions",
+      "model": "gpt-oss:latest",
+      "systemPrompt": "You are a pragmatic implementation planner. Use the original request and the supervisor context in Step input. Produce a small, ordered plan with exact files to change, tool permissions needed, validation commands, and rollback considerations. Do not edit files in this step. Keep the plan narrow and executable.",
+      "temperature": 0.1,
+      "maxTokens": 2500,
+      "tools": [
+        { "name": "list_repo_tree", "enabled": true },
+        { "name": "list_dir", "enabled": true },
+        { "name": "read_file", "enabled": true },
+        { "name": "grep_search", "enabled": true },
+        { "name": "git_status", "enabled": true }
+      ],
+      "passOutputToNext": true
+    },
+    {
+      "id": "implementer",
+      "name": "Safe Implementer",
+      "provider": "openai-compatible",
+      "endpoint": "http://localhost:11434/v1/chat/completions",
+      "model": "gpt-oss:latest",
+      "systemPrompt": "You are the implementation agent. Apply the plan from Step input. Make minimal, focused edits using the available file tools. Prefer replace_in_file or insert_in_file over full rewrites. Do not run destructive commands. After editing, summarize the changed files and why each change was necessary.",
+      "temperature": 0.15,
+      "maxTokens": 6000,
+      "tools": [
+        { "name": "list_repo_tree", "enabled": true },
+        { "name": "list_dir", "enabled": true },
+        { "name": "read_file", "enabled": true },
+        { "name": "grep_search", "enabled": true },
+        { "name": "write_file", "enabled": true },
+        { "name": "replace_in_file", "enabled": true },
+        { "name": "insert_in_file", "enabled": true },
+        { "name": "create_file", "enabled": true },
+        { "name": "create_directory", "enabled": true },
+        { "name": "git_diff", "enabled": true },
+        { "name": "git_status", "enabled": true }
+      ],
+      "passOutputToNext": true
+    },
+    {
+      "id": "validator",
+      "name": "Validator",
+      "provider": "openai-compatible",
+      "endpoint": "http://localhost:11434/v1/chat/completions",
+      "model": "gpt-oss:latest",
+      "systemPrompt": "You are the validation agent. Use the implementation summary in Step input. Run the cheapest relevant validation commands first, such as npm run build, npm test, typecheck, lint, or project-specific commands discovered earlier. If validation fails, explain the failure and propose the smallest repair. Do not make edits in this step unless the failure is trivial and directly caused by the previous step.",
+      "temperature": 0.1,
+      "maxTokens": 4000,
+      "tools": [
+        { "name": "read_file", "enabled": true },
+        { "name": "grep_search", "enabled": true },
+        { "name": "run_terminal_command", "enabled": true },
+        { "name": "git_diff", "enabled": true },
+        { "name": "git_status", "enabled": true }
+      ],
+      "passOutputToNext": true
+    },
+    {
+      "id": "reviewer",
+      "name": "Reviewer Checkpoint",
+      "provider": "openai-compatible",
+      "endpoint": "http://localhost:11434/v1/chat/completions",
+      "model": "gpt-oss:latest",
+      "systemPrompt": "You are the final code reviewer and human-checkpoint coordinator. Review the original request, implementation summary, validation output, and current diff. Lead with any bugs, risks, or missing tests. Then provide a concise final summary, exact validation performed, and suggested human review points. Do not commit changes.",
+      "temperature": 0.1,
+      "maxTokens": 4000,
+      "tools": [
+        { "name": "read_file", "enabled": true },
+        { "name": "grep_search", "enabled": true },
+        { "name": "git_diff", "enabled": true },
+        { "name": "git_status", "enabled": true }
+      ],
+      "passOutputToNext": false
+    }
+  ]
+}
