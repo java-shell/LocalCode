@@ -21,6 +21,46 @@ interface ModelsResponse {
   }>;
 }
 
+function summarizeResponseData(value: unknown): string {
+  if (value === undefined || value === null) {
+    return '';
+  }
+
+  if (typeof value === 'string') {
+    return value.slice(0, 800);
+  }
+
+  try {
+    return JSON.stringify(value).slice(0, 800);
+  } catch {
+    return String(value).slice(0, 800);
+  }
+}
+
+function formatAxiosFailure(error: unknown, context: { operation: string; endpoint: string; model?: string }): Error {
+  if (axios.isAxiosError(error) && error.code === 'ERR_CANCELED') {
+    return new Error(`${context.operation} canceled`);
+  }
+
+  if (!axios.isAxiosError(error)) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+
+  const status = error.response?.status;
+  const statusText = error.response?.statusText;
+  const responseSummary = summarizeResponseData(error.response?.data);
+  const messageParts = [
+    `${context.operation} failed`,
+    `endpoint=${context.endpoint}`,
+    context.model ? `model=${context.model}` : '',
+    status ? `status=${status}${statusText ? ` ${statusText}` : ''}` : '',
+    responseSummary ? `response=${responseSummary}` : '',
+    !status && error.message ? `error=${error.message}` : ''
+  ].filter(Boolean);
+
+  return new Error(messageParts.join(' | '));
+}
+
 function deriveModelsEndpoint(chatEndpoint: string): string {
   const normalized = chatEndpoint.trim();
   if (!normalized) {
@@ -77,19 +117,30 @@ function payloadBase(config: LLMConfig, messages: ChatMessage[]): Record<string,
 export async function streamChat(
   config: LLMConfig,
   messages: ChatMessage[],
-  onToken: (token: string) => void
+  onToken: (token: string) => void,
+  signal?: AbortSignal
 ): Promise<string> {
-  const response = await axios.post(
-    config.endpoint,
-    {
-      ...payloadBase(config, messages),
-      stream: true
-    },
-    {
-      headers: { ...buildHeaders(config), Accept: 'text/event-stream' },
-      responseType: 'stream'
-    }
-  );
+  let response;
+  try {
+    response = await axios.post(
+      config.endpoint,
+      {
+        ...payloadBase(config, messages),
+        stream: true
+      },
+      {
+        headers: { ...buildHeaders(config), Accept: 'text/event-stream' },
+        responseType: 'stream',
+        signal
+      }
+    );
+  } catch (error) {
+    throw formatAxiosFailure(error, {
+      operation: 'Streaming chat request',
+      endpoint: config.endpoint,
+      model: config.model
+    });
+  }
 
   return await new Promise<string>((resolve, reject) => {
     let total = '';
@@ -137,7 +188,12 @@ export async function listModels(config: Pick<LLMConfig, 'endpoint' | 'apiKey'>)
     headers.Authorization = `Bearer ${config.apiKey}`;
   }
 
-  const response = await axios.get<ModelsResponse>(endpoint, { headers });
+  let response;
+  try {
+    response = await axios.get<ModelsResponse>(endpoint, { headers });
+  } catch (error) {
+    throw formatAxiosFailure(error, { operation: 'Model listing request', endpoint });
+  }
   const models = (response.data?.data ?? [])
     .map(item => item.id)
     .filter((value): value is string => Boolean(value));
@@ -151,7 +207,8 @@ export async function chatWithTools(
   tools: ToolDefinition[],
   executeTool: (name: string, args: unknown) => Promise<unknown>,
   onEvent?: (message: string) => void,
-  maxToolTurns = 40
+  maxToolTurns = 40,
+  signal?: AbortSignal
 ): Promise<string> {
   const messages = [...initialMessages];
   const maxTurns = Math.max(1, Math.min(200, Math.floor(maxToolTurns || 40)));
@@ -160,6 +217,8 @@ export async function chatWithTools(
     switch (name) {
       case 'browser_fetch':
         return `fetch webpage ${String(args.url ?? '')}`;
+      case 'web_search':
+        return `search web for ${String(args.query ?? '')}`;
       case 'list_repo_tree':
         return 'list full repository tree';
       case 'list_dir':
@@ -207,11 +266,22 @@ export async function chatWithTools(
     if (tools.length > 0) {
       payload.tools = tools;
       payload.tool_choice = 'auto';
+      payload.parallel_tool_calls = false;
     }
 
-    const response = await axios.post<CompletionResponse>(config.endpoint, payload, {
-      headers: buildHeaders(config)
-    });
+    let response;
+    try {
+      response = await axios.post<CompletionResponse>(config.endpoint, payload, {
+        headers: buildHeaders(config),
+        signal
+      });
+    } catch (error) {
+      throw formatAxiosFailure(error, {
+        operation: 'Chat completion request',
+        endpoint: config.endpoint,
+        model: config.model
+      });
+    }
 
     const assistant = response.data.choices?.[0]?.message;
     if (!assistant) {

@@ -91,6 +91,21 @@ export const toolDefinitions: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'web_search',
+      description: 'Search the web using DuckDuckGo and return top organic results without requiring an API key.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string' },
+          maxResults: { type: 'number' }
+        },
+        required: ['query']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'list_repo_tree',
       description:
         'Return a full repository directory tree as text (tracked files and optional untracked files).',
@@ -461,6 +476,61 @@ async function browserFetch(args: Record<string, unknown>) {
     content: textContent.slice(0, maxChars),
     truncated: textContent.length > maxChars,
     links
+  };
+}
+
+async function webSearch(args: Record<string, unknown>) {
+  const query = String(args.query ?? '').trim();
+  if (!query) {
+    throw new Error('query is required');
+  }
+
+  const maxResults = Math.max(1, Math.min(20, Number(args.maxResults ?? 8)));
+  const response = await axios.get<string>('https://duckduckgo.com/html/', {
+    params: { q: query },
+    responseType: 'text',
+    timeout: 15000,
+    maxContentLength: 2_000_000,
+    validateStatus: () => true,
+    headers: {
+      'User-Agent': 'Mozilla/5.0 (compatible; LocalCode/1.0; +https://duckduckgo.com/)'
+    }
+  });
+
+  if (response.status >= 400) {
+    throw new Error(`DuckDuckGo search failed with status ${response.status}`);
+  }
+
+  const html = typeof response.data === 'string' ? response.data : String(response.data ?? '');
+  const resultRegex = /<a[^>]*class=["'][^"']*result__a[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>[\s\S]*?(?:<a[^>]*class=["'][^"']*result__snippet[^"']*["'][^>]*>([\s\S]*?)<\/a>|<div[^>]*class=["'][^"']*result__snippet[^"']*["'][^>]*>([\s\S]*?)<\/div>)?/gi;
+
+  const stripHtml = (value: string) => value
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  const results: Array<{ title: string; url: string; snippet: string }> = [];
+  let match: RegExpExecArray | null;
+  while ((match = resultRegex.exec(html)) && results.length < maxResults) {
+    const rawUrl = match[1] || '';
+    const title = stripHtml(match[2] || '');
+    const snippet = stripHtml(match[3] || match[4] || '');
+    if (!rawUrl || !title) {
+      continue;
+    }
+    results.push({ title, url: rawUrl, snippet });
+  }
+
+  return {
+    engine: 'duckduckgo',
+    query,
+    resultCount: results.length,
+    results
   };
 }
 
@@ -836,7 +906,15 @@ async function runTerminalCommand(args: Record<string, unknown>, context?: Runti
   const scopeBase = scopeBaseDir(scope, context);
   const cwd = args.cwd ? resolveScopedPath(String(args.cwd), scope, context) : scopeBase;
   const timeoutMs = Math.max(1000, Math.min(120000, Number(args.timeoutMs ?? 30000)));
-  const shell = process.env.SHELL || (process.platform === 'win32' ? 'cmd.exe' : '/bin/sh');
+  const shellConfig = process.platform === 'win32'
+    ? {
+        executable: process.env.ComSpec || 'cmd.exe',
+        args: ['/d', '/s', '/c', command]
+      }
+    : {
+        executable: process.env.SHELL || '/bin/sh',
+        args: ['-lc', command]
+      };
   const terminalCwd = path.relative(scopeBase, cwd) || '.';
 
   // Validate the cwd exists before spawning — Node.js reports ENOENT on the
@@ -869,7 +947,7 @@ async function runTerminalCommand(args: Record<string, unknown>, context?: Runti
     stdout: string;
     stderr: string;
   }>(resolve => {
-    const child = spawn(shell, ['-lc', command], {
+    const child = spawn(shellConfig.executable, shellConfig.args, {
       cwd,
       env: process.env
     });
@@ -938,7 +1016,7 @@ async function runTerminalCommand(args: Record<string, unknown>, context?: Runti
     child.on('error', err => {
       clearTimeout(timeoutHandle);
       const detail = (err as NodeJS.ErrnoException).code === 'ENOENT'
-        ? `${err.message} (shell: ${shell}, cwd: ${cwd})`
+        ? `${err.message} (shell: ${shellConfig.executable}, cwd: ${cwd})`
         : err.message;
       finish({ success: false, code: null, signal: null, stderrExtra: detail });
     });
@@ -959,6 +1037,8 @@ export async function executeTool(name: string, args: unknown, context?: Runtime
       return listDir(safeArgs, context);
     case 'browser_fetch':
       return browserFetch(safeArgs);
+    case 'web_search':
+      return webSearch(safeArgs);
     case 'list_repo_tree':
       return listRepoTree(safeArgs, context);
     case 'file_search':

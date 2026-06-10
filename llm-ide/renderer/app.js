@@ -13,6 +13,7 @@ const settingsState = {
   endpoint: 'http://localhost:11434/v1/chat/completions',
   model: 'llama3',
   apiKey: '',
+  chatMemoryNamespace: '',
   chatSettingsCollapsed: true
 };
 
@@ -77,12 +78,14 @@ function loadSettings() {
 
     settingsState.model = String(parsed.model ?? settingsState.model).trim() || settingsState.model;
     settingsState.apiKey = String(parsed.apiKey ?? settingsState.apiKey);
+    settingsState.chatMemoryNamespace = String(parsed.chatMemoryNamespace ?? settingsState.chatMemoryNamespace).trim();
     settingsState.chatSettingsCollapsed = Boolean(parsed.chatSettingsCollapsed ?? settingsState.chatSettingsCollapsed);
   } catch {
     settingsState.maxToolTurns = 40;
     settingsState.endpoint = 'http://localhost:11434/v1/chat/completions';
     settingsState.model = 'llama3';
     settingsState.apiKey = '';
+    settingsState.chatMemoryNamespace = '';
     settingsState.chatSettingsCollapsed = true;
   }
 }
@@ -522,11 +525,14 @@ async function initChat() {
   const settingsPanel = document.getElementById('chatSettingsPanel');
   const refreshModels = document.getElementById('chatRefreshModels');
   const apiKey = document.getElementById('chatApiKey');
+  const chatMemoryNamespace = document.getElementById('chatMemoryNamespace');
   const prompt = document.getElementById('chatPrompt');
   const send = document.getElementById('chatSend');
+  const stop = document.getElementById('chatStop');
 
   endpoint.value = settingsState.endpoint;
   apiKey.value = settingsState.apiKey;
+  chatMemoryNamespace.value = settingsState.chatMemoryNamespace;
 
   function applyChatSettingsVisibility() {
     settingsPanel.classList.toggle('collapsed', settingsState.chatSettingsCollapsed);
@@ -546,6 +552,13 @@ async function initChat() {
   let assistantRowEl = null;
   let assistantReceivedToken = false;
   let markdownRenderQueued = false;
+  let chatRunning = false;
+
+  function setChatRunning(running) {
+    chatRunning = running;
+    send.disabled = running;
+    stop.disabled = !running;
+  }
 
   function scheduleAssistantMarkdownRender() {
     if (!assistantMarkdownEl || markdownRenderQueued) return;
@@ -639,6 +652,21 @@ async function initChat() {
     settingsState.model = model.value;
     saveSettings();
   });
+  chatMemoryNamespace.addEventListener('change', () => {
+    settingsState.chatMemoryNamespace = chatMemoryNamespace.value.trim();
+    saveSettings();
+  });
+  stop.addEventListener('click', async () => {
+    if (!chatRunning) return;
+    stop.disabled = true;
+    status.textContent = 'Stopping chat...';
+    try {
+      await window.llmIde.stopChat();
+    } catch (error) {
+      status.textContent = `Stop failed: ${error instanceof Error ? error.message : String(error)}`;
+      stop.disabled = false;
+    }
+  });
 
   send.addEventListener('click', async () => {
     const text = prompt.value.trim();
@@ -662,7 +690,7 @@ async function initChat() {
     assistantRow.appendChild(assistantMarkdownEl);
     conversation.appendChild(assistantRow);
     status.textContent = 'Streaming...';
-    send.disabled = true;
+    setChatRunning(true);
 
     try {
       const result = await window.llmIde.chatStream({
@@ -674,9 +702,11 @@ async function initChat() {
           temperature: 0.2,
           maxTokens: 0
         },
+        memoryNamespace: chatMemoryNamespace.value.trim() || undefined,
         maxToolTurns: settingsState.maxToolTurns,
         toolNames: [
           'browser_fetch',
+          'web_search',
           'list_repo_tree',
           'list_dir',
           'file_search',
@@ -706,9 +736,9 @@ async function initChat() {
       status.textContent = 'Done';
     } catch (error) {
       appendLog(conversation, `[error] ${error instanceof Error ? error.message : String(error)}`);
-      status.textContent = 'Error';
+      status.textContent = /canceled/i.test(error instanceof Error ? error.message : String(error)) ? 'Chat stopped' : 'Error';
     } finally {
-      send.disabled = false;
+      setChatRunning(false);
     }
   });
 
@@ -726,13 +756,22 @@ async function initOrchestration() {
   const planEl = document.getElementById('orchPlan');
   const planNameEl = document.getElementById('orchPlanName');
   const planDescriptionEl = document.getElementById('orchPlanDescription');
+  const loopUntilCompleteEl = document.getElementById('orchLoopUntilComplete');
+  const maxLoopsEl = document.getElementById('orchMaxLoops');
+  const completionMarkerEl = document.getElementById('orchCompletionMarker');
   const workflowEl = document.getElementById('orchWorkflow');
   const addStepButton = document.getElementById('orchAddStep');
+  const importButton = document.getElementById('orchImport');
+  const exportButton = document.getElementById('orchExport');
+  const stopButton = document.getElementById('orchStop');
+  const clearOutputLogButton = document.getElementById('orchClearOutputLog');
   const eventsEl = document.getElementById('orchEvents');
   const outputEl = document.getElementById('orchOutput');
+  const outputLogEl = document.getElementById('orchOutputLog');
 
   const availableTools = [
     'browser_fetch',
+    'web_search',
     'list_repo_tree',
     'list_dir',
     'file_search',
@@ -756,8 +795,24 @@ async function initOrchestration() {
     version: 1,
     name: 'Workflow',
     description: 'Generated from workflow builder.',
+    loopUntilComplete: false,
+    maxLoops: 3,
+    completionMarker: 'TASK_COMPLETE',
     steps: []
   };
+  let orchestrationRunning = false;
+
+  function setOrchestrationRunning(running) {
+    orchestrationRunning = running;
+    stopButton.disabled = !running;
+    addStepButton.disabled = running;
+    importButton.disabled = running;
+    exportButton.disabled = running;
+    document.getElementById('orchLoad').disabled = running;
+    document.getElementById('orchValidate').disabled = running;
+    document.getElementById('orchSave').disabled = running;
+    document.getElementById('orchRun').disabled = running;
+  }
 
   function defaultTools() {
     return availableTools.map(name => ({
@@ -804,10 +859,14 @@ async function initOrchestration() {
 
   function normalizePlan(plan) {
     const steps = Array.isArray(plan.steps) ? plan.steps : [];
+    const maxLoops = Math.max(1, Math.min(20, Number(plan.maxLoops ?? 3)));
     return {
       version: 1,
       name: plan.name || 'Workflow',
       description: plan.description || 'Generated from workflow builder.',
+      loopUntilComplete: Boolean(plan.loopUntilComplete),
+      maxLoops,
+      completionMarker: String(plan.completionMarker || 'TASK_COMPLETE').trim() || 'TASK_COMPLETE',
       steps: steps.map((step, index) => normalizeStep(step, index))
     };
   }
@@ -815,7 +874,42 @@ async function initOrchestration() {
   function syncPlanJson() {
     currentPlan.name = planNameEl.value.trim() || 'Workflow';
     currentPlan.description = planDescriptionEl.value.trim() || 'Generated from workflow builder.';
+    currentPlan.loopUntilComplete = Boolean(loopUntilCompleteEl.checked);
+    currentPlan.maxLoops = Math.max(1, Math.min(20, Number(maxLoopsEl.value || 3)));
+    currentPlan.completionMarker = completionMarkerEl.value.trim() || 'TASK_COMPLETE';
     planEl.value = JSON.stringify(currentPlan, null, 2);
+  }
+
+  function renderOutputLogEntry(result, promptText, planSnapshot) {
+    const markerInfo = result.completionMarker
+      ? `marker=${result.completionMarker} completed=${result.completed ? 'yes' : 'no'}`
+      : 'single-pass run';
+    const steps = Array.isArray(result.steps) ? result.steps : [];
+
+    const lines = [
+      `Run @ ${new Date().toLocaleString()}`,
+      `Plan: ${planSnapshot.name}`,
+      `Prompt: ${promptText || '(empty prompt)'}`,
+      `Iterations: ${result.iterations || 1} | ${markerInfo}`,
+      ''
+    ];
+
+    if (!steps.length) {
+      lines.push('(no step output)');
+    } else {
+      for (const step of steps) {
+        lines.push(`Iteration ${step.iteration} | ${step.name} (${step.id})`);
+        lines.push(step.output || '(empty output)');
+        lines.push('');
+      }
+    }
+
+    const block = lines.join('\n').trimEnd();
+    if (outputLogEl.textContent && outputLogEl.textContent.trim()) {
+      outputLogEl.textContent += '\n\n========================================\n\n';
+    }
+    outputLogEl.textContent += block;
+    outputLogEl.scrollTop = outputLogEl.scrollHeight;
   }
 
   function renderWorkflow() {
@@ -864,6 +958,14 @@ async function initOrchestration() {
         renderWorkflow();
       });
 
+      const insertBtn = document.createElement('button');
+      insertBtn.type = 'button';
+      insertBtn.textContent = 'Insert';
+      insertBtn.addEventListener('click', () => {
+        currentPlan.steps.splice(index + 1, 0, makeStep(index + 1));
+        renderWorkflow();
+      });
+
       const deleteBtn = document.createElement('button');
       deleteBtn.type = 'button';
       deleteBtn.textContent = 'Delete';
@@ -874,6 +976,7 @@ async function initOrchestration() {
 
       actions.appendChild(upBtn);
       actions.appendChild(downBtn);
+        actions.appendChild(insertBtn);
       actions.appendChild(deleteBtn);
       header.appendChild(title);
       header.appendChild(actions);
@@ -1021,6 +1124,9 @@ async function initOrchestration() {
     currentPlan = normalizePlan(plan);
     planNameEl.value = currentPlan.name;
     planDescriptionEl.value = currentPlan.description;
+    loopUntilCompleteEl.checked = currentPlan.loopUntilComplete;
+    maxLoopsEl.value = String(currentPlan.maxLoops);
+    completionMarkerEl.value = currentPlan.completionMarker;
     renderWorkflow();
   }
 
@@ -1031,12 +1137,69 @@ async function initOrchestration() {
 
   planNameEl.addEventListener('input', syncPlanJson);
   planDescriptionEl.addEventListener('input', syncPlanJson);
+  loopUntilCompleteEl.addEventListener('change', syncPlanJson);
+  maxLoopsEl.addEventListener('input', syncPlanJson);
+  completionMarkerEl.addEventListener('input', syncPlanJson);
   addStepButton.addEventListener('click', () => {
     currentPlan.steps.push(makeStep(currentPlan.steps.length));
     renderWorkflow();
   });
+  clearOutputLogButton.addEventListener('click', () => {
+    outputLogEl.textContent = '';
+    status.textContent = 'Output log cleared';
+  });
+  stopButton.addEventListener('click', async () => {
+    if (!orchestrationRunning) return;
+    stopButton.disabled = true;
+    status.textContent = 'Stopping orchestration...';
+    try {
+      await window.llmIde.stopOrchestration();
+    } catch (error) {
+      status.textContent = `Stop failed: ${error instanceof Error ? error.message : String(error)}`;
+      stopButton.disabled = false;
+    }
+  });
 
   document.getElementById('orchLoad').addEventListener('click', reload);
+
+  importButton.addEventListener('click', async () => {
+    try {
+      const imported = await window.llmIde.importPlan();
+      if (!imported) {
+        status.textContent = 'Import canceled';
+        return;
+      }
+
+      currentPlan = normalizePlan(imported.plan);
+      planNameEl.value = currentPlan.name;
+      planDescriptionEl.value = currentPlan.description;
+      loopUntilCompleteEl.checked = currentPlan.loopUntilComplete;
+      maxLoopsEl.value = String(currentPlan.maxLoops);
+      completionMarkerEl.value = currentPlan.completionMarker;
+      renderWorkflow();
+
+      const fileName = imported.filePath.split(/[/\\]/).pop() || imported.filePath;
+      status.textContent = `Imported plan: ${fileName}`;
+    } catch (error) {
+      status.textContent = `Import failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  });
+
+  exportButton.addEventListener('click', async () => {
+    try {
+      const parsed = readPlanFromUi();
+      const exported = await window.llmIde.exportPlan(parsed);
+      if (!exported) {
+        status.textContent = 'Export canceled';
+        return;
+      }
+
+      const fileName = exported.filePath.split(/[/\\]/).pop() || exported.filePath;
+      status.textContent = `Exported plan: ${fileName}`;
+    } catch (error) {
+      status.textContent = `Export failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  });
 
   document.getElementById('orchValidate').addEventListener('click', async () => {
     const errors = await window.llmIde.validatePlan(JSON.stringify(readPlanFromUi()));
@@ -1057,15 +1220,21 @@ async function initOrchestration() {
     eventsEl.textContent = '';
     outputEl.textContent = '';
     status.textContent = 'Running orchestration...';
+    setOrchestrationRunning(true);
 
     try {
       const parsed = readPlanFromUi();
-      const result = await window.llmIde.runOrchestration({ plan: parsed, prompt: prompt.value.trim() });
+      const promptText = prompt.value.trim();
+      const result = await window.llmIde.runOrchestration({ plan: parsed, prompt: promptText });
       outputEl.textContent = result.output || '(empty output)';
+      renderOutputLogEntry(result, promptText, parsed);
       status.textContent = 'Run complete';
     } catch (error) {
       outputEl.textContent = error instanceof Error ? error.message : String(error);
-      status.textContent = 'Run failed';
+      status.textContent = /stopped by user|canceled/i.test(error instanceof Error ? error.message : String(error)) ? 'Run stopped' : 'Run failed';
+    }
+    finally {
+      setOrchestrationRunning(false);
     }
   });
 
@@ -1256,7 +1425,7 @@ async function initDiagnostics() {
     }
 
     if (!ns.length) {
-      namespaces.textContent = 'No memory namespaces found for current workspace/model filter yet.';
+      namespaces.textContent = 'No memory namespaces found for current workspace filter yet.';
     } else {
       namespaces.textContent = ns.map(item => {
         const updated = item.updatedAt ? new Date(item.updatedAt).toLocaleString() : 'never';

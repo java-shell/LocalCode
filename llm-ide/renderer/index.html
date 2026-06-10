@@ -80,10 +80,15 @@
             </div>
             <label class="label">API Key (optional)</label>
             <input id="chatApiKey" type="password" placeholder="sk-..." />
+            <label class="label">Memory Namespace (optional)</label>
+            <input id="chatMemoryNamespace" placeholder="Leave blank for model-specific memory" />
           </div>
           <label class="label">Prompt</label>
           <textarea id="chatPrompt" placeholder="Ask for code, analysis, or generation..."></textarea>
-          <button id="chatSend">Send</button>
+          <div class="actions actions-two">
+            <button id="chatSend">Send</button>
+            <button id="chatStop" type="button" disabled>Stop</button>
+          </div>
         </section>
 
         <section id="orchView" class="view">
@@ -92,14 +97,26 @@
           <textarea id="orchPrompt" placeholder="What should this orchestration accomplish?"></textarea>
           <div class="actions">
             <button id="orchLoad">Load</button>
+            <button id="orchImport">Import JSON</button>
+            <button id="orchExport">Export JSON</button>
             <button id="orchValidate">Validate</button>
             <button id="orchSave">Save</button>
             <button id="orchRun">Run</button>
+            <button id="orchStop" type="button" disabled>Stop</button>
           </div>
           <label class="label" for="orchPlanName">Workflow Name</label>
           <input id="orchPlanName" placeholder="Planner -> Coder" />
           <label class="label" for="orchPlanDescription">Workflow Description</label>
           <textarea id="orchPlanDescription" placeholder="Describe what this workflow does"></textarea>
+          <div class="row-inline">
+            <label class="orch-tool-item">
+              <input id="orchLoopUntilComplete" type="checkbox" />
+              Loop Until Complete
+            </label>
+            <input id="orchMaxLoops" type="number" min="1" max="20" step="1" value="3" placeholder="Max loops" />
+          </div>
+          <label class="label" for="orchCompletionMarker">Completion Marker</label>
+          <input id="orchCompletionMarker" placeholder="TASK_COMPLETE" />
           <div class="orch-workflow-header">
             <span class="label">Workflow Steps</span>
             <button id="orchAddStep" type="button">Add Step</button>
@@ -110,6 +127,11 @@
           <div id="orchEvents" class="log"></div>
           <label class="label">Run Output</label>
           <div id="orchOutput" class="log"></div>
+          <div class="actions actions-two">
+            <button id="orchClearOutputLog" type="button">Clear Output Log</button>
+          </div>
+          <label class="label">Orchestration Output Log</label>
+          <div id="orchOutputLog" class="log"></div>
         </section>
 
         <section id="diagView" class="view">

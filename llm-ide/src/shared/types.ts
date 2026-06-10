@@ -29,6 +29,7 @@ export interface ChatStreamRequest {
   prompt: string;
   toolNames?: string[];
   maxToolTurns?: number;
+  memoryNamespace?: string;
 }
 
 export interface ToolPermission {
@@ -54,7 +55,34 @@ export interface OrchestrationPlan {
   version: 1;
   name: string;
   description: string;
+  loopUntilComplete?: boolean;
+  maxLoops?: number;
+  completionMarker?: string;
   steps: OrchestrationStep[];
+}
+
+export interface OrchestrationRunStep {
+  id: string;
+  name: string;
+  output: string;
+  iteration: number;
+}
+
+export interface OrchestrationRunResult {
+  output: string;
+  steps: OrchestrationRunStep[];
+  iterations: number;
+  completed: boolean;
+  completionMarker?: string;
+}
+
+export interface OrchestrationImportResult {
+  plan: OrchestrationPlan;
+  filePath: string;
+}
+
+export interface OrchestrationExportResult {
+  filePath: string;
 }
 
 export interface ToolDefinition {

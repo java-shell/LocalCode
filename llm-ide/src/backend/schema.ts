@@ -4,6 +4,9 @@ export const defaultPlan: OrchestrationPlan = {
   version: 1,
   name: 'Planner -> Coder',
   description: 'Plan, inspect files, then implement with safe tools.',
+  loopUntilComplete: false,
+  maxLoops: 3,
+  completionMarker: 'TASK_COMPLETE',
   steps: [
     {
       id: 'planner',
@@ -77,6 +80,19 @@ export function validatePlan(value: unknown): string[] {
   if (!Array.isArray(plan.steps) || plan.steps.length === 0) {
     errors.push('steps must contain at least one step.');
     return errors;
+  }
+
+  if (plan.loopUntilComplete !== undefined && typeof plan.loopUntilComplete !== 'boolean') {
+    errors.push('loopUntilComplete must be a boolean when provided.');
+  }
+  if (plan.maxLoops !== undefined) {
+    const maxLoops = Number(plan.maxLoops);
+    if (!Number.isInteger(maxLoops) || maxLoops < 1 || maxLoops > 20) {
+      errors.push('maxLoops must be an integer between 1 and 20.');
+    }
+  }
+  if (plan.completionMarker !== undefined && typeof plan.completionMarker !== 'string') {
+    errors.push('completionMarker must be a string when provided.');
   }
 
   for (const [i, step] of plan.steps.entries()) {

@@ -32,6 +32,8 @@ interface MemoryPathPair {
   metaPath: string;
 }
 
+const TARGET_EMBEDDING_DIM = 256;
+
 export interface TurboVecNamespaceDiagnostics {
   namespace: string;
   records: number;
@@ -108,12 +110,30 @@ function fallbackEmbedding(text: string, dim = 256): number[] {
   return vec.map(value => value / norm);
 }
 
+function normalizeEmbeddingDimension(embedding: number[], targetDim = TARGET_EMBEDDING_DIM): number[] {
+  const vec = new Array<number>(targetDim).fill(0);
+  for (let i = 0; i < embedding.length; i += 1) {
+    const value = Number(embedding[i]);
+    if (!Number.isFinite(value)) {
+      continue;
+    }
+    vec[i % targetDim] += value;
+  }
+
+  const norm = Math.sqrt(vec.reduce((sum, value) => sum + value * value, 0)) || 1;
+  return vec.map(value => value / norm);
+}
+
 export class TurboVecMemory {
   private readonly rootDir: string;
   private readonly bridgeScriptPath: string;
   private readonly onEvent?: (event: string) => void;
   private readonly pythonExecutableCandidates: string[];
+  private readonly projectVenvDir: string;
+  private readonly projectVenvPythonCandidates: string[];
   private resolvedPythonExecutable: string | null = null;
+  private bootstrapAttempted = false;
+  private bootstrapInFlight: Promise<void> | null = null;
 
   constructor(rootDir: string, bridgeScriptPath: string, onEvent?: (event: string) => void) {
     this.rootDir = rootDir;
@@ -121,10 +141,24 @@ export class TurboVecMemory {
     this.onEvent = onEvent;
 
     const explicit = process.env.TURBOVEC_PYTHON?.trim();
-    const projectVenvPython = path.resolve(process.cwd(), '.turbovec-venv', 'bin', 'python');
+    this.projectVenvDir = path.resolve(process.cwd(), '.turbovec-venv');
+
+    const projectVenvPythonCandidates = process.platform === 'win32'
+      ? [
+          path.join(this.projectVenvDir, 'Scripts', 'python.exe'),
+          path.join(this.projectVenvDir, 'Scripts', 'python')
+        ]
+      : [
+          path.join(this.projectVenvDir, 'bin', 'python3'),
+          path.join(this.projectVenvDir, 'bin', 'python')
+        ];
+
+    this.projectVenvPythonCandidates = projectVenvPythonCandidates;
+
     const candidates = [
       explicit,
-      projectVenvPython,
+      ...projectVenvPythonCandidates,
+      process.platform === 'win32' ? 'py' : undefined,
       'python3',
       'python',
       '/usr/bin/python3'
@@ -183,12 +217,25 @@ export class TurboVecMemory {
       metadata: doc.metadata ?? {}
     }));
 
-    await this.callBridge(paths, {
+    const payload = {
       action: 'add',
       ids: payloadItems.map(item => item.id),
       vectors,
       items: payloadItems
-    });
+    };
+
+    try {
+      await this.callBridge(paths, payload);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/dim mismatch/i.test(message)) {
+        throw error;
+      }
+
+      this.onEvent?.('[memory] detected legacy TurboVec dimension mismatch; resetting namespace index and retrying.');
+      await this.resetNamespaceIndex(paths);
+      await this.callBridge(paths, payload);
+    }
   }
 
   async diagnostics(namespaceFilter?: string): Promise<TurboVecDiagnostics> {
@@ -289,11 +336,27 @@ export class TurboVecMemory {
       if (!embedding || !embedding.length) {
         throw new Error('Embedding endpoint returned empty embedding.');
       }
-      return embedding;
+      return normalizeEmbeddingDimension(embedding);
     } catch (error) {
       this.onEvent?.(`[memory] embedding fallback used: ${error instanceof Error ? error.message : String(error)}`);
-      return fallbackEmbedding(text);
+      return fallbackEmbedding(text, TARGET_EMBEDDING_DIM);
     }
+  }
+
+  private async resetNamespaceIndex(paths: MemoryPathPair): Promise<void> {
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+
+    const rotate = async (sourcePath: string) => {
+      const exists = await fs.stat(sourcePath).then(() => true).catch(() => false);
+      if (!exists) {
+        return;
+      }
+      const backupPath = `${sourcePath}.bak-${stamp}`;
+      await fs.rename(sourcePath, backupPath);
+    };
+
+    await rotate(paths.indexPath);
+    await rotate(paths.metaPath);
   }
 
   private async nextId(metaPath: string): Promise<number> {
@@ -377,18 +440,150 @@ export class TurboVecMemory {
       }
     }
 
+    try {
+      await this.ensureProjectVenvInitialized();
+    } catch (error) {
+      this.onEvent?.(`[memory] TurboVec venv initialization failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+
+    for (const candidate of this.pythonExecutableCandidates) {
+      const ok = await this.isPythonUsable(candidate);
+      if (ok) {
+        this.resolvedPythonExecutable = candidate;
+        return candidate;
+      }
+    }
+
     this.resolvedPythonExecutable = this.pythonExecutableCandidates[0] || 'python3';
     return this.resolvedPythonExecutable;
   }
 
   private async isPythonUsable(executable: string): Promise<boolean> {
+    if (this.looksLikeFilePath(executable) && !(await this.fileExists(executable))) {
+      return false;
+    }
+
     return await new Promise(resolve => {
-      const child = spawn(executable, ['-c', 'import numpy, turbovec'], {
+      const child = spawn(executable, this.withPythonLauncherArgs(executable, ['-c', 'import numpy, turbovec']), {
         env: process.env
       });
 
       child.on('error', () => resolve(false));
       child.on('close', code => resolve(code === 0));
+    });
+  }
+
+  private async isPythonInterpreter(executable: string): Promise<boolean> {
+    if (this.looksLikeFilePath(executable) && !(await this.fileExists(executable))) {
+      return false;
+    }
+
+    return await new Promise(resolve => {
+      const child = spawn(executable, this.withPythonLauncherArgs(executable, ['-c', 'import sys; print(sys.version)']), {
+        env: process.env
+      });
+      child.on('error', () => resolve(false));
+      child.on('close', code => resolve(code === 0));
+    });
+  }
+
+  private async ensureProjectVenvInitialized(): Promise<void> {
+    if (this.bootstrapAttempted) {
+      await this.bootstrapInFlight;
+      return;
+    }
+
+    this.bootstrapAttempted = true;
+    this.bootstrapInFlight = (async () => {
+      const seedPython = await this.resolveSeedPythonExecutable();
+      if (!seedPython) {
+        throw new Error('No usable Python interpreter found to initialize .turbovec-venv');
+      }
+
+      const preferredVenvPython = this.projectVenvPythonCandidates[0];
+      if (!(await this.fileExists(preferredVenvPython))) {
+        this.onEvent?.('[memory] initializing TurboVec virtual environment...');
+        await this.runProcess(seedPython, this.withPythonLauncherArgs(seedPython, ['-m', 'venv', this.projectVenvDir]));
+      }
+
+      const venvPython = await this.resolveProjectVenvPythonExecutable();
+      if (!venvPython) {
+        throw new Error('TurboVec virtual environment python executable is missing after venv creation');
+      }
+
+      await this.runProcess(venvPython, ['-m', 'pip', 'install', '--upgrade', 'pip']);
+      await this.runProcess(venvPython, ['-m', 'pip', 'install', 'numpy', 'turbovec']);
+    })();
+
+    try {
+      await this.bootstrapInFlight;
+    } finally {
+      this.bootstrapInFlight = null;
+    }
+  }
+
+  private async resolveSeedPythonExecutable(): Promise<string | null> {
+    const explicit = process.env.TURBOVEC_PYTHON?.trim();
+    const candidates = [
+      explicit,
+      process.platform === 'win32' ? 'py' : undefined,
+      'python3',
+      'python',
+      '/usr/bin/python3'
+    ].filter((value): value is string => Boolean(value));
+
+    for (const candidate of Array.from(new Set(candidates))) {
+      if (await this.isPythonInterpreter(candidate)) {
+        return candidate;
+      }
+    }
+
+    return null;
+  }
+
+  private async resolveProjectVenvPythonExecutable(): Promise<string | null> {
+    for (const candidate of this.projectVenvPythonCandidates) {
+      if (await this.fileExists(candidate)) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  private async fileExists(filePath: string): Promise<boolean> {
+    return fs.access(filePath).then(() => true).catch(() => false);
+  }
+
+  private looksLikeFilePath(value: string): boolean {
+    return value.includes('/') || value.includes('\\');
+  }
+
+  private withPythonLauncherArgs(executable: string, args: string[]): string[] {
+    if (process.platform === 'win32' && executable.toLowerCase() === 'py') {
+      return ['-3', ...args];
+    }
+    return args;
+  }
+
+  private async runProcess(executable: string, args: string[]): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(executable, args, {
+        env: process.env
+      });
+
+      let stderr = '';
+      child.stderr.on('data', (chunk: Buffer | string) => {
+        stderr += chunk.toString();
+      });
+
+      child.on('error', err => reject(err));
+      child.on('close', code => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+        reject(new Error(stderr.trim() || `Command failed: ${executable} ${args.join(' ')}`));
+      });
     });
   }
 

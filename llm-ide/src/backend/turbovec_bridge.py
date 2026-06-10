@@ -50,10 +50,20 @@ def read_metadata(meta_path: str) -> Dict[int, Dict[str, Any]]:
 
 
 def append_metadata(meta_path: str, items: List[Dict[str, Any]]) -> None:
+    def sanitize_json_value(value: Any) -> Any:
+        if isinstance(value, str):
+            return value.encode("utf-8", errors="replace").decode("utf-8")
+        if isinstance(value, list):
+            return [sanitize_json_value(item) for item in value]
+        if isinstance(value, dict):
+            return {str(key): sanitize_json_value(item) for key, item in value.items()}
+        return value
+
     ensure_parent(meta_path)
     with open(meta_path, "a", encoding="utf-8") as fh:
         for item in items:
-            fh.write(json.dumps(item, ensure_ascii=False) + "\n")
+            safe_item = sanitize_json_value(item)
+            fh.write(json.dumps(safe_item, ensure_ascii=True) + "\n")
 
 
 def main() -> None:
