@@ -4,16 +4,47 @@
   "version": "0.0.1",
   "main": "./out/main.js",
   "type": "commonjs",
+  "author": "Java-Shell",
+  "desktopName": "LocalCode",
   "scripts": {
     "build": "tsc -p ./",
     "compile": "npm run build",
     "watch": "tsc -w -p ./",
     "start": "electron .",
-    "dev": "npm run build && electron ."
+    "dev": "npm run build && electron .",
+    "dist:linux": "npm run build && electron-builder --linux AppImage"
+  },
+  "build": {
+    "appId": "dev.localcode.llmide",
+    "productName": "LocalCode",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "out/**/*",
+      "renderer/**/*",
+      "src/backend/turbovec_bridge.py",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "src/backend/turbovec_bridge.py"
+    ],
+    "linux": {
+      "target": [
+        "AppImage"
+      ],
+      "category": "Development",
+      "synopsis": "Local LLM IDE",
+      "description": "Standalone local LLM IDE platform",
+      "icon": "build/icons",
+      "syncDesktopName": true
+    }
   },
   "devDependencies": {
     "@types/node": "^20.0.0",
     "electron": "^42.4.0",
+    "electron-builder": "^26.15.2",
     "typescript": "^5.0.0"
   },
   "dependencies": {

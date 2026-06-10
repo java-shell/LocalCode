@@ -1,0 +1,2 @@
+dist/LocalCode-0.0.1-x86_64.AppImage filter=lfs diff=lfs merge=lfs -text
+dist/linux-unpacked/llm-ide filter=lfs diff=lfs merge=lfs -text

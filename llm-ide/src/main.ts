@@ -28,6 +28,18 @@ let activeOrchestrationAbortController: AbortController | null = null;
 const fileWatchRefs = new Map<string, { count: number; listener: (curr: fs.Stats, prev: fs.Stats) => void }>();
 let turboMemory: TurboVecMemory | null = null;
 
+function appResourcePath(...segments: string[]): string {
+  return path.join(app.getAppPath(), ...segments);
+}
+
+function unpackedAppResourcePath(...segments: string[]): string {
+  if (!app.isPackaged) {
+    return appResourcePath(...segments);
+  }
+
+  return path.join(process.resourcesPath, 'app.asar.unpacked', ...segments);
+}
+
 function formatMemoryInjection(items: Array<{ source: string; text: string }>, limits?: { maxItems?: number; maxCharsPerItem?: number; maxTotalChars?: number }): string {
   const maxItems = Math.max(1, Math.min(20, Number(limits?.maxItems ?? 4)));
   const maxCharsPerItem = Math.max(200, Math.min(4000, Number(limits?.maxCharsPerItem ?? 1200)));
@@ -223,12 +235,12 @@ function createWindow() {
     }
   });
 
-  mainWindow.loadFile(path.join(process.cwd(), 'renderer', 'index.html'));
+  mainWindow.loadFile(appResourcePath('renderer', 'index.html'));
 }
 
 app.whenReady().then(() => {
   const memoryRoot = path.join(app.getPath('userData'), 'turbovec-memory');
-  const bridgeScript = path.join(process.cwd(), 'src', 'backend', 'turbovec_bridge.py');
+  const bridgeScript = unpackedAppResourcePath('src', 'backend', 'turbovec_bridge.py');
   turboMemory = new TurboVecMemory(memoryRoot, bridgeScript);
   createWindow();
 

@@ -1,0 +1,23 @@
+directories:
+  output: dist
+  buildResources: build
+appId: dev.localcode.llmide
+productName: LocalCode
+artifactName: ${productName}-${version}-${arch}.${ext}
+files:
+  - filter:
+      - out/**/*
+      - renderer/**/*
+      - src/backend/turbovec_bridge.py
+      - package.json
+asarUnpack:
+  - src/backend/turbovec_bridge.py
+linux:
+  target:
+    - AppImage
+  category: Development
+  synopsis: Local LLM IDE
+  description: Standalone local LLM IDE platform
+  icon: build/icons
+  syncDesktopName: true
+electronVersion: 42.4.0
