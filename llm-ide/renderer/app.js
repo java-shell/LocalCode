@@ -7,6 +7,7 @@ const watchedFilePaths = new Set();
 const externalPromptLocks = new Set();
 let activeEditorKey = null;
 const SETTINGS_STORAGE_KEY = 'localcode.settings';
+const PANEL_SIZES_STORAGE_KEY = 'localcode.panelSizes';
 
 const settingsState = {
   maxToolTurns: 40,
@@ -113,6 +114,129 @@ function inferLanguageFromPath(filePath) {
   if (lower.endsWith('.css')) return 'css';
   if (lower.endsWith('.html')) return 'html';
   return 'plaintext';
+}
+
+function sanitizeMemoryNamespacePart(value) {
+  return String(value ?? '').trim().toLowerCase().replace(/[^a-z0-9._-]+/g, '_') || 'default';
+}
+
+function clampNumber(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function initResizablePanels() {
+  const workspace = document.querySelector('.workspace');
+  const editorPanel = document.querySelector('.editor-panel');
+  const filetreeHandle = document.getElementById('filetreeResizeHandle');
+  const sidePanelHandle = document.getElementById('sidePanelResizeHandle');
+  const terminalHandle = document.getElementById('terminalResizeHandle');
+
+  if (!workspace || !editorPanel || !filetreeHandle || !sidePanelHandle || !terminalHandle) {
+    return;
+  }
+
+  let panelSizes = {};
+  try {
+    panelSizes = JSON.parse(window.localStorage.getItem(PANEL_SIZES_STORAGE_KEY) || '{}') || {};
+  } catch {
+    panelSizes = {};
+  }
+
+  function applyStoredSize(name, cssVar, min, max) {
+    const value = Number(panelSizes[name]);
+    if (Number.isFinite(value)) {
+      document.documentElement.style.setProperty(cssVar, `${clampNumber(value, min, max)}px`);
+    }
+  }
+
+  function saveSize(name, value) {
+    panelSizes[name] = Math.round(value);
+    window.localStorage.setItem(PANEL_SIZES_STORAGE_KEY, JSON.stringify(panelSizes));
+  }
+
+  function layoutEditor() {
+    if (editor && typeof editor.layout === 'function') {
+      requestAnimationFrame(() => editor.layout());
+    }
+  }
+
+  applyStoredSize('filetreeWidth', '--filetree-width', 180, 560);
+  applyStoredSize('sidePanelWidth', '--side-panel-width', 300, 760);
+  applyStoredSize('terminalHeight', '--terminal-height', 120, 560);
+
+  function startResize(kind, event) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const handle = event.currentTarget;
+    handle.classList.add('resizing');
+    document.body.classList.add('panel-resizing');
+    handle.setPointerCapture?.(event.pointerId);
+
+    function update(pointerEvent) {
+      if (kind === 'filetree') {
+        const rect = workspace.getBoundingClientRect();
+        const width = clampNumber(pointerEvent.clientX - rect.left, 180, Math.max(180, rect.width - 620));
+        document.documentElement.style.setProperty('--filetree-width', `${width}px`);
+        saveSize('filetreeWidth', width);
+      } else if (kind === 'side') {
+        const rect = workspace.getBoundingClientRect();
+        const width = clampNumber(rect.right - pointerEvent.clientX, 300, Math.max(300, rect.width - 620));
+        document.documentElement.style.setProperty('--side-panel-width', `${width}px`);
+        saveSize('sidePanelWidth', width);
+      } else {
+        const rect = editorPanel.getBoundingClientRect();
+        const height = clampNumber(rect.bottom - pointerEvent.clientY, 120, Math.max(120, rect.height - 180));
+        document.documentElement.style.setProperty('--terminal-height', `${height}px`);
+        saveSize('terminalHeight', height);
+      }
+      layoutEditor();
+    }
+
+    function stop(pointerEvent) {
+      handle.classList.remove('resizing');
+      document.body.classList.remove('panel-resizing');
+      handle.releasePointerCapture?.(pointerEvent.pointerId);
+      window.removeEventListener('pointermove', update);
+      window.removeEventListener('pointerup', stop);
+      layoutEditor();
+    }
+
+    window.addEventListener('pointermove', update);
+    window.addEventListener('pointerup', stop);
+  }
+
+  function keyboardResize(kind, event) {
+    const horizontal = kind === 'filetree' || kind === 'side';
+    const keyMap = horizontal ? ['ArrowLeft', 'ArrowRight'] : ['ArrowUp', 'ArrowDown'];
+    if (!keyMap.includes(event.key)) return;
+    event.preventDefault();
+
+    const step = event.shiftKey ? 40 : 16;
+    if (kind === 'filetree') {
+      const current = Number(panelSizes.filetreeWidth || 280);
+      const next = clampNumber(current + (event.key === 'ArrowRight' ? step : -step), 180, 560);
+      document.documentElement.style.setProperty('--filetree-width', `${next}px`);
+      saveSize('filetreeWidth', next);
+    } else if (kind === 'side') {
+      const current = Number(panelSizes.sidePanelWidth || 440);
+      const next = clampNumber(current + (event.key === 'ArrowLeft' ? step : -step), 300, 760);
+      document.documentElement.style.setProperty('--side-panel-width', `${next}px`);
+      saveSize('sidePanelWidth', next);
+    } else {
+      const current = Number(panelSizes.terminalHeight || 230);
+      const next = clampNumber(current + (event.key === 'ArrowUp' ? step : -step), 120, 560);
+      document.documentElement.style.setProperty('--terminal-height', `${next}px`);
+      saveSize('terminalHeight', next);
+    }
+    layoutEditor();
+  }
+
+  filetreeHandle.addEventListener('pointerdown', event => startResize('filetree', event));
+  sidePanelHandle.addEventListener('pointerdown', event => startResize('side', event));
+  terminalHandle.addEventListener('pointerdown', event => startResize('terminal', event));
+  filetreeHandle.addEventListener('keydown', event => keyboardResize('filetree', event));
+  sidePanelHandle.addEventListener('keydown', event => keyboardResize('side', event));
+  terminalHandle.addEventListener('keydown', event => keyboardResize('terminal', event));
 }
 
 function setActiveTab(which) {
@@ -410,7 +534,16 @@ function initTerminalPanel() {
     }
 
     const result = await window.llmIde.sendTerminalInput({ text: `${raw}\n` });
-    appendTerminalText(result.sent ? `> ${raw}\n` : '[no active process]\n');
+    if (result.sent) {
+      appendTerminalText(`> ${raw}\n`);
+      terminalInput.value = '';
+      return;
+    }
+
+    const runResult = await window.llmIde.runTerminalCommand({ command: raw });
+    if (!runResult.started) {
+      appendTerminalText(`[command not started: ${runResult.reason || 'unknown'}]\n`);
+    }
     terminalInput.value = '';
   }
 
@@ -526,13 +659,14 @@ async function initChat() {
   const refreshModels = document.getElementById('chatRefreshModels');
   const apiKey = document.getElementById('chatApiKey');
   const chatMemoryNamespace = document.getElementById('chatMemoryNamespace');
+  const chatNewMemoryNamespace = document.getElementById('chatNewMemoryNamespace');
   const prompt = document.getElementById('chatPrompt');
   const send = document.getElementById('chatSend');
   const stop = document.getElementById('chatStop');
 
   endpoint.value = settingsState.endpoint;
   apiKey.value = settingsState.apiKey;
-  chatMemoryNamespace.value = settingsState.chatMemoryNamespace;
+  chatNewMemoryNamespace.value = '';
 
   function applyChatSettingsVisibility() {
     settingsPanel.classList.toggle('collapsed', settingsState.chatSettingsCollapsed);
@@ -581,6 +715,72 @@ async function initChat() {
   const offChatEvent = window.llmIde.onChatEvent(event => {
     appendLog(conversation, `[tool] ${event}`);
   });
+
+  function selectedChatMemoryNamespace() {
+    if (chatMemoryNamespace.value === '__new__') {
+      return chatNewMemoryNamespace.value.trim();
+    }
+    return chatMemoryNamespace.value.trim();
+  }
+
+  function syncNewNamespaceVisibility() {
+    const usingNew = chatMemoryNamespace.value === '__new__';
+    chatNewMemoryNamespace.classList.toggle('visible', usingNew);
+    chatNewMemoryNamespace.disabled = !usingNew;
+  }
+
+  function setChatNamespaceOptions(namespaces) {
+    const preferred = settingsState.chatMemoryNamespace;
+    chatMemoryNamespace.innerHTML = '';
+
+    const defaultOption = document.createElement('option');
+    defaultOption.value = '';
+    defaultOption.textContent = `Default: model-specific (${model.value || settingsState.model})`;
+    chatMemoryNamespace.appendChild(defaultOption);
+
+    const known = Array.from(new Set(namespaces.filter(Boolean))).sort((a, b) => a.localeCompare(b));
+    for (const namespace of known) {
+      const option = document.createElement('option');
+      option.value = namespace;
+      option.textContent = namespace;
+      chatMemoryNamespace.appendChild(option);
+    }
+
+    const newOption = document.createElement('option');
+    newOption.value = '__new__';
+    newOption.textContent = 'New namespace...';
+    chatMemoryNamespace.appendChild(newOption);
+
+    if (!preferred) {
+      chatMemoryNamespace.value = '';
+      chatNewMemoryNamespace.value = '';
+    } else if (known.includes(preferred)) {
+      chatMemoryNamespace.value = preferred;
+      chatNewMemoryNamespace.value = '';
+    } else {
+      chatMemoryNamespace.value = '__new__';
+      chatNewMemoryNamespace.value = preferred;
+    }
+
+    syncNewNamespaceVisibility();
+  }
+
+  async function refreshChatNamespaceOptions() {
+    try {
+      const state = await window.llmIde.getWorkspaceState();
+      const diagnostics = await window.llmIde.getMemoryDiagnostics();
+      const entries = Array.isArray(diagnostics?.namespaces) ? diagnostics.namespaces : [];
+      const prefix = `${sanitizeMemoryNamespacePart('chat')}_${sanitizeMemoryNamespacePart(state.workspaceDir)}_`;
+      const namespaces = entries
+        .map(item => String(item?.namespace ?? ''))
+        .filter(namespace => namespace.startsWith(prefix))
+        .map(namespace => namespace.slice(prefix.length))
+        .filter(Boolean);
+      setChatNamespaceOptions(namespaces);
+    } catch {
+      setChatNamespaceOptions([]);
+    }
+  }
 
   function setModelOptions(models, preferred) {
     model.innerHTML = '';
@@ -651,9 +851,16 @@ async function initChat() {
   model.addEventListener('change', () => {
     settingsState.model = model.value;
     saveSettings();
+    refreshChatNamespaceOptions();
   });
   chatMemoryNamespace.addEventListener('change', () => {
-    settingsState.chatMemoryNamespace = chatMemoryNamespace.value.trim();
+    syncNewNamespaceVisibility();
+    settingsState.chatMemoryNamespace = selectedChatMemoryNamespace();
+    saveSettings();
+  });
+  chatNewMemoryNamespace.addEventListener('input', () => {
+    if (chatMemoryNamespace.value !== '__new__') return;
+    settingsState.chatMemoryNamespace = chatNewMemoryNamespace.value.trim();
     saveSettings();
   });
   stop.addEventListener('click', async () => {
@@ -702,7 +909,7 @@ async function initChat() {
           temperature: 0.2,
           maxTokens: 0
         },
-        memoryNamespace: chatMemoryNamespace.value.trim() || undefined,
+        memoryNamespace: selectedChatMemoryNamespace() || undefined,
         maxToolTurns: settingsState.maxToolTurns,
         toolNames: [
           'browser_fetch',
@@ -739,6 +946,7 @@ async function initChat() {
       status.textContent = /canceled/i.test(error instanceof Error ? error.message : String(error)) ? 'Chat stopped' : 'Error';
     } finally {
       setChatRunning(false);
+      refreshChatNamespaceOptions();
     }
   });
 
@@ -748,6 +956,7 @@ async function initChat() {
   });
 
   await refreshModelOptions();
+  await refreshChatNamespaceOptions();
 }
 
 async function initOrchestration() {
@@ -765,6 +974,12 @@ async function initOrchestration() {
   const exportButton = document.getElementById('orchExport');
   const stopButton = document.getElementById('orchStop');
   const clearOutputLogButton = document.getElementById('orchClearOutputLog');
+  const popoutOutputLogButton = document.getElementById('orchPopoutOutputLog');
+  const logModal = document.getElementById('orchLogModal');
+  const logMarkdownEl = document.getElementById('orchLogMarkdown');
+  const logCloseButton = document.getElementById('orchLogClose');
+  const logExpandAllButton = document.getElementById('orchLogExpandAll');
+  const logCollapseAllButton = document.getElementById('orchLogCollapseAll');
   const eventsEl = document.getElementById('orchEvents');
   const outputEl = document.getElementById('orchOutput');
   const outputLogEl = document.getElementById('orchOutputLog');
@@ -801,6 +1016,7 @@ async function initOrchestration() {
     steps: []
   };
   let orchestrationRunning = false;
+  const outputLogEntries = [];
 
   function setOrchestrationRunning(running) {
     orchestrationRunning = running;
@@ -880,14 +1096,98 @@ async function initOrchestration() {
     planEl.value = JSON.stringify(currentPlan, null, 2);
   }
 
+  function renderOutputLogPopout() {
+    logMarkdownEl.innerHTML = '';
+
+    if (!outputLogEntries.length) {
+      const empty = document.createElement('div');
+      empty.className = 'settings-help';
+      empty.textContent = 'No orchestration output has been logged yet.';
+      logMarkdownEl.appendChild(empty);
+      return;
+    }
+
+    outputLogEntries.forEach((entry, entryIndex) => {
+      const runDetails = document.createElement('details');
+      runDetails.className = 'orchestration-log-section';
+      runDetails.open = entryIndex === outputLogEntries.length - 1;
+
+      const summary = document.createElement('summary');
+      summary.textContent = `${entry.timestamp} | ${entry.planName} | ${entry.iterations} iteration(s)`;
+      runDetails.appendChild(summary);
+
+      const meta = document.createElement('div');
+      meta.className = 'orchestration-log-meta assistant-markdown orchestration-log-markdown-content';
+      meta.innerHTML = renderMarkdownToHtml([
+        `**Prompt:** ${entry.promptText || '(empty prompt)'}`,
+        `**Completion:** ${entry.markerInfo}`
+      ].join('\n\n'));
+      runDetails.appendChild(meta);
+
+      if (!entry.steps.length) {
+        const emptyStep = document.createElement('div');
+        emptyStep.className = 'settings-help';
+        emptyStep.textContent = '(no step output)';
+        runDetails.appendChild(emptyStep);
+      } else {
+        entry.steps.forEach((step, stepIndex) => {
+          const stepDetails = document.createElement('details');
+          stepDetails.className = 'orchestration-log-step';
+          stepDetails.open = entryIndex === outputLogEntries.length - 1 && stepIndex === entry.steps.length - 1;
+
+          const stepSummary = document.createElement('summary');
+          stepSummary.textContent = `Iteration ${step.iteration} | ${step.name} (${step.id})`;
+          stepDetails.appendChild(stepSummary);
+
+          const body = document.createElement('div');
+          body.className = 'assistant-markdown orchestration-log-markdown-content orchestration-log-step-body';
+          body.innerHTML = renderMarkdownToHtml(step.output || '(empty output)');
+          stepDetails.appendChild(body);
+          runDetails.appendChild(stepDetails);
+        });
+      }
+
+      logMarkdownEl.appendChild(runDetails);
+    });
+  }
+
+  function setOrchestrationLogModalOpen(open) {
+    if (open) {
+      renderOutputLogPopout();
+    }
+    logModal.classList.toggle('open', open);
+    logModal.setAttribute('aria-hidden', open ? 'false' : 'true');
+  }
+
+  function setAllLogSectionsOpen(open) {
+    logMarkdownEl.querySelectorAll('details').forEach(details => {
+      details.open = open;
+    });
+  }
+
   function renderOutputLogEntry(result, promptText, planSnapshot) {
     const markerInfo = result.completionMarker
       ? `marker=${result.completionMarker} completed=${result.completed ? 'yes' : 'no'}`
       : 'single-pass run';
     const steps = Array.isArray(result.steps) ? result.steps : [];
+    const timestamp = new Date().toLocaleString();
+
+    outputLogEntries.push({
+      timestamp,
+      planName: planSnapshot.name,
+      promptText,
+      iterations: result.iterations || 1,
+      markerInfo,
+      steps: steps.map(step => ({
+        id: step.id,
+        name: step.name,
+        iteration: step.iteration,
+        output: step.output || ''
+      }))
+    });
 
     const lines = [
-      `Run @ ${new Date().toLocaleString()}`,
+      `Run @ ${timestamp}`,
       `Plan: ${planSnapshot.name}`,
       `Prompt: ${promptText || '(empty prompt)'}`,
       `Iterations: ${result.iterations || 1} | ${markerInfo}`,
@@ -1145,9 +1445,28 @@ async function initOrchestration() {
     renderWorkflow();
   });
   clearOutputLogButton.addEventListener('click', () => {
+    outputLogEntries.length = 0;
     outputLogEl.textContent = '';
+    renderOutputLogPopout();
     status.textContent = 'Output log cleared';
   });
+
+  popoutOutputLogButton.addEventListener('click', () => {
+    setOrchestrationLogModalOpen(true);
+  });
+
+  logCloseButton.addEventListener('click', () => {
+    setOrchestrationLogModalOpen(false);
+  });
+
+  logModal.addEventListener('click', event => {
+    if (event.target === logModal) {
+      setOrchestrationLogModalOpen(false);
+    }
+  });
+
+  logExpandAllButton.addEventListener('click', () => setAllLogSectionsOpen(true));
+  logCollapseAllButton.addEventListener('click', () => setAllLogSectionsOpen(false));
   stopButton.addEventListener('click', async () => {
     if (!orchestrationRunning) return;
     stopButton.disabled = true;
@@ -1511,6 +1830,7 @@ async function main() {
   document.getElementById('saveAllFiles').addEventListener('click', saveAllTabs);
 
   initSettingsMenu();
+  initResizablePanels();
   initTerminalPanel();
   await setupMonaco();
   await initWorkspaceTree();

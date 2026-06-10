@@ -16,7 +16,7 @@ import {
   OrchestrationRunResult,
   WorkspaceState
 } from './shared/types';
-import { executeTool, getAllowedToolDefinitions, toolDefinitions } from './backend/toolRuntime';
+import { executeTool, getAllowedToolDefinitions, runTerminalCommand, toolDefinitions } from './backend/toolRuntime';
 import { buildWorkspaceTree, readWorkspaceFile, writeWorkspaceFile } from './backend/workspaceFs';
 import { TurboVecMemory } from './backend/turboVecMemory';
 
@@ -408,6 +408,34 @@ ipcMain.handle('terminal:send-input', async (_event, payload: { text: string }) 
   const text = String(payload.text ?? '');
   activeTerminalProcess.stdin.write(text);
   return { sent: true };
+});
+
+ipcMain.handle('terminal:run-command', async (event, payload: { command: string; cwd?: string }) => {
+  const command = String(payload.command ?? '').trim();
+  if (!command) {
+    return { started: false, reason: 'empty_command' };
+  }
+
+  if (activeTerminalProcess) {
+    return { started: false, reason: 'process_active' };
+  }
+
+  void runTerminalCommand(
+    {
+      command,
+      cwd: payload.cwd,
+      scope: 'workspace',
+      timeoutMs: 0
+    },
+    runtimeContext(event.sender, 'chat:event')
+  ).catch(error => {
+    event.sender.send('terminal:output', {
+      source: 'stderr',
+      text: `${error instanceof Error ? error.message : String(error)}\n`
+    });
+  });
+
+  return { started: true };
 });
 
 ipcMain.handle('terminal:interrupt', async () => {

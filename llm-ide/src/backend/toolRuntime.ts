@@ -163,11 +163,11 @@ export const toolDefinitions: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'create_file',
-      description: 'Create a new file only if it does not already exist.',
+      description: 'Create a new file only if it does not already exist. Content is optional; prefer creating an empty file and then using small insert_in_file calls for large files.',
       parameters: {
         type: 'object',
-        properties: { path: { type: 'string' }, content: { type: 'string' }, scope: scopeProperty },
-        required: ['path', 'content']
+        properties: { path: { type: 'string' }, content: { type: 'string', maxLength: 2000 }, scope: scopeProperty },
+        required: ['path']
       }
     }
   },
@@ -175,10 +175,10 @@ export const toolDefinitions: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'write_file',
-      description: 'Write full content to a file in selected scope.',
+      description: 'Write full content to a file in selected scope. Use only for short files; prefer replace_in_file or insert_in_file for large files.',
       parameters: {
         type: 'object',
-        properties: { path: { type: 'string' }, content: { type: 'string' }, scope: scopeProperty },
+        properties: { path: { type: 'string' }, content: { type: 'string', maxLength: 4000 }, scope: scopeProperty },
         required: ['path', 'content']
       }
     }
@@ -192,8 +192,8 @@ export const toolDefinitions: ToolDefinition[] = [
         type: 'object',
         properties: {
           path: { type: 'string' },
-          oldText: { type: 'string' },
-          newText: { type: 'string' },
+          oldText: { type: 'string', maxLength: 4000 },
+          newText: { type: 'string', maxLength: 4000 },
           allOccurrences: { type: 'boolean' },
           scope: scopeProperty
         },
@@ -211,7 +211,7 @@ export const toolDefinitions: ToolDefinition[] = [
         properties: {
           path: { type: 'string' },
           line: { type: 'number' },
-          text: { type: 'string' },
+          text: { type: 'string', maxLength: 3000 },
           scope: scopeProperty
         },
         required: ['path', 'line', 'text']
@@ -896,7 +896,7 @@ async function gitCommit(args: Record<string, unknown>, context?: RuntimeContext
   return { commit: result.commit, summary: result.summary };
 }
 
-async function runTerminalCommand(args: Record<string, unknown>, context?: RuntimeContext) {
+export async function runTerminalCommand(args: Record<string, unknown>, context?: RuntimeContext) {
   const scope = parseScope(args);
   const command = String(args.command ?? '').trim();
   if (!command) {
@@ -905,7 +905,8 @@ async function runTerminalCommand(args: Record<string, unknown>, context?: Runti
 
   const scopeBase = scopeBaseDir(scope, context);
   const cwd = args.cwd ? resolveScopedPath(String(args.cwd), scope, context) : scopeBase;
-  const timeoutMs = Math.max(1000, Math.min(120000, Number(args.timeoutMs ?? 30000)));
+  const rawTimeoutMs = Number(args.timeoutMs ?? 30000);
+  const timeoutMs = rawTimeoutMs <= 0 ? 0 : Math.max(1000, Math.min(120000, rawTimeoutMs));
   const shellConfig = process.platform === 'win32'
     ? {
         executable: process.env.ComSpec || 'cmd.exe',
@@ -995,11 +996,13 @@ async function runTerminalCommand(args: Record<string, unknown>, context?: Runti
       });
     };
 
-    const timeoutHandle = setTimeout(() => {
-      if (!completed) {
-        child.kill('SIGTERM');
-      }
-    }, timeoutMs);
+    const timeoutHandle = timeoutMs > 0
+      ? setTimeout(() => {
+          if (!completed) {
+            child.kill('SIGTERM');
+          }
+        }, timeoutMs)
+      : null;
 
     child.stdout.on('data', (chunk: Buffer | string) => {
       const text = chunk.toString();
@@ -1014,7 +1017,9 @@ async function runTerminalCommand(args: Record<string, unknown>, context?: Runti
     });
 
     child.on('error', err => {
-      clearTimeout(timeoutHandle);
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
       const detail = (err as NodeJS.ErrnoException).code === 'ENOENT'
         ? `${err.message} (shell: ${shellConfig.executable}, cwd: ${cwd})`
         : err.message;
@@ -1022,7 +1027,9 @@ async function runTerminalCommand(args: Record<string, unknown>, context?: Runti
     });
 
     child.on('close', (code, signal) => {
-      clearTimeout(timeoutHandle);
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
       finish({ success: code === 0, code, signal });
     });
   });

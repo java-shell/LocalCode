@@ -8,6 +8,9 @@
   --accent-strong: #00e0a4;
   --danger: #ff6e7c;
   --border: rgba(255, 255, 255, 0.14);
+  --filetree-width: 280px;
+  --side-panel-width: 440px;
+  --terminal-height: 230px;
 }
 
 * {
@@ -21,6 +24,10 @@ body {
   background: radial-gradient(circle at 10% -10%, #1e3d66 0%, transparent 40%),
     radial-gradient(circle at 100% 0%, #14335f 0%, transparent 35%),
     var(--bg);
+}
+
+body.panel-resizing {
+  user-select: none;
 }
 
 .app-shell {
@@ -57,10 +64,30 @@ body {
 
 .workspace {
   display: grid;
-  grid-template-columns: minmax(240px, 280px) minmax(0, 1fr) minmax(360px, 440px);
+  grid-template-columns: minmax(180px, var(--filetree-width)) 6px minmax(0, 1fr) 6px minmax(300px, var(--side-panel-width));
   grid-template-rows: 1fr;
   min-height: 0;
   overflow: hidden;
+}
+
+.workspace-resizer {
+  min-width: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  cursor: col-resize;
+  position: relative;
+}
+
+.workspace-resizer:hover,
+.workspace-resizer.resizing,
+.terminal-resizer:hover,
+.terminal-resizer.resizing {
+  background: rgba(42, 195, 255, 0.32);
+}
+
+.workspace-resizer:focus-visible,
+.terminal-resizer:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
 }
 
 .filetree-panel {
@@ -122,8 +149,14 @@ body {
   min-width: 0;
   border-right: 1px solid var(--border);
   display: grid;
-  grid-template-rows: 48px 40px minmax(220px, 1fr) 230px;
+  grid-template-rows: 48px 40px minmax(180px, 1fr) 6px minmax(120px, var(--terminal-height));
   overflow: hidden;
+}
+
+.terminal-resizer {
+  min-height: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  cursor: row-resize;
 }
 
 .editor-header {
@@ -452,6 +485,14 @@ button {
   display: none;
 }
 
+.chat-new-namespace {
+  display: none;
+}
+
+.chat-new-namespace.visible {
+  display: block;
+}
+
 .settings-modal {
   position: fixed;
   inset: 0;
@@ -474,6 +515,116 @@ button {
   padding: 14px;
   display: grid;
   gap: 10px;
+}
+
+.orchestration-log-card {
+  width: min(1120px, calc(100vw - 32px));
+  height: min(840px, calc(100vh - 32px));
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.orchestration-log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.orchestration-log-markdown {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  gap: 10px;
+  padding-right: 4px;
+}
+
+.orchestration-log-section,
+.orchestration-log-step {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(6, 12, 22, 0.44);
+}
+
+.orchestration-log-section > summary,
+.orchestration-log-step > summary {
+  cursor: pointer;
+  padding: 10px;
+  color: #eef6ff;
+  font-weight: 700;
+}
+
+.orchestration-log-step {
+  margin: 10px;
+  background: rgba(12, 23, 39, 0.6);
+}
+
+.orchestration-log-meta,
+.orchestration-log-step-body {
+  padding: 0 10px 10px;
+}
+
+.orchestration-log-markdown-content {
+  white-space: normal;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.orchestration-log-markdown-content h1,
+.orchestration-log-markdown-content h2,
+.orchestration-log-markdown-content h3,
+.orchestration-log-markdown-content h4 {
+  margin: 12px 0 8px;
+  color: #f7fbff;
+  font-weight: 700;
+}
+
+.orchestration-log-markdown-content p,
+.orchestration-log-markdown-content ul,
+.orchestration-log-markdown-content ol,
+.orchestration-log-markdown-content pre,
+.orchestration-log-markdown-content blockquote,
+.orchestration-log-markdown-content table {
+  margin-top: 0;
+  margin-bottom: 10px;
+}
+
+.orchestration-log-markdown-content ul,
+.orchestration-log-markdown-content ol {
+  padding-left: 22px;
+}
+
+.orchestration-log-markdown-content code {
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 12px;
+}
+
+.orchestration-log-markdown-content pre {
+  background: rgba(0, 0, 0, 0.34);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  padding: 10px;
+  overflow: auto;
+}
+
+.orchestration-log-markdown-content pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.orchestration-log-markdown-content table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.orchestration-log-markdown-content th,
+.orchestration-log-markdown-content td {
+  border: 1px solid var(--border);
+  padding: 6px 8px;
+  text-align: left;
 }
 
 .settings-header {
@@ -609,6 +760,11 @@ button {
   .workspace {
     grid-template-columns: 1fr;
     grid-template-rows: 34vh 34vh 32vh;
+  }
+
+  .workspace-resizer,
+  .terminal-resizer {
+    display: none;
   }
 
   .editor-panel {

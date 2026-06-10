@@ -72,6 +72,9 @@ const api = {
   sendTerminalInput: async (payload: { text: string }): Promise<{ sent: boolean; reason?: string }> => {
     return ipcRenderer.invoke('terminal:send-input', payload);
   },
+  runTerminalCommand: async (payload: { command: string; cwd?: string }): Promise<{ started: boolean; reason?: string }> => {
+    return ipcRenderer.invoke('terminal:run-command', payload);
+  },
   interruptTerminalProcess: async (): Promise<{ interrupted: boolean; reason?: string }> => {
     return ipcRenderer.invoke('terminal:interrupt');
   },

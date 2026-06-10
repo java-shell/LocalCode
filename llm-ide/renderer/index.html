@@ -35,6 +35,8 @@
         <div id="filetree" class="filetree"></div>
       </section>
 
+      <div id="filetreeResizeHandle" class="workspace-resizer workspace-resizer-left" role="separator" aria-label="Resize workspace file tree" tabindex="0"></div>
+
       <section class="editor-panel">
         <div class="editor-header">
           <span>Monaco Editor</span>
@@ -46,6 +48,7 @@
         </div>
         <div id="editorTabs" class="editor-tabs"></div>
         <div id="editor"></div>
+        <div id="terminalResizeHandle" class="terminal-resizer" role="separator" aria-label="Resize terminal panel" tabindex="0"></div>
         <div class="terminal-panel">
           <div class="terminal-header">
             <span>Model Terminal</span>
@@ -53,11 +56,13 @@
           </div>
           <pre id="terminalOutput" class="terminal-output"></pre>
           <div class="terminal-input-row">
-            <input id="terminalInput" placeholder="Type terminal input or (ctrl+c)" />
+            <input id="terminalInput" placeholder="Type a command, terminal input, or (ctrl+c)" />
             <button id="terminalSend" type="button">Send</button>
           </div>
         </div>
       </section>
+
+      <div id="sidePanelResizeHandle" class="workspace-resizer workspace-resizer-right" role="separator" aria-label="Resize right side panel" tabindex="0"></div>
 
       <aside class="side-panel">
         <div class="tabs">
@@ -81,7 +86,8 @@
             <label class="label">API Key (optional)</label>
             <input id="chatApiKey" type="password" placeholder="sk-..." />
             <label class="label">Memory Namespace (optional)</label>
-            <input id="chatMemoryNamespace" placeholder="Leave blank for model-specific memory" />
+            <select id="chatMemoryNamespace"></select>
+            <input id="chatNewMemoryNamespace" class="chat-new-namespace" placeholder="New namespace for this session" />
           </div>
           <label class="label">Prompt</label>
           <textarea id="chatPrompt" placeholder="Ask for code, analysis, or generation..."></textarea>
@@ -129,6 +135,7 @@
           <div id="orchOutput" class="log"></div>
           <div class="actions actions-two">
             <button id="orchClearOutputLog" type="button">Clear Output Log</button>
+            <button id="orchPopoutOutputLog" type="button">Popout Markdown Log</button>
           </div>
           <label class="label">Orchestration Output Log</label>
           <div id="orchOutputLog" class="log"></div>
@@ -153,6 +160,20 @@
         </section>
       </aside>
     </main>
+  </div>
+
+  <div id="orchLogModal" class="settings-modal orchestration-log-modal" aria-hidden="true">
+    <div class="settings-card orchestration-log-card">
+      <div class="settings-header orchestration-log-header">
+        <strong>Orchestration Output Log</strong>
+        <div class="settings-actions">
+          <button id="orchLogExpandAll" type="button">Expand All</button>
+          <button id="orchLogCollapseAll" type="button">Collapse All</button>
+          <button id="orchLogClose" type="button">Close</button>
+        </div>
+      </div>
+      <div id="orchLogMarkdown" class="orchestration-log-markdown"></div>
+    </div>
   </div>
 
   <div id="settingsModal" class="settings-modal" aria-hidden="true">

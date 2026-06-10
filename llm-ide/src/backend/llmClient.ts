@@ -61,6 +61,19 @@ function formatAxiosFailure(error: unknown, context: { operation: string; endpoi
   return new Error(messageParts.join(' | '));
 }
 
+function isProviderToolParseFailure(error: unknown): boolean {
+  if (!axios.isAxiosError(error)) {
+    return false;
+  }
+
+  const responseSummary = summarizeResponseData(error.response?.data).toLowerCase();
+  return responseSummary.includes('error parsing tool call') || responseSummary.includes('tool call');
+}
+
+function saferToolSetAfterParseFailure(tools: ToolDefinition[]): ToolDefinition[] {
+  return tools.filter(tool => tool.function.name !== 'write_file');
+}
+
 function deriveModelsEndpoint(chatEndpoint: string): string {
   const normalized = chatEndpoint.trim();
   if (!normalized) {
@@ -212,6 +225,8 @@ export async function chatWithTools(
 ): Promise<string> {
   const messages = [...initialMessages];
   const maxTurns = Math.max(1, Math.min(200, Math.floor(maxToolTurns || 40)));
+  let activeTools = tools;
+  let retriedProviderToolParseFailure = false;
 
   function intentSummary(name: string, args: Record<string, unknown>): string {
     switch (name) {
@@ -263,8 +278,8 @@ export async function chatWithTools(
       ...payloadBase(config, messages),
       stream: false
     };
-    if (tools.length > 0) {
-      payload.tools = tools;
+    if (activeTools.length > 0) {
+      payload.tools = activeTools;
       payload.tool_choice = 'auto';
       payload.parallel_tool_calls = false;
     }
@@ -276,6 +291,19 @@ export async function chatWithTools(
         signal
       });
     } catch (error) {
+      if (!retriedProviderToolParseFailure && isProviderToolParseFailure(error) && activeTools.length > 0) {
+        retriedProviderToolParseFailure = true;
+        activeTools = saferToolSetAfterParseFailure(activeTools);
+        messages.push({
+          role: 'system',
+          content:
+            'The provider failed while parsing the previous tool call. Retry with smaller, simpler tool arguments. ' +
+            'Do not use write_file for large files. For new files, call create_file with no content, then use insert_in_file in chunks under 3000 characters. ' +
+            'For existing files, prefer replace_in_file with focused snippets. Keep each tool argument valid compact JSON.'
+        });
+        onEvent?.('provider tool-call parser failed; retrying with safer file-edit tools.');
+        continue;
+      }
       throw formatAxiosFailure(error, {
         operation: 'Chat completion request',
         endpoint: config.endpoint,
