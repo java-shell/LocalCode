@@ -32,6 +32,22 @@ export interface ChatStreamRequest {
   memoryNamespace?: string;
 }
 
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  requests: number;
+}
+
+export interface ModelUsage extends TokenUsage {
+  model: string;
+}
+
+export interface ChatStreamResult {
+  text: string;
+  usageByModel?: ModelUsage[];
+}
+
 export interface ToolPermission {
   name: string;
   enabled: boolean;
@@ -66,6 +82,8 @@ export interface OrchestrationRunStep {
   name: string;
   output: string;
   iteration: number;
+  model: string;
+  usage?: TokenUsage;
 }
 
 export interface OrchestrationRunResult {
@@ -74,6 +92,7 @@ export interface OrchestrationRunResult {
   iterations: number;
   completed: boolean;
   completionMarker?: string;
+  usageByModel?: ModelUsage[];
 }
 
 export interface OrchestrationImportResult {

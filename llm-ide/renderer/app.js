@@ -18,9 +18,144 @@ const settingsState = {
   chatSettingsCollapsed: true
 };
 
+const usageByModel = new Map();
+
+const contextWindowHints = [
+  { pattern: /(gpt-5|gpt-4\.1|o4|o3)/i, tokens: 128000 },
+  { pattern: /(claude-3|claude-4)/i, tokens: 200000 },
+  { pattern: /(qwen2?\.5|llama3\.1|llama3\.2|mistral|gemma)/i, tokens: 32768 },
+  { pattern: /(deepseek|phi-4)/i, tokens: 65536 }
+];
+
 function clampMaxToolTurns(value) {
   if (!Number.isFinite(value)) return 40;
   return Math.max(1, Math.min(200, Math.floor(value)));
+}
+
+function estimateContextWindow(model) {
+  const label = String(model || '').trim();
+  if (!label) {
+    return 8192;
+  }
+  for (const hint of contextWindowHints) {
+    if (hint.pattern.test(label)) {
+      return hint.tokens;
+    }
+  }
+  return 8192;
+}
+
+function formatCount(value) {
+  return Number(value || 0).toLocaleString();
+}
+
+function recordModelUsage(entries) {
+  const list = Array.isArray(entries) ? entries : [];
+  if (!list.length) {
+    return;
+  }
+
+  let changed = false;
+  for (const entry of list) {
+    const model = String(entry?.model || '').trim();
+    if (!model) {
+      continue;
+    }
+
+    const promptTokens = Math.max(0, Number(entry?.promptTokens || 0));
+    const completionTokens = Math.max(0, Number(entry?.completionTokens || 0));
+    const totalTokens = Math.max(0, Number(entry?.totalTokens || (promptTokens + completionTokens)));
+    const requests = Math.max(1, Number(entry?.requests || 1));
+
+    const existing = usageByModel.get(model) || {
+      model,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      requests: 0
+    };
+
+    existing.promptTokens += promptTokens;
+    existing.completionTokens += completionTokens;
+    existing.totalTokens += totalTokens;
+    existing.requests += requests;
+    usageByModel.set(model, existing);
+    changed = true;
+  }
+
+  if (!changed) {
+    return;
+  }
+
+  const stamp = document.getElementById('contextUsageStamp');
+  if (stamp) {
+    stamp.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+  }
+  renderContextUsageGraph();
+}
+
+function renderContextUsageGraph() {
+  const host = document.getElementById('contextUsageList');
+  if (!host) {
+    return;
+  }
+
+  host.innerHTML = '';
+  const rows = Array.from(usageByModel.values()).sort((a, b) => b.totalTokens - a.totalTokens);
+  if (!rows.length) {
+    const empty = document.createElement('div');
+    empty.className = 'context-usage-empty';
+    empty.textContent = 'Run chat or orchestration to populate usage metrics.';
+    host.appendChild(empty);
+    return;
+  }
+
+  for (const row of rows) {
+    const avgPrompt = row.promptTokens / Math.max(1, row.requests);
+    const avgCompletion = row.completionTokens / Math.max(1, row.requests);
+    const avgTotal = row.totalTokens / Math.max(1, row.requests);
+    const contextWindow = estimateContextWindow(row.model);
+    const avgPct = Math.min(100, Math.round((avgTotal / Math.max(1, contextWindow)) * 100));
+    const promptPct = Math.min(100, (avgPrompt / Math.max(1, contextWindow)) * 100);
+    const completionPct = Math.max(0, Math.min(100 - promptPct, (avgCompletion / Math.max(1, contextWindow)) * 100));
+
+    const card = document.createElement('div');
+    card.className = 'context-usage-item';
+
+    const title = document.createElement('div');
+    title.className = 'context-usage-title';
+    const modelEl = document.createElement('span');
+    modelEl.className = 'context-usage-model';
+    modelEl.title = row.model;
+    modelEl.textContent = row.model;
+    const pctEl = document.createElement('span');
+    pctEl.className = 'context-usage-meta';
+    pctEl.textContent = `~${avgPct}% context`;
+    title.appendChild(modelEl);
+    title.appendChild(pctEl);
+
+    const bar = document.createElement('div');
+    bar.className = 'context-usage-bar';
+
+    const prompt = document.createElement('div');
+    prompt.className = 'context-usage-prompt';
+    prompt.style.width = `${promptPct}%`;
+
+    const completion = document.createElement('div');
+    completion.className = 'context-usage-completion';
+    completion.style.width = `${completionPct}%`;
+
+    const meta = document.createElement('div');
+    meta.className = 'context-usage-meta';
+    meta.textContent = `prompt=${formatCount(avgPrompt)} avg | completion=${formatCount(avgCompletion)} avg | total=${formatCount(row.totalTokens)} over ${formatCount(row.requests)} req`;
+
+    bar.appendChild(prompt);
+    bar.appendChild(completion);
+    card.appendChild(title);
+    card.appendChild(bar);
+    card.appendChild(meta);
+    host.appendChild(card);
+  }
 }
 
 function loadSettings() {
@@ -940,6 +1075,10 @@ async function initChat() {
         scheduleAssistantMarkdownRender();
       }
 
+      if (Array.isArray(result?.usageByModel)) {
+        recordModelUsage(result.usageByModel);
+      }
+
       status.textContent = 'Done';
     } catch (error) {
       appendLog(conversation, `[error] ${error instanceof Error ? error.message : String(error)}`);
@@ -1547,6 +1686,9 @@ async function initOrchestration() {
       const result = await window.llmIde.runOrchestration({ plan: parsed, prompt: promptText });
       outputEl.textContent = result.output || '(empty output)';
       renderOutputLogEntry(result, promptText, parsed);
+      if (Array.isArray(result.usageByModel)) {
+        recordModelUsage(result.usageByModel);
+      }
       status.textContent = 'Run complete';
     } catch (error) {
       outputEl.textContent = error instanceof Error ? error.message : String(error);
@@ -1813,6 +1955,7 @@ async function initDiagnostics() {
 
 async function main() {
   loadSettings();
+  renderContextUsageGraph();
   document.getElementById('chatTab').addEventListener('click', () => setActiveTab('chat'));
   document.getElementById('orchTab').addEventListener('click', () => setActiveTab('orchestration'));
   document.getElementById('diagTab').addEventListener('click', () => setActiveTab('diagnostics'));

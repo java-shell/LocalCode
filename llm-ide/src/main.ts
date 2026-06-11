@@ -7,6 +7,7 @@ import { runOrchestration } from './backend/orchestrationEngine';
 import { defaultPlan, validatePlan } from './backend/schema';
 import { loadPlan, savePlan } from './backend/planStore';
 import {
+  ChatStreamResult,
   ChatMessage,
   ChatStreamRequest,
   LLMConfig,
@@ -259,7 +260,7 @@ app.on('window-all-closed', () => {
 
 ipcMain.handle(
   'chat:stream',
-  async (event, payload: ChatStreamRequest) => {
+  async (event, payload: ChatStreamRequest): Promise<ChatStreamResult> => {
     const config = payload.config;
     const abortController = new AbortController();
     activeChatAbortController = abortController;
@@ -301,7 +302,7 @@ ipcMain.handle(
 
       const toolDefs = getAllowedToolDefinitions(requestedToolNames);
 
-      const text = await chatWithTools(
+      const result = await chatWithTools(
         config,
         messages,
         toolDefs,
@@ -317,6 +318,7 @@ ipcMain.handle(
         payload.maxToolTurns ?? 40,
         abortController.signal
       );
+      const text = result.text;
 
       if (turboMemory) {
         try {
@@ -349,7 +351,10 @@ ipcMain.handle(
         event.sender.send('chat:token', text.slice(i, i + chunkSize));
       }
 
-      return { text };
+      return {
+        text,
+        usageByModel: [{ model: config.model, ...result.usage }]
+      };
     } finally {
       if (activeChatAbortController === abortController) {
         activeChatAbortController = null;

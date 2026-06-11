@@ -1,10 +1,17 @@
 import axios from 'axios';
-import { ChatMessage, LLMConfig, ToolDefinition } from '../shared/types';
+import { ChatMessage, LLMConfig, TokenUsage, ToolDefinition } from '../shared/types';
 
 interface CompletionResponse {
   choices?: Array<{
     message?: ChatMessage;
   }>;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    input_tokens?: number;
+    output_tokens?: number;
+  };
 }
 
 interface StreamChunk {
@@ -19,6 +26,27 @@ interface ModelsResponse {
   data?: Array<{
     id?: string;
   }>;
+}
+
+export interface ChatWithToolsResult {
+  text: string;
+  usage: TokenUsage;
+}
+
+function toFiniteNumber(value: unknown): number {
+  const num = Number(value);
+  return Number.isFinite(num) && num > 0 ? num : 0;
+}
+
+function parseUsage(usage: CompletionResponse['usage']): Omit<TokenUsage, 'requests'> {
+  const promptTokens = toFiniteNumber(usage?.prompt_tokens) || toFiniteNumber(usage?.input_tokens);
+  const completionTokens = toFiniteNumber(usage?.completion_tokens) || toFiniteNumber(usage?.output_tokens);
+  const totalTokens = toFiniteNumber(usage?.total_tokens) || promptTokens + completionTokens;
+  return {
+    promptTokens,
+    completionTokens,
+    totalTokens
+  };
 }
 
 function summarizeResponseData(value: unknown): string {
@@ -222,11 +250,17 @@ export async function chatWithTools(
   onEvent?: (message: string) => void,
   maxToolTurns = 40,
   signal?: AbortSignal
-): Promise<string> {
+): Promise<ChatWithToolsResult> {
   const messages = [...initialMessages];
   const maxTurns = Math.max(1, Math.min(200, Math.floor(maxToolTurns || 40)));
   let activeTools = tools;
   let retriedProviderToolParseFailure = false;
+  const usageTotals: TokenUsage = {
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    requests: 0
+  };
 
   function intentSummary(name: string, args: Record<string, unknown>): string {
     switch (name) {
@@ -312,14 +346,25 @@ export async function chatWithTools(
     }
 
     const assistant = response.data.choices?.[0]?.message;
+    const usage = parseUsage(response.data.usage);
+    usageTotals.promptTokens += usage.promptTokens;
+    usageTotals.completionTokens += usage.completionTokens;
+    usageTotals.totalTokens += usage.totalTokens;
+    usageTotals.requests += 1;
     if (!assistant) {
-      return '';
+      return {
+        text: '',
+        usage: usageTotals
+      };
     }
 
     messages.push(assistant);
 
     if (!assistant.tool_calls || assistant.tool_calls.length === 0) {
-      return assistant.content ?? '';
+      return {
+        text: assistant.content ?? '',
+        usage: usageTotals
+      };
     }
 
     for (const call of assistant.tool_calls) {
@@ -350,5 +395,8 @@ export async function chatWithTools(
     }
   }
 
-  return `Stopped after max tool turns (${maxTurns}).`;
+  return {
+    text: `Stopped after max tool turns (${maxTurns}).`,
+    usage: usageTotals
+  };
 }

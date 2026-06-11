@@ -8,6 +8,7 @@ files:
   - filter:
       - out/**/*
       - renderer/**/*
+      - build/icons/**/*
       - src/backend/turbovec_bridge.py
       - package.json
 asarUnpack:
@@ -20,4 +21,13 @@ linux:
   description: Standalone local LLM IDE platform
   icon: build/icons
   syncDesktopName: true
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: build/icons/256x256.png
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
 electronVersion: 42.4.0

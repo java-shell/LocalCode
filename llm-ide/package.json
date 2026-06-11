@@ -1,7 +1,7 @@
 {
   "name": "llm-ide",
   "description": "Standalone local LLM IDE platform",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "main": "./out/main.js",
   "type": "commonjs",
   "author": "Java-Shell",
@@ -12,7 +12,9 @@
     "watch": "tsc -w -p ./",
     "start": "electron .",
     "dev": "npm run build && electron .",
-    "dist:linux": "npm run build && electron-builder --linux AppImage"
+    "dist:linux": "npm run build && electron-builder --linux AppImage",
+    "dist:win": "npm run build && electron-builder --win nsis",
+    "dist:win-zip": "npm run build && electron-builder --win zip"
   },
   "build": {
     "appId": "dev.localcode.llmide",
@@ -24,6 +26,7 @@
     "files": [
       "out/**/*",
       "renderer/**/*",
+      "build/icons/**/*",
       "src/backend/turbovec_bridge.py",
       "package.json"
     ],
@@ -39,6 +42,19 @@
       "description": "Standalone local LLM IDE platform",
       "icon": "build/icons",
       "syncDesktopName": true
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "icon": "build/icons/256x256.png"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
     }
   },
   "devDependencies": {

@@ -15,7 +15,10 @@
 <body>
   <div class="app-shell">
     <header class="topbar">
-      <div class="brand">LocalCode</div>
+      <div class="brand">
+        <img src="../build/icons/LocalCode.png" alt="LocalCode" class="brand-logo" />
+        <span>LocalCode</span>
+      </div>
       <div class="topbar-actions">
         <div class="meta">Standalone LLM IDE Platform</div>
         <button id="openSettings" type="button">Settings</button>
@@ -70,6 +73,14 @@
           <button id="orchTab" class="tab">Orchestration</button>
           <button id="diagTab" class="tab">Diagnostics</button>
         </div>
+
+        <section id="contextUsagePanel" class="context-usage-panel">
+          <div class="context-usage-header">
+            <strong>Model Context Usage</strong>
+            <span id="contextUsageStamp" class="context-usage-stamp">No usage yet</span>
+          </div>
+          <div id="contextUsageList" class="context-usage-list"></div>
+        </section>
 
         <section id="chatView" class="view active">
           <div id="chatStatus" class="status">Idle</div>

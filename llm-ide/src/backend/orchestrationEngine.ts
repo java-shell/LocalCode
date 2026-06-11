@@ -1,6 +1,6 @@
 import { chatWithTools } from './llmClient';
 import { executeTool, getAllowedToolDefinitions } from './toolRuntime';
-import { ChatMessage, LLMConfig, OrchestrationPlan, OrchestrationRunResult, OrchestrationRunStep } from '../shared/types';
+import { ChatMessage, LLMConfig, ModelUsage, OrchestrationPlan, OrchestrationRunResult, OrchestrationRunStep, TokenUsage } from '../shared/types';
 import { RetrievedMemoryItem } from './turboVecMemory';
 
 export interface RuntimeContext {
@@ -19,6 +19,67 @@ function truncateText(value: string, maxChars: number): string {
     return text;
   }
   return `${text.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function containsCompletionMarker(output: string, marker: string): boolean {
+  const rawMarker = String(marker ?? '').trim();
+  const rawOutput = String(output ?? '');
+  if (!rawMarker || !rawOutput) {
+    return false;
+  }
+
+  const normalizedOutput = rawOutput
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .replace(/\r\n?/g, '\n');
+
+  const markers = new Set<string>([rawMarker]);
+  const tagCore = rawMarker.replace(/^<\/?\s*|\s*\/?\s*>$/g, '').trim();
+  if (tagCore && tagCore !== rawMarker) {
+    markers.add(tagCore);
+  }
+
+  for (const candidate of markers) {
+    const escaped = escapeRegex(candidate);
+    const flexible = escaped.replace(/[\s_-]+/g, '[\\s_-]*');
+    const regex = new RegExp(flexible, 'i');
+    if (regex.test(normalizedOutput)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function aggregateUsageByModel(steps: OrchestrationRunStep[]): ModelUsage[] {
+  const usageMap = new Map<string, ModelUsage>();
+
+  for (const step of steps) {
+    const model = String(step.model ?? '').trim();
+    const usage = step.usage;
+    if (!model || !usage) {
+      continue;
+    }
+
+    const existing = usageMap.get(model) ?? {
+      model,
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      requests: 0
+    };
+
+    existing.promptTokens += usage.promptTokens;
+    existing.completionTokens += usage.completionTokens;
+    existing.totalTokens += usage.totalTokens;
+    existing.requests += usage.requests;
+    usageMap.set(model, existing);
+  }
+
+  return Array.from(usageMap.values()).sort((a, b) => b.totalTokens - a.totalTokens);
 }
 
 function formatRecalledMemory(items: RetrievedMemoryItem[]): string {
@@ -95,8 +156,9 @@ async function runSingleIteration(
     const toolDefs = getAllowedToolDefinitions(allowedToolNames);
 
     let output = '';
+    let usage: TokenUsage | undefined;
     try {
-      output = await chatWithTools(
+      const result = await chatWithTools(
         config,
         messages,
         toolDefs,
@@ -110,6 +172,8 @@ async function runSingleIteration(
         40,
         signal
       );
+      output = result.text;
+      usage = result.usage;
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       if (/canceled$/i.test(detail) || /stopped by user/i.test(detail)) {
@@ -124,7 +188,7 @@ async function runSingleIteration(
       await memoryAdapter.store(config, output, step.name);
     }
 
-    iterationSteps.push({ id: step.id, name: step.name, output, iteration });
+    iterationSteps.push({ id: step.id, name: step.name, output, iteration, model: step.model, usage });
     onEvent?.(`step:end:${step.name}:iteration:${iteration}`);
 
     if (step.passOutputToNext) {
@@ -170,6 +234,7 @@ export async function runOrchestration(
 
     allSteps.push(...iterationSteps);
     finalOutput = iterationSteps.length ? iterationSteps[iterationSteps.length - 1].output : '';
+    const iterationOutput = iterationSteps.map(step => step.output || '').join('\n\n');
     iterations = iteration;
 
     onEvent?.(`loop:end:${iteration}`);
@@ -178,8 +243,9 @@ export async function runOrchestration(
       break;
     }
 
-    if (completionMarker && finalOutput.includes(completionMarker)) {
+    if (containsCompletionMarker(iterationOutput, completionMarker)) {
       completed = true;
+      onEvent?.(`loop:complete:${iteration}`);
       break;
     }
 
@@ -197,6 +263,7 @@ export async function runOrchestration(
     steps: allSteps,
     iterations,
     completed,
-    completionMarker: loopUntilComplete ? completionMarker : undefined
+    completionMarker: loopUntilComplete ? completionMarker : undefined,
+    usageByModel: aggregateUsageByModel(allSteps)
   };
 }

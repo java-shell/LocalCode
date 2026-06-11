@@ -5,6 +5,7 @@ x64:
     - '!dist{,/**/*}'
     - out/**/*
     - renderer/**/*
+    - build/icons/**/*
     - src/backend/turbovec_bridge.py
     - package.json
     - '!**/*.{iml,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,suo,xproj,cc,d.ts,mk,a,o,obj,forge-meta,pdb}'
@@ -18,5 +19,6 @@ x64:
     - '**/*'
     - out/**/*
     - renderer/**/*
+    - build/icons/**/*
     - src/backend/turbovec_bridge.py
     - package.json

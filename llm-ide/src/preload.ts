@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import {
+  ChatStreamResult,
   ChatStreamRequest,
   OrchestrationExportResult,
   LLMConfig,
@@ -33,7 +34,7 @@ const api = {
   clearMemoryNamespace: async (payload: { namespace: string }): Promise<unknown> => {
     return ipcRenderer.invoke('memory:clear-namespace', payload);
   },
-  chatStream: async (payload: ChatStreamRequest): Promise<{ text: string }> => {
+  chatStream: async (payload: ChatStreamRequest): Promise<ChatStreamResult> => {
     return ipcRenderer.invoke('chat:stream', payload);
   },
   stopChat: async (): Promise<{ stopped: boolean; reason?: string }> => {

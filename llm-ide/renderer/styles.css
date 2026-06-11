@@ -47,8 +47,16 @@ body.panel-resizing {
 }
 
 .brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
   font-weight: 700;
   letter-spacing: 0.4px;
+}
+
+.brand-logo {
+  height: 36px;
+  width: auto;
 }
 
 .meta {
@@ -271,9 +279,90 @@ body.panel-resizing {
 
 .side-panel {
   display: grid;
-  grid-template-rows: 50px 1fr;
+  grid-template-rows: 50px auto 1fr;
   min-height: 0;
   min-width: 0;
+}
+
+.context-usage-panel {
+  border-bottom: 1px solid var(--border);
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+  background: rgba(8, 18, 31, 0.55);
+}
+
+.context-usage-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.context-usage-stamp {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.context-usage-list {
+  display: grid;
+  gap: 8px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.context-usage-empty {
+  color: var(--muted);
+  font-size: 12px;
+  border: 1px dashed rgba(255, 255, 255, 0.2);
+  border-radius: 8px;
+  padding: 8px;
+}
+
+.context-usage-item {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 7px 8px;
+  background: rgba(6, 12, 22, 0.5);
+  display: grid;
+  gap: 6px;
+}
+
+.context-usage-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.context-usage-model {
+  font-weight: 600;
+  max-width: 68%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-usage-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.context-usage-bar {
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.12);
+  display: flex;
+}
+
+.context-usage-prompt {
+  background: linear-gradient(90deg, #2ac3ff, #5fd9ff);
+}
+
+.context-usage-completion {
+  background: linear-gradient(90deg, #00e0a4, #5ff5cb);
 }
 
 .tabs {
@@ -769,6 +858,10 @@ button {
 
   .editor-panel {
     grid-template-rows: 48px 40px minmax(180px, 1fr) 180px;
+  }
+
+  .context-usage-list {
+    max-height: 120px;
   }
 
   .filetree-panel,
