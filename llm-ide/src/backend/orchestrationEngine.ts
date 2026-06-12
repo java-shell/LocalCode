@@ -130,10 +130,12 @@ async function runSingleIteration(
   runtimeContext?: RuntimeContext,
   memoryAdapter?: OrchestrationMemoryAdapter,
   signal?: AbortSignal
-): Promise<OrchestrationRunStep[]> {
+): Promise<{ steps: OrchestrationRunStep[]; taskCompleted: boolean; completionSummary: string }> {
   let priorOutput = iterationPrompt;
   const originalPromptForModel = truncateText(originalPrompt, 4000);
   const iterationSteps: OrchestrationRunStep[] = [];
+  const isLooping = Boolean(plan.loopUntilComplete);
+  const COMPLETION_TOOL = 'complete_orchestration_task';
 
   for (const step of plan.steps) {
     onEvent?.(`step:start:${step.name}:iteration:${iteration}`);
@@ -174,7 +176,19 @@ async function runSingleIteration(
     });
 
     const allowedToolNames = step.tools.filter(tool => tool.enabled).map(tool => tool.name);
-    const toolDefs = getAllowedToolDefinitions(allowedToolNames);
+    let toolDefs = getAllowedToolDefinitions(allowedToolNames);
+
+    // Auto-inject the completion tool on every step when running in loop mode.
+    if (isLooping) {
+      const completionDef = getAllowedToolDefinitions([COMPLETION_TOOL]);
+      if (completionDef.length > 0 && !toolDefs.some(t => t.function.name === COMPLETION_TOOL)) {
+        toolDefs = [...toolDefs, completionDef[0]];
+      }
+    }
+
+    let taskCompleted = false;
+    let completionSummary = '';
+    const stepToolCalls: Array<{ name: string; intent: string; timestamp: string }> = [];
 
     let output = '';
     let usage: TokenUsage | undefined;
@@ -184,12 +198,28 @@ async function runSingleIteration(
         messages,
         toolDefs,
         async (name, args) => {
+          if (name === COMPLETION_TOOL) {
+            taskCompleted = true;
+            completionSummary = String((args as Record<string, unknown>)?.summary ?? '');
+            return { ok: true, message: 'Task completion acknowledged. Orchestration will stop after this step.' };
+          }
           if (!allowedToolNames.includes(name)) {
             throw new Error(`Tool ${name} is not enabled in step ${step.name}.`);
           }
           return executeTool(name, args, runtimeContext);
         },
-        event => onEvent?.(`${step.name}:iteration:${iteration}:${event}`),
+        event => {
+          onEvent?.(`${step.name}:iteration:${iteration}:${event}`);
+          const TOOL_PREFIX = 'tool:';
+          const INTENT_SEP = ' | intent: ';
+          if (event.startsWith(TOOL_PREFIX)) {
+            const toolPart = event.slice(TOOL_PREFIX.length);
+            const sepIdx = toolPart.indexOf(INTENT_SEP);
+            const toolName = sepIdx >= 0 ? toolPart.slice(0, sepIdx) : toolPart;
+            const intent = sepIdx >= 0 ? toolPart.slice(sepIdx + INTENT_SEP.length) : '';
+            stepToolCalls.push({ name: toolName, intent, timestamp: new Date().toISOString() });
+          }
+        },
         40,
         signal
       );
@@ -217,16 +247,21 @@ async function runSingleIteration(
       model: step.model,
       usage,
       recalledPromptTokens: Math.max(0, Number(recalledPromptTokens ?? 0)),
-      contextWindowTokens: Math.max(0, Number(step.contextWindowTokens ?? 0))
+      contextWindowTokens: Math.max(0, Number(step.contextWindowTokens ?? 0)),
+      toolCalls: stepToolCalls.length > 0 ? stepToolCalls : undefined
     });
     onEvent?.(`step:end:${step.name}:iteration:${iteration}`);
+
+    if (taskCompleted) {
+      return { steps: iterationSteps, taskCompleted: true, completionSummary };
+    }
 
     if (step.passOutputToNext) {
       priorOutput = truncateText(output, 12000);
     }
   }
 
-  return iterationSteps;
+  return { steps: iterationSteps, taskCompleted: false, completionSummary: '' };
 }
 
 export async function runOrchestration(
@@ -251,7 +286,7 @@ export async function runOrchestration(
   for (let iteration = 1; iteration <= loopLimit; iteration += 1) {
     onEvent?.(`loop:start:${iteration}`);
 
-    const iterationSteps = await runSingleIteration(
+    const { steps: iterationSteps, taskCompleted, completionSummary } = await runSingleIteration(
       plan,
       userPrompt,
       iterationPrompt,
@@ -273,6 +308,14 @@ export async function runOrchestration(
       break;
     }
 
+    // Primary: completion signalled via complete_orchestration_task tool call.
+    if (taskCompleted) {
+      completed = true;
+      onEvent?.(`loop:complete:${iteration}${completionSummary ? `:${completionSummary}` : ''}`);
+      break;
+    }
+
+    // Fallback: completion marker still present in text output (backward compat).
     if (containsCompletionMarker(iterationOutput, completionMarker)) {
       completed = true;
       onEvent?.(`loop:complete:${iteration}`);
@@ -283,8 +326,8 @@ export async function runOrchestration(
       `Previous orchestration output (iteration ${iteration}):`,
       finalOutput,
       '',
-      'Continue from this output. If the task is complete, include this exact marker in your final answer:',
-      completionMarker
+      'Continue from this output. When the task is fully complete, call the complete_orchestration_task tool with a brief summary of what was accomplished.',
+      'Do not signal completion by emitting text — use the tool call.'
     ].join('\n'), 12000);
   }
 

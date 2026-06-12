@@ -107,6 +107,12 @@ export interface OrchestrationPlan {
   steps: OrchestrationStep[];
 }
 
+export interface OrchestrationToolCallRecord {
+  name: string;
+  intent: string;
+  timestamp: string;
+}
+
 export interface OrchestrationRunStep {
   id: string;
   name: string;
@@ -116,6 +122,7 @@ export interface OrchestrationRunStep {
   recalledPromptTokens?: number;
   contextWindowTokens?: number;
   usage?: TokenUsage;
+  toolCalls?: OrchestrationToolCallRecord[];
 }
 
 export interface OrchestrationRunResult {

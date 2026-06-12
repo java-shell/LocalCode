@@ -354,6 +354,25 @@ export const toolDefinitions: ToolDefinition[] = [
         required: ['command']
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'complete_orchestration_task',
+      description:
+        'Signal that the orchestration task is fully complete and no further steps or iterations are needed. ' +
+        'Call this tool once all objectives from the original request have been achieved.',
+      parameters: {
+        type: 'object',
+        properties: {
+          summary: {
+            type: 'string',
+            description: 'Brief summary of what was accomplished and why the task is complete.'
+          }
+        },
+        required: []
+      }
+    }
   }
 ];
 
@@ -1113,6 +1132,9 @@ export async function executeTool(name: string, args: unknown, context?: Runtime
       return gitCommit(safeArgs, context);
     case 'run_terminal_command':
       return runTerminalCommand(safeArgs, context);
+    case 'complete_orchestration_task':
+      // Intercepted by the orchestration engine; this fallback handles unexpected direct calls.
+      return { ok: true, message: 'Task completion acknowledged.' };
     default:
       throw new Error(`Unsupported tool: ${name}`);
   }

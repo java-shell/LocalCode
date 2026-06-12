@@ -631,6 +631,8 @@ export async function chatWithTools(
         return `commit with message ${String(args.message ?? '')}`;
       case 'run_terminal_command':
         return `run command ${String(args.command ?? '')}`;
+      case 'complete_orchestration_task':
+        return args.summary ? `signal completion: ${String(args.summary).slice(0, 120)}` : 'signal task completion';
       default:
         return 'execute requested operation';
     }

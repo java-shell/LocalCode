@@ -1749,13 +1749,52 @@ async function initOrchestration() {
           stepDetails.open = entryIndex === outputLogEntries.length - 1 && stepIndex === entry.steps.length - 1;
 
           const stepSummary = document.createElement('summary');
-          stepSummary.textContent = `Iteration ${step.iteration} | ${step.name} (${step.id})`;
+          const toolCallCount = Array.isArray(step.toolCalls) ? step.toolCalls.length : 0;
+          stepSummary.textContent = `Iteration ${step.iteration} | ${step.name} (${step.id})${toolCallCount > 0 ? ` | ${toolCallCount} tool call(s)` : ''}`;
           stepDetails.appendChild(stepSummary);
 
           const body = document.createElement('div');
           body.className = 'assistant-markdown orchestration-log-markdown-content orchestration-log-step-body';
           body.innerHTML = renderMarkdownToHtml(step.output || '(empty output)');
           stepDetails.appendChild(body);
+
+          if (toolCallCount > 0) {
+            const tcDetails = document.createElement('details');
+            tcDetails.className = 'orchestration-log-tool-calls';
+
+            const tcSummary = document.createElement('summary');
+            tcSummary.textContent = `Tool Calls (${toolCallCount})`;
+            tcDetails.appendChild(tcSummary);
+
+            const tcList = document.createElement('div');
+            tcList.className = 'orchestration-log-tool-calls-list';
+
+            for (const tc of step.toolCalls) {
+              const row = document.createElement('div');
+              row.className = 'orchestration-log-tool-call-row';
+
+              const timeEl = document.createElement('span');
+              timeEl.className = 'orchestration-log-tool-call-time';
+              timeEl.textContent = new Date(tc.timestamp).toLocaleTimeString();
+
+              const nameEl = document.createElement('span');
+              nameEl.className = 'orchestration-log-tool-call-name';
+              nameEl.textContent = tc.name;
+
+              const intentEl = document.createElement('span');
+              intentEl.className = 'orchestration-log-tool-call-intent';
+              intentEl.textContent = tc.intent;
+
+              row.appendChild(timeEl);
+              row.appendChild(nameEl);
+              row.appendChild(intentEl);
+              tcList.appendChild(row);
+            }
+
+            tcDetails.appendChild(tcList);
+            stepDetails.appendChild(tcDetails);
+          }
+
           runDetails.appendChild(stepDetails);
         });
       }
@@ -1795,7 +1834,8 @@ async function initOrchestration() {
         id: step.id,
         name: step.name,
         iteration: step.iteration,
-        output: step.output || ''
+        output: step.output || '',
+        toolCalls: Array.isArray(step.toolCalls) ? step.toolCalls : []
       }))
     });
 
@@ -1812,6 +1852,14 @@ async function initOrchestration() {
     } else {
       for (const step of steps) {
         lines.push(`Iteration ${step.iteration} | ${step.name} (${step.id})`);
+        const toolCalls = Array.isArray(step.toolCalls) ? step.toolCalls : [];
+        if (toolCalls.length > 0) {
+          lines.push(`Tool calls (${toolCalls.length}):`);
+          for (const tc of toolCalls) {
+            const time = new Date(tc.timestamp).toLocaleTimeString();
+            lines.push(`  [${time}] ${tc.name} — ${tc.intent}`);
+          }
+        }
         lines.push(step.output || '(empty output)');
         lines.push('');
       }
