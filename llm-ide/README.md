@@ -68,6 +68,13 @@ Tool calls also support `scope`:
 - `workspace` (default): selected top-level workspace directory
 - `root`: LocalCode app root directory
 
+
+Line-oriented file tools use 1-based numbering consistently:
+
+- `read_file` accepts optional `startLine` / `endLine` and returns `numberedContent` plus `totalLines`
+- `insert_in_file` inserts **before** the specified 1-based `line`
+- use `line = totalLines + 1` to append at the end of a file
+
 ## Project Layout
 
 - [src/main.ts](src/main.ts) Electron window + IPC handlers

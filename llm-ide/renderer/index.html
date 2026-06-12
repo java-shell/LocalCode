@@ -83,10 +83,24 @@
         </section>
 
         <section id="chatView" class="view active">
+          <div class="chat-session-header">
+            <label class="label" for="chatSessionList">Chat History</label>
+            <div class="chat-session-actions">
+              <button id="chatNewSession" type="button">New Chat</button>
+              <button id="chatDeleteSession" type="button">Delete Chat</button>
+            </div>
+          </div>
+          <select id="chatSessionList"></select>
+          <div id="chatSessionWorkspace" class="status chat-session-workspace"></div>
           <div id="chatStatus" class="status">Idle</div>
           <div id="chatConversation" class="log chat-log"></div>
           <button id="chatSettingsToggle" type="button" class="chat-settings-toggle">Model Settings</button>
           <div id="chatSettingsPanel" class="chat-settings-panel">
+            <label class="label">Provider</label>
+            <select id="chatProvider">
+              <option value="openai-compatible">openai-compatible</option>
+              <option value="ollama">ollama</option>
+            </select>
             <label class="label">Endpoint</label>
             <input id="chatEndpoint" value="http://localhost:11434/v1/chat/completions" />
             <label class="label">Model</label>
@@ -94,6 +108,8 @@
               <select id="chatModel"></select>
               <button id="chatRefreshModels" type="button">Refresh Models</button>
             </div>
+            <label class="label">Context Window Tokens</label>
+            <input id="chatContextWindowTokens" type="number" min="1" step="1" placeholder="Auto-detect by model" />
             <label class="label">API Key (optional)</label>
             <input id="chatApiKey" type="password" placeholder="sk-..." />
             <label class="label">Memory Namespace (optional)</label>
@@ -196,6 +212,11 @@
       <input id="settingMaxToolTurns" type="number" min="1" max="200" step="1" />
       <label class="label" for="settingEndpoint">Default Endpoint</label>
       <input id="settingEndpoint" placeholder="http://localhost:11434/v1/chat/completions" />
+      <label class="label" for="settingProvider">Default Provider</label>
+      <select id="settingProvider">
+        <option value="openai-compatible">openai-compatible</option>
+        <option value="ollama">ollama</option>
+      </select>
       <label class="label" for="settingModel">Default Model</label>
       <input id="settingModel" placeholder="llama3" />
       <label class="label" for="settingApiKey">Default API Key (optional)</label>

@@ -11,9 +11,11 @@ const PANEL_SIZES_STORAGE_KEY = 'localcode.panelSizes';
 
 const settingsState = {
   maxToolTurns: 40,
+  provider: 'ollama',
   endpoint: 'http://localhost:11434/v1/chat/completions',
   model: 'llama3',
   apiKey: '',
+  modelContextWindows: {},
   chatMemoryNamespace: '',
   chatSettingsCollapsed: true
 };
@@ -24,6 +26,7 @@ const contextWindowHints = [
   { pattern: /(gpt-5|gpt-4\.1|o4|o3)/i, tokens: 128000 },
   { pattern: /(claude-3|claude-4)/i, tokens: 200000 },
   { pattern: /(qwen2?\.5|llama3\.1|llama3\.2|mistral|gemma)/i, tokens: 32768 },
+  { pattern: /(granite4\.1|granite41|granite4)/i, tokens: 65536 },
   { pattern: /(deepseek|phi-4)/i, tokens: 65536 }
 ];
 
@@ -32,10 +35,103 @@ function clampMaxToolTurns(value) {
   return Math.max(1, Math.min(200, Math.floor(value)));
 }
 
+function clampContextWindowTokens(value) {
+  if (!Number.isFinite(value)) return 0;
+  return Math.max(0, Math.min(4_000_000, Math.floor(value)));
+}
+
+function normalizeProvider(value) {
+  return String(value || '').trim().toLowerCase() === 'ollama' ? 'ollama' : 'openai-compatible';
+}
+
+function modelKey(model) {
+  return String(model || '').trim();
+}
+
+function getConfiguredContextWindow(model) {
+  const key = modelKey(model);
+  if (!key) return 0;
+  return clampContextWindowTokens(Number(settingsState.modelContextWindows?.[key] || 0));
+}
+
+function setConfiguredContextWindow(model, tokens) {
+  const key = modelKey(model);
+  if (!key) return;
+  const next = clampContextWindowTokens(tokens);
+  settingsState.modelContextWindows = settingsState.modelContextWindows || {};
+  if (next <= 0) {
+    delete settingsState.modelContextWindows[key];
+    return;
+  }
+  settingsState.modelContextWindows[key] = next;
+}
+
+function rememberDiscoveredContextWindows(contextWindows) {
+  if (!contextWindows || typeof contextWindows !== 'object') {
+    return false;
+  }
+
+  let changed = false;
+  for (const [model, rawValue] of Object.entries(contextWindows)) {
+    const key = modelKey(model);
+    const discovered = clampContextWindowTokens(Number(rawValue || 0));
+    if (!key || discovered <= 0) {
+      continue;
+    }
+
+    const existing = getConfiguredContextWindow(key);
+    if (existing <= 0) {
+      setConfiguredContextWindow(key, discovered);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    saveSettings();
+  }
+
+  return changed;
+}
+
+function resolveContextWindow(model, fallback) {
+  const configured = Math.max(getConfiguredContextWindow(model), clampContextWindowTokens(Number(fallback || 0)));
+  if (configured > 0) {
+    return configured;
+  }
+  return estimateContextWindow(model);
+}
+
+function inferContextWindowFromModelLabel(model) {
+  const label = String(model || '').trim().toLowerCase();
+  if (!label) {
+    return 0;
+  }
+
+  const match = label.match(/(?:ctx|context)[-_]?([0-9]{1,4})(k|m)\b|\b([0-9]{1,4})(k|m)\b/i);
+  const amount = Number(match?.[1] || match?.[3] || 0);
+  const unit = String(match?.[2] || match?.[4] || '').toLowerCase();
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return 0;
+  }
+
+  if (unit === 'm') {
+    return amount * 1024 * 1024;
+  }
+  if (unit === 'k') {
+    return amount * 1024;
+  }
+
+  return 0;
+}
+
 function estimateContextWindow(model) {
   const label = String(model || '').trim();
   if (!label) {
     return 8192;
+  }
+  const inferred = clampContextWindowTokens(inferContextWindowFromModelLabel(label));
+  if (inferred > 0) {
+    return inferred;
   }
   for (const hint of contextWindowHints) {
     if (hint.pattern.test(label)) {
@@ -66,19 +162,27 @@ function recordModelUsage(entries) {
     const completionTokens = Math.max(0, Number(entry?.completionTokens || 0));
     const totalTokens = Math.max(0, Number(entry?.totalTokens || (promptTokens + completionTokens)));
     const requests = Math.max(1, Number(entry?.requests || 1));
+    const recalledPromptTokens = Math.max(0, Number(entry?.recalledPromptTokens || 0));
+    const contextWindowTokens = clampContextWindowTokens(Number(entry?.contextWindowTokens || 0));
 
     const existing = usageByModel.get(model) || {
       model,
       promptTokens: 0,
       completionTokens: 0,
       totalTokens: 0,
-      requests: 0
+      requests: 0,
+      recalledPromptTokens: 0,
+      contextWindowTokens: 0
     };
 
     existing.promptTokens += promptTokens;
     existing.completionTokens += completionTokens;
     existing.totalTokens += totalTokens;
     existing.requests += requests;
+    existing.recalledPromptTokens += recalledPromptTokens;
+    if (contextWindowTokens > 0) {
+      existing.contextWindowTokens = Math.max(existing.contextWindowTokens || 0, contextWindowTokens);
+    }
     usageByModel.set(model, existing);
     changed = true;
   }
@@ -111,13 +215,13 @@ function renderContextUsageGraph() {
   }
 
   for (const row of rows) {
-    const avgPrompt = row.promptTokens / Math.max(1, row.requests);
-    const avgCompletion = row.completionTokens / Math.max(1, row.requests);
+    const avgRecalled = (row.recalledPromptTokens || 0) / Math.max(1, row.requests);
     const avgTotal = row.totalTokens / Math.max(1, row.requests);
-    const contextWindow = estimateContextWindow(row.model);
+    const avgSession = Math.max(0, avgTotal - avgRecalled);
+    const contextWindow = resolveContextWindow(row.model, row.contextWindowTokens);
     const avgPct = Math.min(100, Math.round((avgTotal / Math.max(1, contextWindow)) * 100));
-    const promptPct = Math.min(100, (avgPrompt / Math.max(1, contextWindow)) * 100);
-    const completionPct = Math.max(0, Math.min(100 - promptPct, (avgCompletion / Math.max(1, contextWindow)) * 100));
+    const recalledPct = Math.min(100, (avgRecalled / Math.max(1, contextWindow)) * 100);
+    const sessionPct = Math.max(0, Math.min(100 - recalledPct, (avgSession / Math.max(1, contextWindow)) * 100));
 
     const card = document.createElement('div');
     card.className = 'context-usage-item';
@@ -137,20 +241,20 @@ function renderContextUsageGraph() {
     const bar = document.createElement('div');
     bar.className = 'context-usage-bar';
 
-    const prompt = document.createElement('div');
-    prompt.className = 'context-usage-prompt';
-    prompt.style.width = `${promptPct}%`;
+    const recalled = document.createElement('div');
+    recalled.className = 'context-usage-memory';
+    recalled.style.width = `${recalledPct}%`;
 
-    const completion = document.createElement('div');
-    completion.className = 'context-usage-completion';
-    completion.style.width = `${completionPct}%`;
+    const session = document.createElement('div');
+    session.className = 'context-usage-session';
+    session.style.width = `${sessionPct}%`;
 
     const meta = document.createElement('div');
     meta.className = 'context-usage-meta';
-    meta.textContent = `prompt=${formatCount(avgPrompt)} avg | completion=${formatCount(avgCompletion)} avg | total=${formatCount(row.totalTokens)} over ${formatCount(row.requests)} req`;
+    meta.textContent = `TurboVec=${formatCount(avgRecalled)} avg | session=${formatCount(avgSession)} avg | total=${formatCount(row.totalTokens)} over ${formatCount(row.requests)} req`;
 
-    bar.appendChild(prompt);
-    bar.appendChild(completion);
+    bar.appendChild(recalled);
+    bar.appendChild(session);
     card.appendChild(title);
     card.appendChild(bar);
     card.appendChild(meta);
@@ -164,6 +268,7 @@ function loadSettings() {
     if (!raw) return;
     const parsed = JSON.parse(raw);
     settingsState.maxToolTurns = clampMaxToolTurns(Number(parsed.maxToolTurns ?? 40));
+    settingsState.provider = normalizeProvider(parsed.provider ?? settingsState.provider);
     settingsState.endpoint = String(parsed.endpoint ?? settingsState.endpoint).trim() || settingsState.endpoint;
   // OpenWeatherMap API key modal handling
   const openWeatherApiKeyModal = document.getElementById('openWeatherApiKeyModal');
@@ -214,13 +319,21 @@ function loadSettings() {
 
     settingsState.model = String(parsed.model ?? settingsState.model).trim() || settingsState.model;
     settingsState.apiKey = String(parsed.apiKey ?? settingsState.apiKey);
+    settingsState.modelContextWindows =
+      parsed.modelContextWindows && typeof parsed.modelContextWindows === 'object'
+        ? Object.fromEntries(
+            Object.entries(parsed.modelContextWindows).map(([key, value]) => [String(key), clampContextWindowTokens(Number(value))])
+          )
+        : {};
     settingsState.chatMemoryNamespace = String(parsed.chatMemoryNamespace ?? settingsState.chatMemoryNamespace).trim();
     settingsState.chatSettingsCollapsed = Boolean(parsed.chatSettingsCollapsed ?? settingsState.chatSettingsCollapsed);
   } catch {
     settingsState.maxToolTurns = 40;
+    settingsState.provider = 'ollama';
     settingsState.endpoint = 'http://localhost:11434/v1/chat/completions';
     settingsState.model = 'llama3';
     settingsState.apiKey = '';
+    settingsState.modelContextWindows = {};
     settingsState.chatMemoryNamespace = '';
     settingsState.chatSettingsCollapsed = true;
   }
@@ -701,11 +814,13 @@ function initSettingsMenu() {
   const modal = document.getElementById('settingsModal');
   const input = document.getElementById('settingMaxToolTurns');
   const endpointInput = document.getElementById('settingEndpoint');
+  const providerInput = document.getElementById('settingProvider');
   const modelInput = document.getElementById('settingModel');
   const apiKeyInput = document.getElementById('settingApiKey');
   const cancel = document.getElementById('settingsCancel');
   const save = document.getElementById('settingsSave');
 
+  const chatProvider = document.getElementById('chatProvider');
   const chatEndpoint = document.getElementById('chatEndpoint');
   const chatModel = document.getElementById('chatModel');
   const chatApiKey = document.getElementById('chatApiKey');
@@ -713,6 +828,7 @@ function initSettingsMenu() {
   function openModal() {
     input.value = String(settingsState.maxToolTurns);
     endpointInput.value = settingsState.endpoint;
+    providerInput.value = normalizeProvider(settingsState.provider);
     modelInput.value = settingsState.model;
     apiKeyInput.value = settingsState.apiKey;
     modal.classList.add('open');
@@ -732,9 +848,11 @@ function initSettingsMenu() {
   save.addEventListener('click', () => {
     settingsState.maxToolTurns = clampMaxToolTurns(Number(input.value));
     settingsState.endpoint = endpointInput.value.trim() || settingsState.endpoint;
+    settingsState.provider = normalizeProvider(providerInput.value);
     settingsState.model = modelInput.value.trim() || settingsState.model;
     settingsState.apiKey = apiKeyInput.value;
 
+    chatProvider.value = settingsState.provider;
     chatEndpoint.value = settingsState.endpoint;
     chatApiKey.value = settingsState.apiKey;
     if (![...chatModel.options].some(option => option.value === settingsState.model)) {
@@ -786,12 +904,18 @@ function setupMonaco() {
 
 async function initChat() {
   const conversation = document.getElementById('chatConversation');
+  const chatSessionList = document.getElementById('chatSessionList');
+  const chatSessionWorkspace = document.getElementById('chatSessionWorkspace');
+  const chatNewSession = document.getElementById('chatNewSession');
+  const chatDeleteSession = document.getElementById('chatDeleteSession');
   const status = document.getElementById('chatStatus');
+  const provider = document.getElementById('chatProvider');
   const endpoint = document.getElementById('chatEndpoint');
   const model = document.getElementById('chatModel');
   const settingsToggle = document.getElementById('chatSettingsToggle');
   const settingsPanel = document.getElementById('chatSettingsPanel');
   const refreshModels = document.getElementById('chatRefreshModels');
+  const chatContextWindowTokens = document.getElementById('chatContextWindowTokens');
   const apiKey = document.getElementById('chatApiKey');
   const chatMemoryNamespace = document.getElementById('chatMemoryNamespace');
   const chatNewMemoryNamespace = document.getElementById('chatNewMemoryNamespace');
@@ -799,9 +923,276 @@ async function initChat() {
   const send = document.getElementById('chatSend');
   const stop = document.getElementById('chatStop');
 
+  provider.value = normalizeProvider(settingsState.provider);
   endpoint.value = settingsState.endpoint;
   apiKey.value = settingsState.apiKey;
   chatNewMemoryNamespace.value = '';
+
+  let currentWorkspaceDir = '';
+  let chatSessions = [];
+  let activeChatSessionId = '';
+  let activeChatSessionTitle = '';
+  let activeChatSessionCreatedAt = '';
+  let activeChatMessages = [];
+  let sessionListMutating = false;
+
+  function workspaceLabel(workspaceDir) {
+    const value = String(workspaceDir || '').trim();
+    if (!value) return 'Unknown workspace';
+    const parts = value.split(/[\\/]/).filter(Boolean);
+    const leaf = parts[parts.length - 1] || value;
+    return `${leaf} (${value})`;
+  }
+
+  function formatChatTimestamp(value) {
+    const date = new Date(value);
+    if (!Number.isFinite(date.getTime())) {
+      return 'unknown time';
+    }
+    return date.toLocaleString();
+  }
+
+  function createChatSessionId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+      return window.crypto.randomUUID();
+    }
+    return `chat-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+  }
+
+  function buildChatTitleFromPrompt(text) {
+    const cleaned = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!cleaned) {
+      return `Chat ${new Date().toLocaleString()}`;
+    }
+    return cleaned.length > 56 ? `${cleaned.slice(0, 56)}...` : cleaned;
+  }
+
+  function renderAssistantMessage(markdownText) {
+    const assistantRow = document.createElement('div');
+    assistantRow.className = 'log-line log-line-assistant';
+
+    const assistantLabel = document.createElement('div');
+    assistantLabel.className = 'assistant-label';
+    assistantLabel.textContent = 'Assistant:';
+
+    const assistantMarkdown = document.createElement('div');
+    assistantMarkdown.className = 'assistant-markdown';
+    assistantMarkdown.innerHTML = renderMarkdownToHtml(markdownText || '');
+
+    assistantRow.appendChild(assistantLabel);
+    assistantRow.appendChild(assistantMarkdown);
+    conversation.appendChild(assistantRow);
+    conversation.scrollTop = conversation.scrollHeight;
+
+    return { markdown: assistantMarkdown };
+  }
+
+  function renderConversationMessages(messages) {
+    conversation.innerHTML = '';
+    for (const message of messages) {
+      if (!message || typeof message !== 'object') continue;
+      if (message.role === 'assistant') {
+        renderAssistantMessage(String(message.content || ''));
+        continue;
+      }
+      if (message.role === 'user') {
+        appendLog(conversation, `You: ${String(message.content || '')}`);
+      }
+    }
+  }
+
+  function selectedChatMemoryNamespace() {
+    if (chatMemoryNamespace.value === '__new__') {
+      return chatNewMemoryNamespace.value.trim();
+    }
+    return chatMemoryNamespace.value.trim();
+  }
+
+  function resolveSelectedContextWindowTokens() {
+    const selectedModel = model.value || settingsState.model;
+    const typed = clampContextWindowTokens(Number(chatContextWindowTokens.value || 0));
+    if (typed > 0) {
+      return typed;
+    }
+    return resolveContextWindow(selectedModel);
+  }
+
+  function persistSelectedContextWindow(options = { syncInput: false, save: false }) {
+    const selectedModel = model.value || settingsState.model;
+    const typed = clampContextWindowTokens(Number(chatContextWindowTokens.value || 0));
+
+    if (typed > 0) {
+      setConfiguredContextWindow(selectedModel, typed);
+      if (options.syncInput) {
+        chatContextWindowTokens.value = String(typed);
+      }
+    } else {
+      setConfiguredContextWindow(selectedModel, 0);
+      if (options.syncInput) {
+        chatContextWindowTokens.value = String(estimateContextWindow(selectedModel));
+      }
+    }
+
+    if (options.save) {
+      saveSettings();
+      renderContextUsageGraph();
+    }
+  }
+
+  function currentSessionConfig() {
+    return {
+      provider: normalizeProvider(provider.value),
+      endpoint: endpoint.value.trim() || settingsState.endpoint,
+      model: model.value || settingsState.model,
+      contextWindowTokens: resolveSelectedContextWindowTokens(),
+      memoryNamespace: selectedChatMemoryNamespace() || undefined
+    };
+  }
+
+  async function persistActiveChatSession() {
+    if (!activeChatSessionId) return;
+
+    const nowIso = new Date().toISOString();
+    const payload = {
+      id: activeChatSessionId,
+      title: activeChatSessionTitle || `Chat ${new Date().toLocaleString()}`,
+      workspaceDir: currentWorkspaceDir || '(unknown workspace)',
+      createdAt: activeChatSessionCreatedAt || nowIso,
+      updatedAt: nowIso,
+      messages: activeChatMessages,
+      messageCount: activeChatMessages.length,
+      lastMessagePreview: activeChatMessages.length
+        ? String(activeChatMessages[activeChatMessages.length - 1].content || '').slice(0, 160)
+        : '',
+      config: currentSessionConfig()
+    };
+
+    const saved = await window.llmIde.saveChatSession({ session: payload });
+    activeChatSessionId = saved.id;
+    activeChatSessionTitle = saved.title;
+    activeChatSessionCreatedAt = saved.createdAt;
+    activeChatMessages = Array.isArray(saved.messages) ? saved.messages : [];
+  }
+
+  function updateChatSessionWorkspaceLabel(workspaceDir, updatedAt) {
+    chatSessionWorkspace.textContent = `Workspace: ${workspaceLabel(workspaceDir)} | Updated: ${formatChatTimestamp(updatedAt)}`;
+  }
+
+  function renderChatSessionList() {
+    sessionListMutating = true;
+    chatSessionList.innerHTML = '';
+
+    for (const session of chatSessions) {
+      const option = document.createElement('option');
+      option.value = session.id;
+      option.textContent = `${session.title} | ${workspaceLabel(session.workspaceDir)}`;
+      chatSessionList.appendChild(option);
+    }
+
+    if (activeChatSessionId && chatSessions.some(session => session.id === activeChatSessionId)) {
+      chatSessionList.value = activeChatSessionId;
+    } else if (chatSessions.length > 0) {
+      chatSessionList.value = chatSessions[0].id;
+    }
+
+    sessionListMutating = false;
+  }
+
+  async function refreshChatSessions() {
+    const result = await window.llmIde.listChatSessions();
+    const sessions = Array.isArray(result?.sessions) ? result.sessions : [];
+    chatSessions = sessions
+      .slice()
+      .sort((a, b) => {
+        const aCurrent = a.workspaceDir === currentWorkspaceDir ? 1 : 0;
+        const bCurrent = b.workspaceDir === currentWorkspaceDir ? 1 : 0;
+        if (aCurrent !== bCurrent) {
+          return bCurrent - aCurrent;
+        }
+        return String(b.updatedAt || '').localeCompare(String(a.updatedAt || ''));
+      });
+    renderChatSessionList();
+  }
+
+  async function loadChatSessionById(id) {
+    const selectedId = String(id || '').trim();
+    if (!selectedId) return;
+
+    const session = await window.llmIde.loadChatSession({ id: selectedId });
+    if (!session) {
+      await refreshChatSessions();
+      return;
+    }
+
+    activeChatSessionId = session.id;
+    activeChatSessionTitle = session.title;
+    activeChatSessionCreatedAt = session.createdAt;
+    activeChatMessages = Array.isArray(session.messages) ? session.messages : [];
+
+    provider.value = normalizeProvider(session.config?.provider || settingsState.provider);
+    endpoint.value = session.config?.endpoint || settingsState.endpoint;
+
+    await refreshModelOptions(session.config?.model || model.value || settingsState.model);
+    if (session.config?.model) {
+      model.value = session.config.model;
+    }
+
+    if (Number(session.config?.contextWindowTokens || 0) > 0) {
+      setConfiguredContextWindow(model.value || settingsState.model, Number(session.config.contextWindowTokens));
+      chatContextWindowTokens.value = String(clampContextWindowTokens(Number(session.config.contextWindowTokens)));
+    } else {
+      syncChatContextWindowInput();
+    }
+
+    settingsState.provider = normalizeProvider(provider.value);
+    settingsState.endpoint = endpoint.value.trim() || settingsState.endpoint;
+    settingsState.model = model.value || settingsState.model;
+    settingsState.chatMemoryNamespace = String(session.config?.memoryNamespace || '');
+    saveSettings();
+
+    await refreshChatNamespaceOptions();
+    if (settingsState.chatMemoryNamespace) {
+      const namespaceKnown = Array.from(chatMemoryNamespace.options).some(
+        option => option.value === settingsState.chatMemoryNamespace
+      );
+      if (namespaceKnown) {
+        chatMemoryNamespace.value = settingsState.chatMemoryNamespace;
+        chatNewMemoryNamespace.value = '';
+      } else {
+        chatMemoryNamespace.value = '__new__';
+        chatNewMemoryNamespace.value = settingsState.chatMemoryNamespace;
+      }
+      syncNewNamespaceVisibility();
+    }
+
+    renderConversationMessages(activeChatMessages);
+    updateChatSessionWorkspaceLabel(session.workspaceDir, session.updatedAt);
+    status.textContent = `Loaded chat: ${session.title}`;
+    chatDeleteSession.disabled = false;
+
+    if (chatSessionList.value !== session.id) {
+      sessionListMutating = true;
+      chatSessionList.value = session.id;
+      sessionListMutating = false;
+    }
+  }
+
+  async function createNewChatSession() {
+    const timestamp = new Date().toISOString();
+    activeChatSessionId = createChatSessionId();
+    activeChatSessionTitle = `Chat ${new Date().toLocaleString()}`;
+    activeChatSessionCreatedAt = timestamp;
+    activeChatMessages = [];
+    conversation.innerHTML = '';
+    await persistActiveChatSession();
+    await refreshChatSessions();
+    updateChatSessionWorkspaceLabel(currentWorkspaceDir, timestamp);
+    status.textContent = 'Started new chat';
+    chatDeleteSession.disabled = false;
+    sessionListMutating = true;
+    chatSessionList.value = activeChatSessionId;
+    sessionListMutating = false;
+  }
 
   function applyChatSettingsVisibility() {
     settingsPanel.classList.toggle('collapsed', settingsState.chatSettingsCollapsed);
@@ -818,7 +1209,6 @@ async function initChat() {
 
   let assistantMarkdownRaw = '';
   let assistantMarkdownEl = null;
-  let assistantRowEl = null;
   let assistantReceivedToken = false;
   let markdownRenderQueued = false;
   let chatRunning = false;
@@ -850,13 +1240,6 @@ async function initChat() {
   const offChatEvent = window.llmIde.onChatEvent(event => {
     appendLog(conversation, `[tool] ${event}`);
   });
-
-  function selectedChatMemoryNamespace() {
-    if (chatMemoryNamespace.value === '__new__') {
-      return chatNewMemoryNamespace.value.trim();
-    }
-    return chatMemoryNamespace.value.trim();
-  }
 
   function syncNewNamespaceVisibility() {
     const usingNew = chatMemoryNamespace.value === '__new__';
@@ -898,6 +1281,12 @@ async function initChat() {
     }
 
     syncNewNamespaceVisibility();
+  }
+
+  function syncChatContextWindowInput() {
+    const selectedModel = model.value || settingsState.model;
+    const configured = getConfiguredContextWindow(selectedModel);
+    chatContextWindowTokens.value = configured > 0 ? String(configured) : String(estimateContextWindow(selectedModel));
   }
 
   async function refreshChatNamespaceOptions() {
@@ -951,9 +1340,11 @@ async function initChat() {
       settingsState.model = model.value;
       saveSettings();
     }
+
+    syncChatContextWindowInput();
   }
 
-  async function refreshModelOptions() {
+  async function refreshModelOptions(preferredModel) {
     const currentModel = model.value;
     refreshModels.disabled = true;
     status.textContent = 'Loading models...';
@@ -962,10 +1353,16 @@ async function initChat() {
         endpoint: endpoint.value.trim(),
         apiKey: apiKey.value.trim() || undefined
       });
-      setModelOptions(result.models, currentModel || 'llama3');
+      const discoveredContextWindows = result?.contextWindows;
+      const contextWindowsChanged = rememberDiscoveredContextWindows(discoveredContextWindows);
+      setModelOptions(result.models, preferredModel || currentModel || 'llama3');
+      if (contextWindowsChanged) {
+        syncChatContextWindowInput();
+        renderContextUsageGraph();
+      }
       status.textContent = `Loaded ${result.models.length} models`;
     } catch (error) {
-      setModelOptions([], currentModel || 'llama3');
+      setModelOptions([], preferredModel || currentModel || 'llama3');
       status.textContent = `Model load failed: ${error instanceof Error ? error.message : String(error)}`;
     } finally {
       refreshModels.disabled = false;
@@ -973,6 +1370,10 @@ async function initChat() {
   }
 
   refreshModels.addEventListener('click', refreshModelOptions);
+  provider.addEventListener('change', () => {
+    settingsState.provider = normalizeProvider(provider.value);
+    saveSettings();
+  });
   endpoint.addEventListener('change', () => {
     settingsState.endpoint = endpoint.value.trim() || settingsState.endpoint;
     saveSettings();
@@ -987,6 +1388,13 @@ async function initChat() {
     settingsState.model = model.value;
     saveSettings();
     refreshChatNamespaceOptions();
+    syncChatContextWindowInput();
+  });
+  chatContextWindowTokens.addEventListener('change', () => {
+    persistSelectedContextWindow({ syncInput: true, save: true });
+  });
+  chatContextWindowTokens.addEventListener('input', () => {
+    persistSelectedContextWindow({ syncInput: false, save: true });
   });
   chatMemoryNamespace.addEventListener('change', () => {
     syncNewNamespaceVisibility();
@@ -997,6 +1405,35 @@ async function initChat() {
     if (chatMemoryNamespace.value !== '__new__') return;
     settingsState.chatMemoryNamespace = chatNewMemoryNamespace.value.trim();
     saveSettings();
+  });
+  chatSessionList.addEventListener('change', async () => {
+    if (sessionListMutating) return;
+    if (chatRunning) return;
+    await loadChatSessionById(chatSessionList.value);
+  });
+  chatNewSession.addEventListener('click', async () => {
+    await createNewChatSession();
+  });
+  chatDeleteSession.addEventListener('click', async () => {
+    if (!activeChatSessionId) return;
+    const removed = await window.llmIde.deleteChatSession({ id: activeChatSessionId });
+    if (!removed?.deleted) {
+      status.textContent = 'Delete failed: chat no longer exists';
+      return;
+    }
+
+    activeChatSessionId = '';
+    activeChatSessionTitle = '';
+    activeChatSessionCreatedAt = '';
+    activeChatMessages = [];
+    conversation.innerHTML = '';
+    await refreshChatSessions();
+    if (chatSessions.length > 0) {
+      await loadChatSessionById(chatSessions[0].id);
+    } else {
+      await createNewChatSession();
+    }
+    status.textContent = 'Chat deleted';
   });
   stop.addEventListener('click', async () => {
     if (!chatRunning) return;
@@ -1014,23 +1451,33 @@ async function initChat() {
     const text = prompt.value.trim();
     if (!text) return;
 
+    persistSelectedContextWindow({ syncInput: true, save: true });
+
+    let priorMessages = [];
+    try {
+      if (!activeChatSessionId) {
+        await createNewChatSession();
+      }
+
+      priorMessages = activeChatMessages.slice();
+      const userMessage = { role: 'user', content: text };
+      activeChatMessages.push(userMessage);
+      if (!activeChatSessionTitle || /^Chat\s\d/.test(activeChatSessionTitle)) {
+        activeChatSessionTitle = buildChatTitleFromPrompt(text);
+      }
+      await persistActiveChatSession();
+      // Intentionally avoid refreshing the session list here to keep the live assistant DOM row attached.
+    } catch (error) {
+      appendLog(conversation, `[error] ${error instanceof Error ? error.message : String(error)}`);
+      status.textContent = 'Error';
+      return;
+    }
+
     appendLog(conversation, `You: ${text}`);
-    const assistantRow = document.createElement('div');
-    assistantRow.className = 'log-line log-line-assistant';
-
-    const assistantLabel = document.createElement('div');
-    assistantLabel.className = 'assistant-label';
-    assistantLabel.textContent = 'Assistant:';
-
-    assistantMarkdownEl = document.createElement('div');
-    assistantMarkdownEl.className = 'assistant-markdown';
-    assistantRowEl = assistantRow;
+    const assistantRender = renderAssistantMessage('');
+    assistantMarkdownEl = assistantRender.markdown;
     assistantMarkdownRaw = '';
     assistantReceivedToken = false;
-
-    assistantRow.appendChild(assistantLabel);
-    assistantRow.appendChild(assistantMarkdownEl);
-    conversation.appendChild(assistantRow);
     status.textContent = 'Streaming...';
     setChatRunning(true);
 
@@ -1038,12 +1485,15 @@ async function initChat() {
       const result = await window.llmIde.chatStream({
         prompt: text,
         config: {
+          provider: normalizeProvider(provider.value),
           endpoint: endpoint.value.trim(),
           model: model.value,
           apiKey: apiKey.value.trim() || undefined,
           temperature: 0.2,
           maxTokens: 0
         },
+        historyMessages: priorMessages,
+        contextWindowTokens: resolveSelectedContextWindowTokens(),
         memoryNamespace: selectedChatMemoryNamespace() || undefined,
         maxToolTurns: settingsState.maxToolTurns,
         toolNames: [
@@ -1068,12 +1518,17 @@ async function initChat() {
       });
 
       if (assistantMarkdownEl && !assistantMarkdownRaw && result?.text) {
-        if (!assistantReceivedToken && assistantRowEl) {
-          conversation.appendChild(assistantRowEl);
-        }
         assistantMarkdownRaw = result.text;
         scheduleAssistantMarkdownRender();
       }
+
+      if (assistantMarkdownRaw.trim()) {
+        activeChatMessages.push({ role: 'assistant', content: assistantMarkdownRaw });
+      }
+
+      await persistActiveChatSession();
+      await refreshChatSessions();
+      updateChatSessionWorkspaceLabel(currentWorkspaceDir, new Date().toISOString());
 
       if (Array.isArray(result?.usageByModel)) {
         recordModelUsage(result.usageByModel);
@@ -1082,6 +1537,8 @@ async function initChat() {
       status.textContent = 'Done';
     } catch (error) {
       appendLog(conversation, `[error] ${error instanceof Error ? error.message : String(error)}`);
+      await persistActiveChatSession();
+      await refreshChatSessions();
       status.textContent = /canceled/i.test(error instanceof Error ? error.message : String(error)) ? 'Chat stopped' : 'Error';
     } finally {
       setChatRunning(false);
@@ -1094,8 +1551,23 @@ async function initChat() {
     offChatEvent();
   });
 
+  try {
+    const state = await window.llmIde.getWorkspaceState();
+    currentWorkspaceDir = String(state?.workspaceDir || '').trim();
+  } catch {
+    currentWorkspaceDir = '';
+  }
+
   await refreshModelOptions();
+  syncChatContextWindowInput();
   await refreshChatNamespaceOptions();
+  await refreshChatSessions();
+
+  if (chatSessions.length > 0) {
+    await loadChatSessionById(chatSessions[0].id);
+  } else {
+    await createNewChatSession();
+  }
 }
 
 async function initOrchestration() {
@@ -1184,6 +1656,7 @@ async function initOrchestration() {
       provider: 'openai-compatible',
       endpoint: settingsState.endpoint,
       model: settingsState.model,
+      contextWindowTokens: resolveContextWindow(settingsState.model),
       apiKey: settingsState.apiKey || undefined,
       systemPrompt: '',
       temperature: 0.2,
@@ -1203,6 +1676,7 @@ async function initOrchestration() {
       provider: step.provider === 'ollama' ? 'ollama' : 'openai-compatible',
       endpoint: step.endpoint || settingsState.endpoint,
       model: step.model || settingsState.model,
+      contextWindowTokens: clampContextWindowTokens(Number(step.contextWindowTokens || 0)) || resolveContextWindow(step.model || settingsState.model),
       apiKey: step.apiKey || '',
       systemPrompt: step.systemPrompt || '',
       temperature: Number.isFinite(step.temperature) ? Number(step.temperature) : 0.2,
@@ -1483,8 +1957,13 @@ async function initOrchestration() {
       );
       addLabeledInput('Model', step.model, value => {
         step.model = value;
+        step.contextWindowTokens = step.contextWindowTokens || resolveContextWindow(value || settingsState.model);
         syncPlanJson();
       });
+      addLabeledInput('Context Window Tokens', step.contextWindowTokens ?? resolveContextWindow(step.model), value => {
+        step.contextWindowTokens = clampContextWindowTokens(Number(value || 0)) || resolveContextWindow(step.model);
+        syncPlanJson();
+      }, { type: 'number', min: 1, step: 1 });
       addLabeledInput('Endpoint', step.endpoint, value => {
         step.endpoint = value;
         syncPlanJson();

@@ -2,11 +2,13 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import * as path from 'path';
 import * as fs from 'fs';
 import { ChildProcessWithoutNullStreams } from 'child_process';
-import { chatWithTools, listModels } from './backend/llmClient';
+import { chatWithTools, listModelCatalog } from './backend/llmClient';
 import { runOrchestration } from './backend/orchestrationEngine';
+import { deleteChatSession, listChatSessions, loadChatSession, saveChatSession } from './backend/chatSessionStore';
 import { defaultPlan, validatePlan } from './backend/schema';
 import { loadPlan, savePlan } from './backend/planStore';
 import {
+  ChatSession,
   ChatStreamResult,
   ChatMessage,
   ChatStreamRequest,
@@ -66,6 +68,15 @@ function formatMemoryInjection(items: Array<{ source: string; text: string }>, l
   }
 
   return lines.join('\n');
+}
+
+function estimateTokensFromText(text: string): number {
+  const normalized = String(text ?? '').trim();
+  if (!normalized) {
+    return 0;
+  }
+  // Approximate conversion used for UI visualization only.
+  return Math.max(1, Math.ceil(normalized.length / 4));
 }
 
 function memoryNamespace(mode: 'chat' | 'orchestration', workspaceDir: string, model?: string): string {
@@ -241,8 +252,9 @@ function createWindow() {
 
 app.whenReady().then(() => {
   const memoryRoot = path.join(app.getPath('userData'), 'turbovec-memory');
+  const turboVecVenvDir = path.join(app.getPath('userData'), '.turbovec-venv');
   const bridgeScript = unpackedAppResourcePath('src', 'backend', 'turbovec_bridge.py');
-  turboMemory = new TurboVecMemory(memoryRoot, bridgeScript);
+  turboMemory = new TurboVecMemory(memoryRoot, bridgeScript, undefined, turboVecVenvDir);
   createWindow();
 
   app.on('activate', () => {
@@ -261,7 +273,10 @@ app.on('window-all-closed', () => {
 ipcMain.handle(
   'chat:stream',
   async (event, payload: ChatStreamRequest): Promise<ChatStreamResult> => {
-    const config = payload.config;
+    const config: LLMConfig = {
+      ...payload.config,
+      contextWindowTokens: Math.max(0, Number(payload.contextWindowTokens ?? 0)) || undefined
+    };
     const abortController = new AbortController();
     activeChatAbortController = abortController;
     const requestedChatNamespace = String(payload.memoryNamespace ?? '').trim();
@@ -269,6 +284,7 @@ ipcMain.handle(
       ? memoryNamespace('chat', selectedWorkspaceDir, requestedChatNamespace)
       : memoryNamespace('chat', selectedWorkspaceDir, config.model);
     const messages: ChatMessage[] = [];
+    let recalledPromptTokens = 0;
 
     try {
       if (turboMemory) {
@@ -283,6 +299,7 @@ ipcMain.handle(
             maxCharsPerItem: 1000,
             maxTotalChars: 3500
           });
+          recalledPromptTokens = estimateTokensFromText(memoryLines);
           messages.push({
             role: 'system',
             content:
@@ -291,6 +308,22 @@ ipcMain.handle(
           });
           event.sender.send('chat:event', `[memory] injected ${recalled.length} memory item(s).`);
         }
+      }
+
+      const priorMessages = Array.isArray(payload.historyMessages)
+        ? payload.historyMessages
+            .filter(message => Boolean(message) && typeof message === 'object')
+            .map(message => ({
+              role: message.role,
+              content: String(message.content ?? ''),
+              tool_call_id: message.tool_call_id,
+              tool_calls: Array.isArray(message.tool_calls) ? message.tool_calls : undefined
+            }))
+            .filter(message => (message.role === 'user' || message.role === 'assistant') && message.content.trim().length > 0)
+        : [];
+
+      if (priorMessages.length > 0) {
+        messages.push(...priorMessages);
       }
 
       messages.push({ role: 'user', content: payload.prompt });
@@ -353,7 +386,12 @@ ipcMain.handle(
 
       return {
         text,
-        usageByModel: [{ model: config.model, ...result.usage }]
+        usageByModel: [{
+          model: config.model,
+          ...result.usage,
+          recalledPromptTokens,
+          contextWindowTokens: Math.max(0, Number(payload.contextWindowTokens ?? 0)) || undefined
+        }]
       };
     } finally {
       if (activeChatAbortController === abortController) {
@@ -373,12 +411,40 @@ ipcMain.handle('chat:stop', async () => {
   return { stopped: true };
 });
 
+ipcMain.handle('chat:list-sessions', async () => {
+  const sessions = await listChatSessions();
+  return { sessions };
+});
+
+ipcMain.handle('chat:load-session', async (_event, payload: { id?: string }) => {
+  const id = String(payload?.id ?? '').trim();
+  if (!id) {
+    throw new Error('Chat session id is required.');
+  }
+  return loadChatSession(id);
+});
+
+ipcMain.handle('chat:save-session', async (_event, payload: { session?: ChatSession }) => {
+  if (!payload?.session) {
+    throw new Error('Chat session payload is required.');
+  }
+  return saveChatSession(payload.session);
+});
+
+ipcMain.handle('chat:delete-session', async (_event, payload: { id?: string }) => {
+  const id = String(payload?.id ?? '').trim();
+  if (!id) {
+    throw new Error('Chat session id is required.');
+  }
+  return deleteChatSession(id);
+});
+
 ipcMain.handle('chat:list-models', async (_event, payload: { endpoint: string; apiKey?: string }) => {
-  const models = await listModels({
+  const catalog = await listModelCatalog({
     endpoint: payload.endpoint,
     apiKey: payload.apiKey
   });
-  return { models };
+  return catalog;
 });
 
 ipcMain.handle('memory:diagnostics', async (_event, payload?: { model?: string }) => {

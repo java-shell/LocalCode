@@ -1,24 +1,3 @@
-x64:
-  firstOrDefaultFilePatterns:
-    - '!**/node_modules/**'
-    - '!build{,/**/*}'
-    - '!dist{,/**/*}'
-    - out/**/*
-    - renderer/**/*
-    - build/icons/**/*
-    - src/backend/turbovec_bridge.py
-    - package.json
-    - '!**/*.{iml,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,suo,xproj,cc,d.ts,mk,a,o,obj,forge-meta,pdb}'
-    - '!**/._*'
-    - '!**/electron-builder.{yaml,yml,json,json5,toml,ts}'
-    - '!**/{.git,.hg,.svn,CVS,RCS,SCCS,__pycache__,.DS_Store,thumbs.db,.gitignore,.gitkeep,.gitattributes,.npmignore,.idea,.vs,.flowconfig,.jshintrc,.eslintrc,.circleci,.yarn-integrity,.yarn-metadata.json,yarn-error.log,yarn.lock,package-lock.json,npm-debug.log,pnpm-lock.yaml,bun.lock,bun.lockb,appveyor.yml,.travis.yml,circle.yml,.nyc_output,.husky,.github,electron-builder.env}'
-    - '!.yarn{,/**/*}'
-    - '!.editorconfig'
-    - '!.yarnrc.yml'
-  nodeModuleFilePatterns:
-    - '**/*'
-    - out/**/*
-    - renderer/**/*
-    - build/icons/**/*
-    - src/backend/turbovec_bridge.py
-    - package.json
+version https://git-lfs.github.com/spec/v1
+oid sha256:b068d26c4248c671502eab182ff127b1fa61ea3ef9413f108f4960aac9c4ceb1
+size 7586

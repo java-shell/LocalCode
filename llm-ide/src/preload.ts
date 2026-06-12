@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import {
+  ChatSession,
+  ChatSessionSummary,
   ChatStreamResult,
   ChatStreamRequest,
   OrchestrationExportResult,
@@ -25,7 +27,7 @@ type TerminalEventListener = (payload: {
 }) => void;
 
 const api = {
-  listModels: async (payload: { endpoint: string; apiKey?: string }): Promise<{ models: string[] }> => {
+  listModels: async (payload: { endpoint: string; apiKey?: string }): Promise<{ models: string[]; contextWindows?: Record<string, number> }> => {
     return ipcRenderer.invoke('chat:list-models', payload);
   },
   getMemoryDiagnostics: async (payload?: { model?: string }): Promise<unknown> => {
@@ -36,6 +38,18 @@ const api = {
   },
   chatStream: async (payload: ChatStreamRequest): Promise<ChatStreamResult> => {
     return ipcRenderer.invoke('chat:stream', payload);
+  },
+  listChatSessions: async (): Promise<{ sessions: ChatSessionSummary[] }> => {
+    return ipcRenderer.invoke('chat:list-sessions');
+  },
+  loadChatSession: async (payload: { id: string }): Promise<ChatSession | null> => {
+    return ipcRenderer.invoke('chat:load-session', payload);
+  },
+  saveChatSession: async (payload: { session: ChatSession }): Promise<ChatSession> => {
+    return ipcRenderer.invoke('chat:save-session', payload);
+  },
+  deleteChatSession: async (payload: { id: string }): Promise<{ deleted: boolean }> => {
+    return ipcRenderer.invoke('chat:delete-session', payload);
   },
   stopChat: async (): Promise<{ stopped: boolean; reason?: string }> => {
     return ipcRenderer.invoke('chat:stop');

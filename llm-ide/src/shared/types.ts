@@ -19,17 +19,21 @@ export interface ChatMessage {
 export interface LLMConfig {
   endpoint: string;
   model: string;
+  provider?: 'openai-compatible' | 'ollama';
   apiKey?: string;
   temperature: number;
   maxTokens?: number;
+  contextWindowTokens?: number;
 }
 
 export interface ChatStreamRequest {
   config: LLMConfig;
   prompt: string;
+  historyMessages?: ChatMessage[];
   toolNames?: string[];
   maxToolTurns?: number;
   memoryNamespace?: string;
+  contextWindowTokens?: number;
 }
 
 export interface TokenUsage {
@@ -41,11 +45,36 @@ export interface TokenUsage {
 
 export interface ModelUsage extends TokenUsage {
   model: string;
+  recalledPromptTokens?: number;
+  contextWindowTokens?: number;
 }
 
 export interface ChatStreamResult {
   text: string;
   usageByModel?: ModelUsage[];
+}
+
+export interface ChatSessionConfig {
+  provider: 'openai-compatible' | 'ollama';
+  endpoint: string;
+  model: string;
+  contextWindowTokens?: number;
+  memoryNamespace?: string;
+}
+
+export interface ChatSessionSummary {
+  id: string;
+  title: string;
+  workspaceDir: string;
+  createdAt: string;
+  updatedAt: string;
+  messageCount: number;
+  lastMessagePreview?: string;
+  config: ChatSessionConfig;
+}
+
+export interface ChatSession extends ChatSessionSummary {
+  messages: ChatMessage[];
 }
 
 export interface ToolPermission {
@@ -59,6 +88,7 @@ export interface OrchestrationStep {
   provider: 'openai-compatible' | 'ollama';
   endpoint: string;
   model: string;
+  contextWindowTokens?: number;
   apiKey?: string;
   systemPrompt?: string;
   temperature?: number;
@@ -83,6 +113,8 @@ export interface OrchestrationRunStep {
   output: string;
   iteration: number;
   model: string;
+  recalledPromptTokens?: number;
+  contextWindowTokens?: number;
   usage?: TokenUsage;
 }
 

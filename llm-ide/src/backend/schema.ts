@@ -14,6 +14,7 @@ export const defaultPlan: OrchestrationPlan = {
       provider: 'openai-compatible',
       endpoint: 'http://localhost:11434/v1/chat/completions',
       model: 'llama3',
+      contextWindowTokens: 32768,
       systemPrompt: 'Plan how to solve the user request and call tools as needed.',
       temperature: 0.2,
       maxTokens: 1200,
@@ -34,6 +35,7 @@ export const defaultPlan: OrchestrationPlan = {
       provider: 'openai-compatible',
       endpoint: 'http://localhost:11434/v1/chat/completions',
       model: 'llama3',
+      contextWindowTokens: 32768,
       systemPrompt: 'Generate concrete implementation output and perform safe code edits using available tools.',
       temperature: 0.1,
       maxTokens: 2200,
@@ -107,6 +109,12 @@ export function validatePlan(value: unknown): string[] {
     }
     if (!step.model) {
       errors.push(`steps[${i}].model is required.`);
+    }
+    if (step.contextWindowTokens !== undefined) {
+      const contextWindowTokens = Number(step.contextWindowTokens);
+      if (!Number.isInteger(contextWindowTokens) || contextWindowTokens < 1) {
+        errors.push(`steps[${i}].contextWindowTokens must be an integer greater than 0 when provided.`);
+      }
     }
     if (!Array.isArray(step.tools)) {
       errors.push(`steps[${i}].tools must be an array.`);

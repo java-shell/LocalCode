@@ -60,6 +60,33 @@ async function pathExists(target: string): Promise<boolean> {
   }
 }
 
+function splitFileIntoLines(content: string): string[] {
+  if (content.length === 0) {
+    return [];
+  }
+  const lines = content.split(/\r?\n/);
+  if (/\r?\n$/.test(content)) {
+    lines.pop();
+  }
+  return lines;
+}
+
+function joinLinesForFile(lines: string[], hadTrailingNewline: boolean): string {
+  const next = lines.join('\n');
+  if (hadTrailingNewline) {
+    return `${next}\n`;
+  }
+  return next;
+}
+
+function toPositiveInteger(value: unknown, fallback: number): number {
+  const parsed = Math.trunc(Number(value));
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    return fallback;
+  }
+  return parsed;
+}
+
 const scopeProperty = { type: 'string', enum: ['workspace', 'root'] };
 
 const mutatingTools = new Set([
@@ -146,7 +173,7 @@ export const toolDefinitions: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'read_file',
-      description: 'Read file contents by relative path and optional line range.',
+      description: 'Read file contents by relative path and optional 1-based line range. Response includes numberedContent for exact line references.',
       parameters: {
         type: 'object',
         properties: {
@@ -205,7 +232,7 @@ export const toolDefinitions: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'insert_in_file',
-      description: 'Insert text at a specific 0-based line index.',
+      description: 'Insert text before a specific 1-based line number. Use totalLines + 1 to append at end of file.',
       parameters: {
         type: 'object',
         properties: {
@@ -365,7 +392,7 @@ function toolIntentSummary(name: string, args: Record<string, unknown>): string 
     case 'replace_in_file':
       return `replace text in ${String(args.path ?? '')}`;
     case 'insert_in_file':
-      return `insert text into ${String(args.path ?? '')} at line ${String(args.line ?? 0)}`;
+      return `insert text into ${String(args.path ?? '')} before line ${String(args.line ?? 1)}`;
     case 'create_directory':
       return `create directory ${String(args.path ?? '')}`;
     case 'move_path':
@@ -698,14 +725,21 @@ async function readFile(args: Record<string, unknown>, context?: RuntimeContext)
   const scope = parseScope(args);
   const target = resolveScopedPath(String(args.path ?? ''), scope, context);
   const content = await fs.readFile(target, 'utf8');
-  const lines = content.split(/\r?\n/);
-  const start = Math.max(1, Number(args.startLine ?? 1));
-  const end = Math.min(lines.length, Number(args.endLine ?? Math.min(lines.length, start + 300)));
+  const lines = splitFileIntoLines(content);
+  const totalLines = lines.length;
+  const requestedStart = toPositiveInteger(args.startLine, 1);
+  const start = totalLines === 0 ? 1 : Math.min(totalLines, requestedStart);
+  const defaultEnd = totalLines === 0 ? 1 : Math.min(totalLines, start + 300);
+  const requestedEnd = Math.max(start, toPositiveInteger(args.endLine, defaultEnd));
+  const end = totalLines === 0 ? 1 : Math.min(totalLines, requestedEnd);
+  const slice = totalLines === 0 ? [] : lines.slice(start - 1, end);
   return {
     path: String(args.path ?? ''),
     startLine: start,
     endLine: end,
-    content: lines.slice(start - 1, end).join('\n')
+    totalLines,
+    content: slice.join('\n'),
+    numberedContent: slice.map((line, index) => `${start + index}: ${line}`).join('\n')
   };
 }
 
@@ -761,14 +795,15 @@ async function insertInFile(args: Record<string, unknown>, context?: RuntimeCont
   const scope = parseScope(args);
   const workspacePath = String(args.path ?? '');
   const target = resolveScopedPath(workspacePath, scope, context);
-  const line = Math.max(0, Number(args.line ?? 0));
+  const requestedLine = toPositiveInteger(args.line, 1);
   const text = String(args.text ?? '');
   const content = await fs.readFile(target, 'utf8');
-  const lines = content.split(/\r?\n/);
-  const index = Math.min(lines.length, line);
+  const hadTrailingNewline = /\r?\n$/.test(content);
+  const lines = splitFileIntoLines(content);
+  const index = Math.min(lines.length, requestedLine - 1);
   lines.splice(index, 0, text);
-  await fs.writeFile(target, lines.join('\n'), 'utf8');
-  return { path: workspacePath, line: index, inserted: true };
+  await fs.writeFile(target, joinLinesForFile(lines, hadTrailingNewline), 'utf8');
+  return { path: workspacePath, line: index + 1, inserted: true };
 }
 
 async function createDirectory(args: Record<string, unknown>, context?: RuntimeContext) {

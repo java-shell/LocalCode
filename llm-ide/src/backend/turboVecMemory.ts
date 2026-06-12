@@ -135,13 +135,13 @@ export class TurboVecMemory {
   private bootstrapAttempted = false;
   private bootstrapInFlight: Promise<void> | null = null;
 
-  constructor(rootDir: string, bridgeScriptPath: string, onEvent?: (event: string) => void) {
+  constructor(rootDir: string, bridgeScriptPath: string, onEvent?: (event: string) => void, projectVenvDir?: string) {
     this.rootDir = rootDir;
     this.bridgeScriptPath = bridgeScriptPath;
     this.onEvent = onEvent;
 
     const explicit = process.env.TURBOVEC_PYTHON?.trim();
-    this.projectVenvDir = path.resolve(process.cwd(), '.turbovec-venv');
+    this.projectVenvDir = path.resolve(projectVenvDir || path.join(this.rootDir, '..', '.turbovec-venv'));
 
     const projectVenvPythonCandidates = process.platform === 'win32'
       ? [
@@ -499,6 +499,8 @@ export class TurboVecMemory {
       if (!seedPython) {
         throw new Error('No usable Python interpreter found to initialize .turbovec-venv');
       }
+
+      await fs.mkdir(path.dirname(this.projectVenvDir), { recursive: true });
 
       const preferredVenvPython = this.projectVenvPythonCandidates[0];
       if (!(await this.fileExists(preferredVenvPython))) {

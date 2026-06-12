@@ -69,17 +69,33 @@ function aggregateUsageByModel(steps: OrchestrationRunStep[]): ModelUsage[] {
       promptTokens: 0,
       completionTokens: 0,
       totalTokens: 0,
-      requests: 0
+      requests: 0,
+      recalledPromptTokens: 0,
+      contextWindowTokens: 0
     };
 
     existing.promptTokens += usage.promptTokens;
     existing.completionTokens += usage.completionTokens;
     existing.totalTokens += usage.totalTokens;
     existing.requests += usage.requests;
+    existing.recalledPromptTokens = Math.max(0, Number(existing.recalledPromptTokens ?? 0)) + Math.max(0, Number(step.recalledPromptTokens ?? 0));
+    const configuredContextWindow = Math.max(0, Number(step.contextWindowTokens ?? 0));
+    if (configuredContextWindow > 0) {
+      existing.contextWindowTokens = Math.max(Number(existing.contextWindowTokens ?? 0), configuredContextWindow);
+    }
     usageMap.set(model, existing);
   }
 
   return Array.from(usageMap.values()).sort((a, b) => b.totalTokens - a.totalTokens);
+}
+
+function estimateTokensFromText(text: string): number {
+  const normalized = String(text ?? '').trim();
+  if (!normalized) {
+    return 0;
+  }
+  // Approximate conversion used only for UI attribution of memory recall usage.
+  return Math.max(1, Math.ceil(normalized.length / 4));
 }
 
 function formatRecalledMemory(items: RetrievedMemoryItem[]): string {
@@ -121,13 +137,16 @@ async function runSingleIteration(
 
   for (const step of plan.steps) {
     onEvent?.(`step:start:${step.name}:iteration:${iteration}`);
+    let recalledPromptTokens = 0;
 
     const config: LLMConfig = {
       endpoint: step.endpoint,
+      provider: step.provider,
       model: step.model,
       apiKey: step.apiKey,
       temperature: step.temperature ?? 0.2,
-      maxTokens: step.maxTokens
+      maxTokens: step.maxTokens,
+      contextWindowTokens: Math.max(0, Number(step.contextWindowTokens ?? 0)) || undefined
     };
 
     const messages: ChatMessage[] = [];
@@ -138,12 +157,14 @@ async function runSingleIteration(
     if (memoryAdapter) {
       const recalled = await memoryAdapter.retrieve(config, `${originalPrompt}\n\n${priorOutput}`, step.name);
       if (recalled.length > 0) {
+        const recalledBlock = formatRecalledMemory(recalled);
         messages.push({
           role: 'system',
           content:
             'Relevant long-term memory for this orchestration step is available below. Use it when helpful and ignore stale items.\n\n' +
-            formatRecalledMemory(recalled)
+            recalledBlock
         });
+        recalledPromptTokens = estimateTokensFromText(recalledBlock);
       }
     }
 
@@ -188,7 +209,16 @@ async function runSingleIteration(
       await memoryAdapter.store(config, output, step.name);
     }
 
-    iterationSteps.push({ id: step.id, name: step.name, output, iteration, model: step.model, usage });
+    iterationSteps.push({
+      id: step.id,
+      name: step.name,
+      output,
+      iteration,
+      model: step.model,
+      usage,
+      recalledPromptTokens: Math.max(0, Number(recalledPromptTokens ?? 0)),
+      contextWindowTokens: Math.max(0, Number(step.contextWindowTokens ?? 0))
+    });
     onEvent?.(`step:end:${step.name}:iteration:${iteration}`);
 
     if (step.passOutputToNext) {
