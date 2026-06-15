@@ -140,6 +140,7 @@ async function runSingleIteration(
   for (const step of plan.steps) {
     onEvent?.(`step:start:${step.name}:iteration:${iteration}`);
     let recalledPromptTokens = 0;
+    const allowCompletionTool = Boolean(step.allowCompletionTool);
 
     const config: LLMConfig = {
       endpoint: step.endpoint,
@@ -179,7 +180,7 @@ async function runSingleIteration(
     let toolDefs = getAllowedToolDefinitions(allowedToolNames);
 
     // Auto-inject the completion tool on every step when running in loop mode.
-    if (isLooping) {
+    if (isLooping && allowCompletionTool) {
       const completionDef = getAllowedToolDefinitions([COMPLETION_TOOL]);
       if (completionDef.length > 0 && !toolDefs.some(t => t.function.name === COMPLETION_TOOL)) {
         toolDefs = [...toolDefs, completionDef[0]];

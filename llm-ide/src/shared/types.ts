@@ -95,6 +95,7 @@ export interface OrchestrationStep {
   maxTokens?: number;
   tools: ToolPermission[];
   passOutputToNext: boolean;
+  allowCompletionTool?: boolean;
 }
 
 export interface OrchestrationPlan {

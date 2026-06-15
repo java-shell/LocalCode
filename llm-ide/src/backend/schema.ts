@@ -27,7 +27,8 @@ export const defaultPlan: OrchestrationPlan = {
         { name: 'git_status', enabled: true },
         { name: 'run_terminal_command', enabled: true }
       ],
-      passOutputToNext: true
+      passOutputToNext: true,
+      allowCompletionTool: false
     },
     {
       id: 'coder',
@@ -58,7 +59,8 @@ export const defaultPlan: OrchestrationPlan = {
         { name: 'git_add', enabled: false },
         { name: 'git_commit', enabled: false }
       ],
-      passOutputToNext: true
+      passOutputToNext: true,
+      allowCompletionTool: true
     }
   ]
 };
@@ -118,6 +120,9 @@ export function validatePlan(value: unknown): string[] {
     }
     if (!Array.isArray(step.tools)) {
       errors.push(`steps[${i}].tools must be an array.`);
+    }
+    if (step.allowCompletionTool !== undefined && typeof step.allowCompletionTool !== 'boolean') {
+      errors.push(`steps[${i}].allowCompletionTool must be a boolean when provided.`);
     }
   }
 

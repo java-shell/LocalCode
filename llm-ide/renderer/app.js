@@ -1662,13 +1662,15 @@ async function initOrchestration() {
       temperature: 0.2,
       maxTokens: 0,
       tools: defaultTools(),
-      passOutputToNext: true
+      passOutputToNext: true,
+      allowCompletionTool: false
     };
   }
 
-  function normalizeStep(step, index) {
+  function normalizeStep(step, index, totalSteps) {
     const existingTools = Array.isArray(step.tools) ? step.tools : [];
     const enabledMap = new Map(existingTools.map(tool => [tool.name, Boolean(tool.enabled)]));
+    const fallbackAllowsCompletion = index === totalSteps - 1;
 
     return {
       id: step.id || `step-${index + 1}`,
@@ -1682,7 +1684,8 @@ async function initOrchestration() {
       temperature: Number.isFinite(step.temperature) ? Number(step.temperature) : 0.2,
       maxTokens: Number.isFinite(step.maxTokens) ? Number(step.maxTokens) : 0,
       tools: availableTools.map(name => ({ name, enabled: Boolean(enabledMap.get(name)) })),
-      passOutputToNext: step.passOutputToNext !== false
+      passOutputToNext: step.passOutputToNext !== false,
+      allowCompletionTool: typeof step.allowCompletionTool === 'boolean' ? step.allowCompletionTool : fallbackAllowsCompletion
     };
   }
 
@@ -1696,7 +1699,7 @@ async function initOrchestration() {
       loopUntilComplete: Boolean(plan.loopUntilComplete),
       maxLoops,
       completionMarker: String(plan.completionMarker || 'TASK_COMPLETE').trim() || 'TASK_COMPLETE',
-      steps: steps.map((step, index) => normalizeStep(step, index))
+      steps: steps.map((step, index) => normalizeStep(step, index, steps.length))
     };
   }
 
@@ -2045,6 +2048,19 @@ async function initOrchestration() {
       passWrap.appendChild(passCheckbox);
       passWrap.appendChild(document.createTextNode('Pass output to next step'));
       grid.appendChild(passWrap);
+
+      const completionWrap = document.createElement('label');
+      completionWrap.className = 'orch-tool-item orch-step-grid-wide';
+      const completionCheckbox = document.createElement('input');
+      completionCheckbox.type = 'checkbox';
+      completionCheckbox.checked = Boolean(step.allowCompletionTool);
+      completionCheckbox.addEventListener('change', () => {
+        step.allowCompletionTool = completionCheckbox.checked;
+        syncPlanJson();
+      });
+      completionWrap.appendChild(completionCheckbox);
+      completionWrap.appendChild(document.createTextNode('Allow orchestration completion tool call in this step'));
+      grid.appendChild(completionWrap);
 
       const toolsBlock = document.createElement('div');
       toolsBlock.className = 'orch-tools';

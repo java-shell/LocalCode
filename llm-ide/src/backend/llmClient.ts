@@ -138,6 +138,40 @@ function formatAxiosFailure(error: unknown, context: { operation: string; endpoi
   return new Error(messageParts.join(' | '));
 }
 
+function safeJsonStringify(value: unknown): string {
+  const seen = new WeakSet<object>();
+
+  try {
+    return JSON.stringify(value, (_key, currentValue) => {
+      if (typeof currentValue === 'bigint') {
+        return currentValue.toString();
+      }
+
+      if (currentValue instanceof Error) {
+        return {
+          name: currentValue.name,
+          message: currentValue.message,
+          stack: currentValue.stack
+        };
+      }
+
+      if (currentValue && typeof currentValue === 'object') {
+        if (seen.has(currentValue)) {
+          return '[Circular]';
+        }
+        seen.add(currentValue);
+      }
+
+      return currentValue;
+    });
+  } catch (error) {
+    return JSON.stringify({
+      ok: false,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
 function isProviderToolParseFailure(error: unknown): boolean {
   if (!axios.isAxiosError(error)) {
     return false;
@@ -149,6 +183,19 @@ function isProviderToolParseFailure(error: unknown): boolean {
 
 function saferToolSetAfterParseFailure(tools: ToolDefinition[]): ToolDefinition[] {
   return tools.filter(tool => tool.function.name !== 'write_file');
+}
+
+function buildProviderToolParseFailureFeedback(detail: string, retryAttempt: number, toolsStillEnabled: boolean): string {
+  return [
+    'The provider rejected the previous assistant response while parsing a tool call, so no tool was executed.',
+    `Attempt ${retryAttempt}: ${detail}.`,
+    'Review the last intended tool action and correct it before retrying.',
+    'When calling a tool, emit only the tool call with pure JSON arguments and no prose, markdown, or extra text.',
+    'Keep arguments compact and strictly valid for the tool schema.',
+    toolsStillEnabled
+      ? 'You may retry with a smaller or simpler tool call, choose a different tool, or answer in plain text if a tool is unnecessary.'
+      : 'Tools are disabled for the rest of this turn, so answer in plain text only.'
+  ].join(' ');
 }
 
 function toolParseFailureRetryMessage(): string {
@@ -576,8 +623,7 @@ export async function chatWithTools(
   const messages = [...initialMessages];
   const maxTurns = Math.max(1, Math.min(200, Math.floor(maxToolTurns || 40)));
   let activeTools = tools;
-  let retriedProviderToolParseFailure = false;
-  let disabledToolsAfterProviderParseFailure = false;
+  let providerToolParseFailures = 0;
   const useOllamaNativeChat = shouldUseOllamaNativeChat(config);
   const ollamaNativeEndpoint = useOllamaNativeChat ? deriveOllamaNativeChatEndpoint(config.endpoint) : undefined;
   const usageTotals: TokenUsage = {
@@ -589,6 +635,36 @@ export async function chatWithTools(
 
   if (useOllamaNativeChat && ollamaNativeEndpoint && toPositiveInteger(config.contextWindowTokens)) {
     onEvent?.(`provider:ollama | using native /api/chat with options.num_ctx=${toPositiveInteger(config.contextWindowTokens)}`);
+  }
+
+  function handleProviderToolParseFailure(error: unknown, context: { operation: string; endpoint: string; model?: string }): boolean {
+    if (!isProviderToolParseFailure(error) || activeTools.length === 0) {
+      return false;
+    }
+
+    providerToolParseFailures += 1;
+    const detail = formatAxiosFailure(error, context).message;
+
+    if (providerToolParseFailures === 1) {
+      activeTools = saferToolSetAfterParseFailure(activeTools);
+      messages.push({
+        role: 'system',
+        content: `${toolParseFailureRetryMessage()} ${buildProviderToolParseFailureFeedback(detail, providerToolParseFailures, activeTools.length > 0)}`
+      });
+      onEvent?.('provider tool-call parser failed; retrying with stricter JSON-only tool-call instructions and a safer tool subset.');
+      return true;
+    }
+
+    if (providerToolParseFailures < maxTurns) {
+      messages.push({
+        role: 'system',
+        content: buildProviderToolParseFailureFeedback(detail, providerToolParseFailures, activeTools.length > 0)
+      });
+      onEvent?.('provider tool-call parser failed again; returning the failure to the model so it can correct the next action.');
+      return true;
+    }
+
+    return false;
   }
 
   function intentSummary(name: string, args: Record<string, unknown>): string {
@@ -651,24 +727,11 @@ export async function chatWithTools(
           signal
         });
       } catch (error) {
-        if (!retriedProviderToolParseFailure && isProviderToolParseFailure(error) && activeTools.length > 0) {
-          retriedProviderToolParseFailure = true;
-          activeTools = saferToolSetAfterParseFailure(activeTools);
-          messages.push({
-            role: 'system',
-            content: toolParseFailureRetryMessage()
-          });
-          onEvent?.('provider tool-call parser failed; retrying with stricter JSON-only tool-call instructions.');
-          continue;
-        }
-        if (!disabledToolsAfterProviderParseFailure && isProviderToolParseFailure(error) && activeTools.length > 0) {
-          disabledToolsAfterProviderParseFailure = true;
-          activeTools = [];
-          messages.push({
-            role: 'system',
-            content: toolParseFailureDisableToolsMessage()
-          });
-          onEvent?.('provider tool-call parser failed again; retrying once with tools disabled and plain-text output only.');
+        if (handleProviderToolParseFailure(error, {
+          operation: 'Ollama native chat request',
+          endpoint: ollamaNativeEndpoint,
+          model: config.model
+        })) {
           continue;
         }
         throw formatAxiosFailure(error, {
@@ -698,24 +761,11 @@ export async function chatWithTools(
           signal
         });
       } catch (error) {
-        if (!retriedProviderToolParseFailure && isProviderToolParseFailure(error) && activeTools.length > 0) {
-          retriedProviderToolParseFailure = true;
-          activeTools = saferToolSetAfterParseFailure(activeTools);
-          messages.push({
-            role: 'system',
-            content: toolParseFailureRetryMessage()
-          });
-          onEvent?.('provider tool-call parser failed; retrying with stricter JSON-only tool-call instructions.');
-          continue;
-        }
-        if (!disabledToolsAfterProviderParseFailure && isProviderToolParseFailure(error) && activeTools.length > 0) {
-          disabledToolsAfterProviderParseFailure = true;
-          activeTools = [];
-          messages.push({
-            role: 'system',
-            content: toolParseFailureDisableToolsMessage()
-          });
-          onEvent?.('provider tool-call parser failed again; retrying once with tools disabled and plain-text output only.');
+        if (handleProviderToolParseFailure(error, {
+          operation: 'Chat completion request',
+          endpoint: config.endpoint,
+          model: config.model
+        })) {
           continue;
         }
         throw formatAxiosFailure(error, {
@@ -766,13 +816,16 @@ export async function chatWithTools(
       try {
         result = await executeTool(toolName, parsedArgs);
       } catch (error) {
-        result = { error: error instanceof Error ? error.message : String(error) };
+        result = {
+          ok: false,
+          error: error instanceof Error ? error.message : String(error)
+        };
       }
 
       messages.push({
         role: 'tool',
         tool_call_id: call.id,
-        content: JSON.stringify(result)
+        content: safeJsonStringify(result)
       });
     }
   }
