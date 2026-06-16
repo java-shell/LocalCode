@@ -17,6 +17,7 @@ const settingsState = {
   apiKey: '',
   modelContextWindows: {},
   chatMemoryNamespace: '',
+  orchestrationMemoryNamespace: '',
   chatSettingsCollapsed: true
 };
 
@@ -326,6 +327,8 @@ function loadSettings() {
           )
         : {};
     settingsState.chatMemoryNamespace = String(parsed.chatMemoryNamespace ?? settingsState.chatMemoryNamespace).trim();
+    settingsState.orchestrationMemoryNamespace =
+      String(parsed.orchestrationMemoryNamespace ?? settingsState.orchestrationMemoryNamespace).trim();
     settingsState.chatSettingsCollapsed = Boolean(parsed.chatSettingsCollapsed ?? settingsState.chatSettingsCollapsed);
   } catch {
     settingsState.maxToolTurns = 40;
@@ -335,6 +338,7 @@ function loadSettings() {
     settingsState.apiKey = '';
     settingsState.modelContextWindows = {};
     settingsState.chatMemoryNamespace = '';
+    settingsState.orchestrationMemoryNamespace = '';
     settingsState.chatSettingsCollapsed = true;
   }
 }
@@ -349,19 +353,134 @@ function basename(filePath) {
   return parts[parts.length - 1] || filePath;
 }
 
-function inferLanguageFromPath(filePath) {
-  const lower = filePath.toLowerCase();
-  if (lower.endsWith('.ts') || lower.endsWith('.tsx')) return 'typescript';
-  if (lower.endsWith('.js') || lower.endsWith('.jsx')) return 'javascript';
-  if (lower.endsWith('.json')) return 'json';
+function inferLanguageFromMonacoRegistry(filePath) {
+  if (!window.monaco || !monaco.languages || typeof monaco.languages.getLanguages !== 'function') {
+    return null;
+  }
+
+  const normalizedPath = String(filePath || '').replace(/\\/g, '/');
+  const lowerPath = normalizedPath.toLowerCase();
+  const fileName = basename(normalizedPath);
+  const lowerFileName = fileName.toLowerCase();
+
+  let bestMatch = { id: '', score: 0 };
+  for (const entry of monaco.languages.getLanguages()) {
+    const id = String(entry?.id || '').trim();
+    if (!id) continue;
+
+    let score = 0;
+
+    const filenames = Array.isArray(entry.filenames) ? entry.filenames : [];
+    for (const name of filenames) {
+      const candidate = String(name || '');
+      if (!candidate) continue;
+      if (candidate === fileName) {
+        score = Math.max(score, 1000 + candidate.length);
+      } else if (candidate.toLowerCase() === lowerFileName) {
+        score = Math.max(score, 950 + candidate.length);
+      }
+    }
+
+    const extensions = Array.isArray(entry.extensions) ? entry.extensions : [];
+    for (const ext of extensions) {
+      const candidate = String(ext || '').toLowerCase();
+      if (!candidate || candidate === '.') continue;
+      if (lowerPath.endsWith(candidate)) {
+        score = Math.max(score, 100 + candidate.length);
+      }
+    }
+
+    if (score > bestMatch.score) {
+      bestMatch = { id, score };
+    }
+  }
+
+  return bestMatch.score > 0 ? bestMatch.id : null;
+}
+
+function inferLanguageFromContent(content) {
+  const text = String(content || '');
+  if (!text.trim()) return null;
+
+  const firstLine = text.split(/\r?\n/, 1)[0] || '';
+  if (firstLine.startsWith('#!')) {
+    const lower = firstLine.toLowerCase();
+    if (/(python|python3)\b/.test(lower)) return 'python';
+    if (/(node|deno)\b/.test(lower)) return 'javascript';
+    if (/\b(bash|sh|zsh|fish|ksh)\b/.test(lower)) return 'shell';
+    if (/\b(ruby)\b/.test(lower)) return 'ruby';
+    if (/\b(php)\b/.test(lower)) return 'php';
+    if (/\b(pwsh|powershell)\b/.test(lower)) return 'powershell';
+  }
+
+  const trimmedStart = text.trimStart();
+  if (/^<!doctype\s+html>/i.test(trimmedStart) || /^<html[\s>]/i.test(trimmedStart)) return 'html';
+  if (/^<\?xml\s/i.test(trimmedStart)) return 'xml';
+  if (/^(\{|\[)/.test(trimmedStart)) {
+    try {
+      JSON.parse(text);
+      return 'json';
+    } catch {
+      // Not JSON; fall through.
+    }
+  }
+
+  return null;
+}
+
+function inferLanguageFromPath(filePath, content = '') {
+  const fromRegistry = inferLanguageFromMonacoRegistry(filePath);
+  if (fromRegistry) return fromRegistry;
+
+  const lower = String(filePath || '').toLowerCase();
+  const fileName = basename(filePath).toLowerCase();
+
+  if (fileName === 'dockerfile') return 'dockerfile';
+  if (fileName === 'makefile') return 'makefile';
+
+  if (lower.endsWith('.ts') || lower.endsWith('.tsx') || lower.endsWith('.mts') || lower.endsWith('.cts')) return 'typescript';
+  if (lower.endsWith('.js') || lower.endsWith('.jsx') || lower.endsWith('.mjs') || lower.endsWith('.cjs')) return 'javascript';
+  if (lower.endsWith('.json') || lower.endsWith('.jsonc') || lower.endsWith('.code-workspace')) return 'json';
+  if (lower.endsWith('.yml') || lower.endsWith('.yaml')) return 'yaml';
+  if (lower.endsWith('.xml') || lower.endsWith('.xaml') || lower.endsWith('.svg')) return 'xml';
+  if (lower.endsWith('.toml')) return 'toml';
+  if (lower.endsWith('.ini') || lower.endsWith('.cfg') || lower.endsWith('.conf')) return 'ini';
   if (lower.endsWith('.java')) return 'java';
-  if (lower.endsWith('.py')) return 'python';
+  if (lower.endsWith('.py') || lower.endsWith('.pyi')) return 'python';
   if (lower.endsWith('.go')) return 'go';
   if (lower.endsWith('.rs')) return 'rust';
-  if (lower.endsWith('.md')) return 'markdown';
-  if (lower.endsWith('.css')) return 'css';
-  if (lower.endsWith('.html')) return 'html';
+  if (lower.endsWith('.md') || lower.endsWith('.mdx')) return 'markdown';
+  if (lower.endsWith('.css') || lower.endsWith('.scss') || lower.endsWith('.less')) return 'css';
+  if (lower.endsWith('.html') || lower.endsWith('.htm')) return 'html';
+  if (lower.endsWith('.sql')) return 'sql';
+  if (lower.endsWith('.sh') || lower.endsWith('.bash') || lower.endsWith('.zsh')) return 'shell';
+  if (lower.endsWith('.ps1') || lower.endsWith('.psm1') || lower.endsWith('.psd1')) return 'powershell';
+
+  const fromContent = inferLanguageFromContent(content);
+  if (fromContent) return fromContent;
   return 'plaintext';
+}
+
+function normalizeMonacoLanguageId(languageId) {
+  if (!window.monaco || !monaco.languages || typeof monaco.languages.getLanguages !== 'function') {
+    return languageId || 'plaintext';
+  }
+
+  const id = String(languageId || '').trim() || 'plaintext';
+  const known = monaco.languages.getLanguages().some(language => language.id === id);
+  return known ? id : 'plaintext';
+}
+
+function applyTabLanguage(tab, languageId) {
+  if (!tab || !tab.model || !window.monaco || !monaco.editor) {
+    return;
+  }
+
+  const nextLanguage = normalizeMonacoLanguageId(languageId);
+  const currentLanguage = typeof tab.model.getLanguageId === 'function' ? tab.model.getLanguageId() : '';
+  if (currentLanguage !== nextLanguage) {
+    monaco.editor.setModelLanguage(tab.model, nextLanguage);
+  }
 }
 
 function sanitizeMemoryNamespacePart(value) {
@@ -617,6 +736,14 @@ function attachDirtyTracking(tab) {
 function openEditorTab(tabDef) {
   const existing = editorTabs.get(tabDef.key);
   if (existing) {
+    if (typeof tabDef.label === 'string' && tabDef.label) {
+      existing.label = tabDef.label;
+    }
+    if (typeof tabDef.path === 'string') {
+      existing.path = tabDef.path;
+    }
+    applyTabLanguage(existing, tabDef.language);
+
     if (typeof tabDef.content === 'string' && tabDef.content !== existing.model.getValue()) {
       existing.suppressChange = true;
       existing.model.setValue(tabDef.content);
@@ -629,7 +756,7 @@ function openEditorTab(tabDef) {
   }
 
   const uri = createModelUri(tabDef.kind, tabDef.uriValue);
-  const model = monaco.editor.createModel(tabDef.content, tabDef.language, uri);
+  const model = monaco.editor.createModel(tabDef.content, normalizeMonacoLanguageId(tabDef.language), uri);
   const tab = {
     key: tabDef.key,
     label: tabDef.label,
@@ -697,7 +824,7 @@ async function openWorkspaceFileTab(relativePath) {
     uriValue: relativePath,
     label: basename(relativePath),
     path: relativePath,
-    language: inferLanguageFromPath(relativePath),
+    language: inferLanguageFromPath(relativePath, result.content),
     content: result.content
   });
   await ensureFileWatch(relativePath);
@@ -1572,6 +1699,8 @@ async function initChat() {
 
 async function initOrchestration() {
   const status = document.getElementById('orchStatus');
+  const orchMemoryNamespace = document.getElementById('orchMemoryNamespace');
+  const orchNewMemoryNamespace = document.getElementById('orchNewMemoryNamespace');
   const prompt = document.getElementById('orchPrompt');
   const planEl = document.getElementById('orchPlan');
   const planNameEl = document.getElementById('orchPlanName');
@@ -1628,6 +1757,72 @@ async function initOrchestration() {
   };
   let orchestrationRunning = false;
   const outputLogEntries = [];
+
+  function selectedOrchestrationMemoryNamespace() {
+    if (orchMemoryNamespace.value === '__new__') {
+      return orchNewMemoryNamespace.value.trim();
+    }
+    return orchMemoryNamespace.value.trim();
+  }
+
+  function syncOrchestrationNewNamespaceVisibility() {
+    const usingNew = orchMemoryNamespace.value === '__new__';
+    orchNewMemoryNamespace.classList.toggle('visible', usingNew);
+    orchNewMemoryNamespace.disabled = !usingNew;
+  }
+
+  function setOrchestrationNamespaceOptions(namespaces) {
+    const preferred = settingsState.orchestrationMemoryNamespace;
+    orchMemoryNamespace.innerHTML = '';
+
+    const defaultOption = document.createElement('option');
+    defaultOption.value = '';
+    defaultOption.textContent = 'Default: workspace orchestration namespace';
+    orchMemoryNamespace.appendChild(defaultOption);
+
+    const known = Array.from(new Set(namespaces.filter(Boolean))).sort((a, b) => a.localeCompare(b));
+    for (const namespace of known) {
+      const option = document.createElement('option');
+      option.value = namespace;
+      option.textContent = namespace;
+      orchMemoryNamespace.appendChild(option);
+    }
+
+    const newOption = document.createElement('option');
+    newOption.value = '__new__';
+    newOption.textContent = 'New namespace...';
+    orchMemoryNamespace.appendChild(newOption);
+
+    if (!preferred) {
+      orchMemoryNamespace.value = '';
+      orchNewMemoryNamespace.value = '';
+    } else if (known.includes(preferred)) {
+      orchMemoryNamespace.value = preferred;
+      orchNewMemoryNamespace.value = '';
+    } else {
+      orchMemoryNamespace.value = '__new__';
+      orchNewMemoryNamespace.value = preferred;
+    }
+
+    syncOrchestrationNewNamespaceVisibility();
+  }
+
+  async function refreshOrchestrationNamespaceOptions() {
+    try {
+      const state = await window.llmIde.getWorkspaceState();
+      const diagnostics = await window.llmIde.getMemoryDiagnostics();
+      const entries = Array.isArray(diagnostics?.namespaces) ? diagnostics.namespaces : [];
+      const prefix = `${sanitizeMemoryNamespacePart('orchestration')}_${sanitizeMemoryNamespacePart(state.workspaceDir)}_`;
+      const namespaces = entries
+        .map(item => String(item?.namespace ?? ''))
+        .filter(namespace => namespace.startsWith(prefix))
+        .map(namespace => namespace.slice(prefix.length))
+        .filter(Boolean);
+      setOrchestrationNamespaceOptions(namespaces);
+    } catch {
+      setOrchestrationNamespaceOptions([]);
+    }
+  }
 
   function setOrchestrationRunning(running) {
     orchestrationRunning = running;
@@ -2122,6 +2317,16 @@ async function initOrchestration() {
   loopUntilCompleteEl.addEventListener('change', syncPlanJson);
   maxLoopsEl.addEventListener('input', syncPlanJson);
   completionMarkerEl.addEventListener('input', syncPlanJson);
+  orchMemoryNamespace.addEventListener('change', () => {
+    syncOrchestrationNewNamespaceVisibility();
+    settingsState.orchestrationMemoryNamespace = selectedOrchestrationMemoryNamespace();
+    saveSettings();
+  });
+  orchNewMemoryNamespace.addEventListener('input', () => {
+    if (orchMemoryNamespace.value !== '__new__') return;
+    settingsState.orchestrationMemoryNamespace = orchNewMemoryNamespace.value.trim();
+    saveSettings();
+  });
   addStepButton.addEventListener('click', () => {
     currentPlan.steps.push(makeStep(currentPlan.steps.length));
     renderWorkflow();
@@ -2226,7 +2431,11 @@ async function initOrchestration() {
     try {
       const parsed = readPlanFromUi();
       const promptText = prompt.value.trim();
-      const result = await window.llmIde.runOrchestration({ plan: parsed, prompt: promptText });
+      const result = await window.llmIde.runOrchestration({
+        plan: parsed,
+        prompt: promptText,
+        memoryNamespace: selectedOrchestrationMemoryNamespace() || undefined
+      });
       outputEl.textContent = result.output || '(empty output)';
       renderOutputLogEntry(result, promptText, parsed);
       if (Array.isArray(result.usageByModel)) {
@@ -2239,10 +2448,13 @@ async function initOrchestration() {
     }
     finally {
       setOrchestrationRunning(false);
+      refreshOrchestrationNamespaceOptions();
     }
   });
 
+  orchNewMemoryNamespace.value = '';
   await reload();
+  await refreshOrchestrationNamespaceOptions();
 
   window.addEventListener('beforeunload', () => {
     offEvent();
@@ -2264,6 +2476,7 @@ async function initWorkspaceTree() {
       const result = await window.llmIde.readWorkspaceFile({ path: relativePath });
       const diskContent = result.content;
       const currentContent = tab.model.getValue();
+      applyTabLanguage(tab, inferLanguageFromPath(relativePath, diskContent));
 
       if (diskContent === currentContent) {
         tab.lastSavedContent = diskContent;
@@ -2371,6 +2584,7 @@ function bytesToHuman(size) {
 async function initDiagnostics() {
   const status = document.getElementById('diagStatus');
   const summary = document.getElementById('diagSummary');
+  const graphRagEl = document.getElementById('diagGraphRag');
   const namespaces = document.getElementById('diagNamespaces');
   const rawEl = document.getElementById('diagRaw');
   const refreshBtn = document.getElementById('diagRefresh');
@@ -2380,6 +2594,32 @@ async function initDiagnostics() {
   const modelEl = document.getElementById('chatModel');
 
   let lastPayload = null;
+
+  function formatGraphRagDiagnostics(data) {
+    const stats = data && typeof data === 'object' ? data : {};
+    const links = stats.linkHits && typeof stats.linkHits === 'object' ? stats.linkHits : {};
+    const retrievals = Number(stats.retrievals || 0);
+    const vectorSeedHits = Number(stats.vectorSeedHits || 0);
+    const expandedHits = Number(stats.expandedHits || 0);
+    const finalReturned = Number(stats.finalReturned || 0);
+    const avgExpansionFactor = Number(stats.avgExpansionFactor || 0);
+    const maxObservedHops = Number(stats.maxObservedHops || 0);
+    const lastRetrievedAt = stats.lastRetrievedAt ? new Date(stats.lastRetrievedAt).toLocaleString() : 'never';
+
+    return [
+      `retrievals=${formatCount(retrievals)}`,
+      `vectorSeedHits=${formatCount(vectorSeedHits)}`,
+      `expandedHits=${formatCount(expandedHits)}`,
+      `finalReturned=${formatCount(finalReturned)}`,
+      `avgExpansionFactor=${avgExpansionFactor.toFixed(3)}`,
+      `maxObservedHops=${formatCount(maxObservedHops)}`,
+      `linkHits.sequential=${formatCount(Number(links.sequential || 0))}`,
+      `linkHits.explicit=${formatCount(Number(links.explicit || 0))}`,
+      `linkHits.turn=${formatCount(Number(links.turn || 0))}`,
+      `linkHits.source=${formatCount(Number(links.source || 0))}`,
+      `lastRetrievedAt=${lastRetrievedAt}`
+    ].join('\n');
+  }
 
   function renderDiagnostics(payload) {
     lastPayload = payload;
@@ -2403,7 +2643,26 @@ async function initDiagnostics() {
     }
     summary.textContent = lines.join('\n');
 
+    const aggregateGraphRag = payload?.graphrag || {};
     const ns = Array.isArray(payload?.namespaces) ? payload.namespaces : [];
+    const namespaceSections = ns
+      .filter(item => item?.graphrag)
+      .map(item => {
+        return [
+          `[${item.namespace}]`,
+          formatGraphRagDiagnostics(item.graphrag)
+        ].join('\n');
+      });
+
+    if (graphRagEl) {
+      graphRagEl.textContent = [
+        '[aggregate]',
+        formatGraphRagDiagnostics(aggregateGraphRag),
+        namespaceSections.length ? '' : 'No GraphRAG retrieval events captured yet for this filter.',
+        namespaceSections.join('\n\n')
+      ].filter(Boolean).join('\n\n');
+    }
+
     namespaceSelect.innerHTML = '';
     if (!ns.length) {
       const emptyOpt = document.createElement('option');
@@ -2449,9 +2708,8 @@ async function initDiagnostics() {
   async function refreshDiagnostics() {
     status.textContent = 'Loading diagnostics...';
     try {
-      const payload = await window.llmIde.getMemoryDiagnostics({
-        model: modelEl.value || settingsState.model
-      });
+      // Show all workspace namespaces so orchestration and chat memory are both visible.
+      const payload = await window.llmIde.getMemoryDiagnostics();
       renderDiagnostics(payload);
     } catch (error) {
       status.textContent = 'Failed to load diagnostics.';

@@ -78,6 +78,33 @@ body.panel-resizing {
   overflow: hidden;
 }
 
+.side-panel {
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--muted) transparent;
+} 
+
+.side-panel::-webkit-scrollbar {
+  width: 6px;
+}
+
+.side-panel::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.side-panel::-webkit-scrollbar-thumb {
+  background: var(--muted);
+  border-radius: 3px;
+}
+
+.side-panel::-webkit-scrollbar-thumb:hover {
+  background: var(--accent);
+} 
+
+
 .workspace-resizer {
   min-width: 6px;
   background: rgba(255, 255, 255, 0.06);
@@ -405,7 +432,8 @@ body.panel-resizing {
 #chatView.view.active {
   display: flex;
   flex-direction: column;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 #orchView.view.active {

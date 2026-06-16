@@ -265,9 +265,9 @@
       "name": "Safe Implementer",
       "provider": "openai-compatible",
       "endpoint": "http://192.168.0.224:11434/v1/chat/completions",
-      "model": "gpt-oss:latest",
+      "model": "granite41-augmented-q5-tools-toolcall-v6-ctx64k-plaintext:latest",
       "apiKey": "",
-      "systemPrompt": "You are the implementation agent. Apply the plan from Step input. Make minimal, focused edits using the available file tools. Prefer replace_in_file or insert_in_file over full rewrites. Do not run destructive commands. After editing, summarize the changed files and why each change was necessary.",
+      "systemPrompt": "You are the implementation agent. Apply the plan from Step input using small, valid tool calls. Never emit a whole source file as one tool argument. Do not use write_file. For a new file, call create_file with only the path (empty content), then add content with insert_in_file in chunks under 3000 characters. For existing files, prefer replace_in_file with focused snippets or insert_in_file with small chunks. Do not run destructive commands. After editing, summarize the changed files and why each change was necessary.",
       "temperature": 0.15,
       "maxTokens": 6000,
       "tools": [
@@ -297,7 +297,7 @@
         },
         {
           "name": "write_file",
-          "enabled": true
+          "enabled": false
         },
         {
           "name": "replace_in_file",

@@ -126,6 +126,9 @@
 
         <section id="orchView" class="view">
           <div id="orchStatus" class="status">Plan ready</div>
+          <label class="label" for="orchMemoryNamespace">Memory Namespace (optional)</label>
+          <select id="orchMemoryNamespace"></select>
+          <input id="orchNewMemoryNamespace" class="chat-new-namespace" placeholder="New namespace for this workflow" />
           <label class="label">Orchestration Prompt</label>
           <textarea id="orchPrompt" placeholder="What should this orchestration accomplish?"></textarea>
           <div class="actions">
@@ -180,6 +183,8 @@
             <button id="diagClearNamespace" type="button">Clear</button>
           </div>
           <div id="diagSummary" class="diag-summary"></div>
+          <label class="label">GraphRAG Retrieval Diagnostics</label>
+          <pre id="diagGraphRag" class="diag-raw"></pre>
           <label class="label">Namespace Details</label>
           <div id="diagNamespaces" class="log"></div>
           <label class="label">Raw Diagnostics</label>

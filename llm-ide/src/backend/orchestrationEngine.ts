@@ -207,6 +207,12 @@ async function runSingleIteration(
           if (!allowedToolNames.includes(name)) {
             throw new Error(`Tool ${name} is not enabled in step ${step.name}.`);
           }
+          if (name === 'run_terminal_command') {
+            const input = (args && typeof args === 'object') ? (args as Record<string, unknown>) : {};
+            const rawTimeout = Number(input.timeoutMs ?? 30000);
+            const boundedTimeoutMs = rawTimeout <= 0 ? 30000 : Math.max(1000, Math.min(120000, rawTimeout));
+            return executeTool(name, { ...input, timeoutMs: boundedTimeoutMs }, runtimeContext);
+          }
           return executeTool(name, args, runtimeContext);
         },
         event => {

@@ -626,6 +626,7 @@ export async function chatWithTools(
   let providerToolParseFailures = 0;
   const useOllamaNativeChat = shouldUseOllamaNativeChat(config);
   const ollamaNativeEndpoint = useOllamaNativeChat ? deriveOllamaNativeChatEndpoint(config.endpoint) : undefined;
+  const requestTimeoutMs = 180000;
   const usageTotals: TokenUsage = {
     promptTokens: 0,
     completionTokens: 0,
@@ -715,6 +716,7 @@ export async function chatWithTools(
   }
 
   for (let i = 0; i < maxTurns; i += 1) {
+    onEvent?.(`llm-turn:${i + 1}/${maxTurns}`);
     let assistant: ChatMessage | undefined;
     let usage: Omit<TokenUsage, 'requests'>;
 
@@ -724,6 +726,7 @@ export async function chatWithTools(
       try {
         response = await axios.post<OllamaNativeChatResponse>(ollamaNativeEndpoint, payload, {
           headers: buildHeaders(config),
+          timeout: requestTimeoutMs,
           signal
         });
       } catch (error) {
@@ -758,6 +761,7 @@ export async function chatWithTools(
       try {
         response = await axios.post<CompletionResponse>(config.endpoint, payload, {
           headers: buildHeaders(config),
+          timeout: requestTimeoutMs,
           signal
         });
       } catch (error) {

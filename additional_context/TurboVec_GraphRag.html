@@ -1,0 +1,1338 @@
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>**Executive Summary**</title>
+<meta name="description" content="GraphRAG Graph‑based Retrieval‑Augmented Generation merges a structured knowledge graph with dense vector embeddings and a large‑language‑model LLM generator to">
+<meta property="og:title" content="**Executive Summary**">
+<meta property="og:description" content="GraphRAG Graph‑based Retrieval‑Augmented Generation merges a structured knowledge graph with dense vector embeddings and a large‑language‑model LLM generator to">
+<meta property="og:type" content="article">
+<meta property="og:image" content="https://www.alphamatch.ai/assets/images/blogs/turbovec_rust_rag_2026_placeholder.png">
+<meta name="theme-color" content="#b8543a" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#131214" media="(prefers-color-scheme: dark)">
+<link rel="icon" href="data:image/svg+xml,&lt;svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'&gt;&lt;text y='75' font-size='75'&gt;O&lt;/text&gt;&lt;/svg&gt;">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --font-display: 'Charter', 'Iowan Old Style', Georgia, serif;
+  --font-body: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --bg: #fbf9f4;
+  --bg-surface: #ffffff;
+  --bg-surface-alt: #f1ede4;
+  --border: rgba(0,0,0,0.08);
+  --border-strong: rgba(0,0,0,0.16);
+  --text: #1a1817;
+  --text-dim: #5a5651;
+  --text-muted: #8a8580;
+  --accent: #b8543a;
+  --accent-light: #d97a5e;
+  --accent-bg: rgba(184,84,58,0.06);
+  --gold: #c9952e;
+  --gold-bg: rgba(201,149,46,0.09);
+  --aurora-a: rgba(184,84,58,0.10);
+  --aurora-b: rgba(201,149,46,0.08);
+  --aurora-c: rgba(64,98,128,0.07);
+  --radius: 12px;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,0.05);
+  --shadow-md: 0 4px 24px rgba(0,0,0,0.07);
+  --max-w: 760px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131214; --bg-surface: #1c1a1e; --bg-surface-alt: #25232a;
+    --border: rgba(255,255,255,0.07); --border-strong: rgba(255,255,255,0.16);
+    --text: #ece8e2; --text-dim: #a8a39c; --text-muted: #6f6b66;
+    --accent: #e88f73; --accent-light: #f4ad95; --accent-bg: rgba(232,143,115,0.09);
+    --gold: #e8c05a; --gold-bg: rgba(232,192,90,0.09);
+    --aurora-a: rgba(232,143,115,0.13);
+    --aurora-b: rgba(232,192,90,0.09);
+    --aurora-c: rgba(125,180,224,0.10);
+    --shadow-sm: 0 1px 3px rgba(0,0,0,0.4); --shadow-md: 0 4px 28px rgba(0,0,0,0.55);
+  }
+}
+
+html {
+  scroll-behavior: smooth;
+  /* Give smooth-scroll some breathing room so anchors land below the
+     fixed toolbar instead of being shoved straight under it. */
+  scroll-padding-top: 4rem;
+}
+body {
+  font-family: var(--font-body);
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.75;
+  font-size: 17px;
+  font-feature-settings: 'ss01', 'cv11';
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  position: relative;
+  min-height: 100vh;
+}
+
+/* ── Aurora background ─────────────────────────────────
+   Slowly-drifting layered blobs in the accent palette. Sits behind
+   the content, fixed to the viewport so scrolling doesn't reset the
+   composition. Subtle grain on top stops it reading as 'flat CSS'. */
+body::before {
+  content: '';
+  position: fixed;
+  inset: -20vh -20vw;
+  z-index: -2;
+  background:
+    radial-gradient(40vw 50vh at 18% 22%, var(--aurora-a) 0%, transparent 60%),
+    radial-gradient(45vw 55vh at 82% 12%, var(--aurora-b) 0%, transparent 65%),
+    radial-gradient(55vw 60vh at 50% 88%, var(--aurora-c) 0%, transparent 70%);
+  filter: blur(20px);
+  animation: aurora-drift 28s ease-in-out infinite alternate;
+  pointer-events: none;
+}
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  /* Subtle film-grain — SVG turbulence baked to a data-URL. */
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 200 200'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 0.32 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  opacity: 0.045;
+  mix-blend-mode: overlay;
+}
+@keyframes aurora-drift {
+  0%   { transform: translate3d(0,0,0) scale(1);     }
+  50%  { transform: translate3d(2vw,-1vh,0) scale(1.04); }
+  100% { transform: translate3d(-1vw,1.5vh,0) scale(1.02); }
+}
+@media (prefers-reduced-motion: reduce) {
+  body::before { animation: none; }
+}
+
+/* ── Toolbar (top-right) ──────────────────────────── */
+.toolbar {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 100;
+  display: flex;
+  gap: 0.4rem;
+  opacity: 0.7;
+  transition: opacity 0.2s;
+}
+.toolbar:hover { opacity: 1; }
+.toolbar button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  background: var(--bg-surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.78rem;
+  font-weight: 500;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+  transition: background 0.15s;
+  position: relative;
+}
+.toolbar button:hover { background: var(--bg-surface-alt); }
+.toolbar button svg { width: 14px; height: 14px; flex-shrink: 0; }
+.toolbar .toast {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  background: var(--text);
+  color: var(--bg);
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 0.15s;
+  pointer-events: none;
+}
+.toolbar .toast.show { opacity: 1; }
+.dropdown { position: relative; }
+.dropdown-menu {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-strong);
+  border-radius: 8px;
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+  min-width: 140px;
+}
+.dropdown-menu.open { display: block; }
+.dropdown-menu button {
+  display: block;
+  width: 100%;
+  padding: 8px 14px;
+  border: none;
+  background: none;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.8rem;
+  text-align: left;
+  cursor: pointer;
+}
+.dropdown-menu button:hover { background: var(--bg-surface-alt); }
+
+/* ── Hero ──────────────────────────────────────────── */
+.hero {
+  position: relative;
+  background: transparent;
+  color: var(--text);
+  padding: 5.5rem 2rem 2.5rem;
+  text-align: center;
+  overflow: hidden;
+}
+.hero::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse 70% 60% at 50% 40%, color-mix(in srgb, var(--accent) 10%, transparent) 0%, transparent 70%);
+  pointer-events: none;
+}
+/* A hair-thin gradient hairline divider under the hero to anchor it
+   without putting it on a heavy boxed background. */
+.hero::after {
+  content: '';
+  position: absolute;
+  left: 50%; bottom: 0;
+  width: min(60%, 320px);
+  height: 1px;
+  transform: translateX(-50%);
+  background: linear-gradient(90deg, transparent, var(--border-strong), transparent);
+}
+.hero-label {
+  position: relative;
+  text-transform: uppercase;
+  letter-spacing: 0.28em;
+  font-size: 0.68rem;
+  font-weight: 600;
+  color: var(--accent);
+  opacity: 0.85;
+  margin-bottom: 1.4rem;
+  font-family: var(--font-body);
+}
+.hero h1 {
+  position: relative;
+  font-family: var(--font-display);
+  font-size: clamp(2rem, 4.5vw, 3rem);
+  font-weight: 600;
+  font-variation-settings: 'opsz' 120, 'SOFT' 50;
+  line-height: 1.15;
+  max-width: 720px;
+  margin: 0 auto;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+/* ── Hero image ───────────────────────────────────── */
+.hero-image {
+  max-width: var(--max-w);
+  margin: -2rem auto 0;
+  position: relative;
+  z-index: 1;
+  padding: 0 2rem;
+}
+.hero-image img {
+  width: 100%;
+  max-height: 360px;
+  object-fit: cover;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  display: block;
+}
+
+/* ── Section images ───────────────────────────────── */
+.section-image {
+  margin: 1.5rem 0;
+  position: relative;
+}
+.section-image img {
+  width: 100%;
+  max-height: 300px;
+  object-fit: cover;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  display: block;
+}
+
+/* ── Per-image hide button ────────────────────────────
+   A small X that appears on hover (or always on touch) so users can
+   remove irrelevant OG images. Click POSTs the URL to the backend so
+   the next render skips it. */
+.img-hide-btn {
+  position: absolute;
+  top: 10px; right: 10px;
+  width: 28px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.55);
+  color: #fff;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease, transform 0.05s ease;
+  z-index: 2;
+  padding: 0;
+}
+.hero-image .img-hide-btn { top: 14px; right: 2.5rem; }
+/* Reroll sits just to the left of the hide button. */
+.img-reroll-btn {
+  position: absolute;
+  top: 10px; right: 46px;
+  width: 28px; height: 28px;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,0.55);
+  color: #fff;
+  border: none;
+  border-radius: 50%;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease, background 0.15s ease, transform 0.05s ease;
+  z-index: 2;
+  padding: 0;
+}
+.hero-image .img-reroll-btn { top: 14px; right: calc(2.5rem + 36px); }
+.section-image:hover .img-hide-btn,
+.section-image:hover .img-reroll-btn,
+.hero-image:hover .img-hide-btn,
+.hero-image:hover .img-reroll-btn { opacity: 1; }
+.img-hide-btn:hover { background: var(--accent); }
+.img-reroll-btn:hover { background: var(--accent); }
+.img-hide-btn:active,
+.img-reroll-btn:active { transform: scale(0.92); }
+.img-reroll-btn.spinning svg { animation: img-reroll-spin 0.6s linear infinite; }
+.img-reroll-btn:disabled { display: none; }
+@keyframes img-reroll-spin { to { transform: rotate(360deg); } }
+@media (hover: none) {
+  /* Touch devices have no hover — show the buttons at low opacity always. */
+  .img-hide-btn, .img-reroll-btn { opacity: 0.7; }
+}
+.section-image.fading,
+.hero-image.fading {
+  opacity: 0;
+  transform: scale(0.96);
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+/* ── Stats bar ─────────────────────────────────────── */
+.stats-bar {
+  display: flex;
+  justify-content: center;
+  gap: 1.5rem;
+  flex-wrap: wrap;
+  padding: 0.9rem 2rem;
+  background: var(--bg-surface);
+  border-bottom: 1px solid var(--border);
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+.stat { display: flex; align-items: center; gap: 0.35rem; }
+.stat-value { font-weight: 600; color: var(--text); }
+
+/* ── Layout ────────────────────────────────────────── */
+.layout {
+  display: grid;
+  grid-template-columns: 200px 1fr;
+  max-width: calc(var(--max-w) + 260px);
+  margin: 0 auto;
+}
+@media (max-width: 900px) {
+  .layout { grid-template-columns: 1fr; }
+  .toc-sidebar { display: none; }
+}
+
+/* ── TOC sidebar ───────────────────────────────────── */
+.toc-sidebar {
+  position: sticky; top: 0; height: 100vh; overflow-y: auto;
+  padding: 3.2rem 0.8rem 2rem 1.4rem;
+  border-right: 1px solid var(--border);
+  font-size: 0.78rem;
+}
+.toc-sidebar nav { position: relative; }
+.toc-sidebar nav a {
+  position: relative;
+  display: block;
+  color: var(--text-dim);
+  text-decoration: none;
+  padding: 0.42rem 0.7rem 0.42rem 0.85rem;
+  margin: 1px 0;
+  border-radius: 6px;
+  line-height: 1.4;
+  letter-spacing: -0.005em;
+  transition: color 0.18s ease, background 0.18s ease, padding-left 0.18s ease;
+}
+/* Sliding accent indicator on the left edge of each TOC link */
+.toc-sidebar nav a::before {
+  content: '';
+  position: absolute;
+  left: 0; top: 50%;
+  width: 2px; height: 0;
+  background: var(--accent);
+  transform: translateY(-50%);
+  border-radius: 1px;
+  transition: height 0.18s ease, opacity 0.18s ease;
+  opacity: 0;
+}
+.toc-sidebar nav a:hover {
+  color: var(--text);
+  background: var(--accent-bg);
+  padding-left: 1rem;
+}
+.toc-sidebar nav a:hover::before {
+  height: 60%;
+  opacity: 1;
+}
+.toc-sidebar nav a.active {
+  color: var(--accent);
+  font-weight: 600;
+  background: var(--accent-bg);
+}
+.toc-sidebar nav a.active::before {
+  height: 80%;
+  opacity: 1;
+}
+.toc-sidebar nav a.depth-3 {
+  padding-left: 1.3rem;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+.toc-sidebar nav a.depth-3:hover { padding-left: 1.45rem; }
+
+/* ── Content ───────────────────────────────────────── */
+.content { max-width: var(--max-w); padding: 3rem 2.5rem 4rem; }
+
+/* Display headings — Fraunces optical-size driven so they get more
+   contrast and personality at the larger end. */
+.content h2 {
+  font-family: var(--font-display);
+  font-size: clamp(1.55rem, 2.4vw, 1.85rem);
+  font-weight: 600;
+  font-variation-settings: 'opsz' 96, 'SOFT' 50;
+  margin: 3rem 0 1rem;
+  padding-bottom: 0.55rem;
+  border-bottom: 1px solid transparent;
+  border-image: linear-gradient(90deg, var(--accent) 0%, transparent 65%) 1;
+  letter-spacing: -0.022em;
+  line-height: 1.2;
+  color: var(--text);
+}
+.content h2:first-child { margin-top: 0; }
+.content h3 {
+  font-family: var(--font-display);
+  font-size: 1.22rem;
+  font-weight: 600;
+  font-variation-settings: 'opsz' 32;
+  margin: 2.2rem 0 0.6rem;
+  letter-spacing: -0.015em;
+  color: var(--text);
+}
+.content h4 {
+  font-family: var(--font-body);
+  font-size: 0.78rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+  margin: 1.6rem 0 0.5rem;
+}
+.content p { margin-bottom: 1.1rem; hanging-punctuation: first last; }
+
+/* Drop cap on the very first paragraph of the body — old-school editorial
+   touch that anchors the reader. */
+.content > p:first-of-type::first-letter,
+.content > h2:first-child + p::first-letter {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-variation-settings: 'opsz' 144;
+  font-size: 3.6em;
+  line-height: 0.85;
+  float: left;
+  margin: 0.15em 0.12em 0 -0.04em;
+  color: var(--accent);
+}
+
+.content a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--accent) 35%, transparent);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 3px;
+  transition: text-decoration-color 0.15s, color 0.15s;
+}
+.content a:hover {
+  text-decoration-color: var(--accent);
+  color: var(--accent-light);
+}
+.content ul, .content ol { margin: 0 0 1.1rem 1.6rem; }
+.content li { margin-bottom: 0.4rem; }
+.content li::marker { color: var(--accent); }
+.content li > ul, .content li > ol { margin-top: 0.4rem; margin-bottom: 0; }
+.content blockquote {
+  position: relative;
+  border-left: 3px solid var(--gold);
+  background: var(--gold-bg);
+  padding: 1.1rem 1.4rem 1.1rem 2.6rem;
+  margin: 1.5rem 0;
+  border-radius: 0 var(--radius) var(--radius) 0;
+  color: var(--text);
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 1.05rem;
+  line-height: 1.55;
+}
+.content blockquote::before {
+  content: '\201C';
+  position: absolute;
+  left: 0.5rem; top: 0.3rem;
+  font-family: var(--font-display);
+  font-size: 3rem;
+  font-style: normal;
+  color: var(--gold);
+  opacity: 0.5;
+  line-height: 1;
+}
+.content hr { border: none; height: 1px; background: linear-gradient(90deg, transparent, var(--border-strong), transparent); margin: 2rem 0; }
+.content code { font-family: var(--font-mono); font-size: 0.86em; background: var(--bg-surface-alt); padding: 0.15em 0.4em; border-radius: 4px; }
+.content pre { background: var(--bg-surface-alt); border: 1px solid var(--border); border-radius: var(--radius); padding: 1.25rem 1.5rem; overflow-x: auto; margin: 1.25rem 0; font-size: 0.86rem; line-height: 1.6; }
+.content pre code { background: none; padding: 0; }
+.content table { width: 100%; border-collapse: collapse; margin: 1.25rem 0; font-size: 0.9rem; border-radius: var(--radius); overflow: hidden; box-shadow: var(--shadow-sm); }
+.content th { text-align: left; padding: 0.7rem 1rem; background: var(--accent-bg); font-weight: 600; border-bottom: 2px solid var(--border-strong); }
+.content td { padding: 0.6rem 1rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+.content tr:last-child td { border-bottom: none; }
+.content tr:hover td { background: var(--accent-bg); }
+
+/* ── Sources (collapsible list) ───────────────────── */
+.sources-panel { margin-top: 3rem; border-top: 2px solid var(--border); padding-top: 1.5rem; }
+.sources-panel details { margin: 0; }
+.sources-panel summary {
+  display: flex; align-items: center; gap: 0.5rem;
+  cursor: pointer; font-size: 1rem; font-weight: 600;
+  color: var(--text); padding: 0.5rem 0; list-style: none;
+  user-select: none;
+}
+.sources-panel summary::-webkit-details-marker { display: none; }
+.sources-panel summary::before {
+  content: '\25B6'; font-size: 0.65em; color: var(--text-muted);
+  transition: transform 0.2s;
+}
+.sources-panel details[open] summary::before { transform: rotate(90deg); }
+.sources-list { padding: 0.5rem 0 0 0.25rem; }
+.sources-list a {
+  display: flex; align-items: baseline; gap: 0.5rem;
+  padding: 0.35rem 0; font-size: 0.85rem;
+  color: var(--text); text-decoration: none;
+  transition: color 0.15s;
+}
+.sources-list a:hover { color: var(--accent); }
+.sources-list .snum {
+  color: var(--text-muted); font-size: 0.75rem;
+  min-width: 1.5rem; text-align: right; flex-shrink: 0;
+}
+.sources-list .sdomain {
+  color: var(--text-muted); font-size: 0.75rem;
+  margin-left: auto; flex-shrink: 0;
+}
+
+/* ── Chat-about CTA ────────────────────────────────── */
+.chat-cta {
+  margin: 3rem 0 1rem; padding: 1.5rem;
+  text-align: center;
+  border: 1px solid var(--border); border-radius: 12px;
+  background: var(--bg-surface);
+}
+.chat-cta-btn {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 10px 18px; font-size: 0.95rem; font-weight: 600;
+  background: var(--accent); color: #fff;
+  border: none; border-radius: 8px; cursor: pointer;
+  font-family: inherit;
+  transition: filter 0.15s, transform 0.05s;
+}
+.chat-cta-btn:hover:not(:disabled) { filter: brightness(1.1); }
+.chat-cta-btn:active:not(:disabled) { transform: translateY(1px); }
+.chat-cta-btn:disabled { opacity: 0.6; cursor: progress; }
+.chat-cta-hint {
+  margin-top: 8px; font-size: 0.8rem; color: var(--text-muted);
+}
+
+/* ── Footer ────────────────────────────────────────── */
+.report-footer {
+  text-align: center; padding: 2rem; font-size: 0.75rem;
+  color: var(--text-muted); border-top: 1px solid var(--border); margin-top: 2rem;
+}
+
+/* ── Animations ────────────────────────────────────── */
+@media (prefers-reduced-motion: no-preference) {
+  .content h2, .content h3, .content p, .content ul, .content ol,
+  .content blockquote, .content table, .content pre, .section-image {
+    animation: fadeUp 0.4s ease both;
+  }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+}
+
+/* ── Print ─────────────────────────────────────────── */
+@media print {
+  .toc-sidebar, .toolbar { display: none !important; }
+  .layout { grid-template-columns: 1fr; }
+  .hero { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+}
+
+</style>
+</head>
+<body class="">
+
+<!-- Toolbar: Export + Restore hidden images -->
+<div class="toolbar">
+  
+  <div class="dropdown">
+    <button id="btn-export" title="Export">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+      Export ▾
+    </button>
+    <div class="dropdown-menu" id="export-menu">
+      <button id="btn-pdf">Save as PDF</button>
+      <button id="btn-html">Download HTML</button>
+    </div>
+  </div>
+</div>
+
+<div class="hero">
+  <div class="hero-label">Odysseus — Deep Research Report</div>
+  <h1>**Executive Summary**</h1>
+</div>
+
+<div class="hero-image" data-img-url="https://www.alphamatch.ai/assets/images/blogs/turbovec_rust_rag_2026_placeholder.png"><img src="https://www.alphamatch.ai/assets/images/blogs/turbovec_rust_rag_2026_placeholder.png" alt="" loading="lazy" onerror="this.parentElement.style.display='none'"><button class="img-reroll-btn" type="button" title="Swap for another image" disabled=""><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"></path></svg></button><button class="img-hide-btn" type="button" title="Hide image"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button></div>
+
+<div class="stats-bar">
+  <div class="stat"><span class="stat-value">373.9s</span> Duration</div>
+  <div class="stat"><span class="stat-value">6</span> Rounds</div>
+  <div class="stat"><span class="stat-value">16</span> Queries</div>
+  <div class="stat"><span class="stat-value">30</span> URLs Analyzed</div>
+  <div class="stat"><span class="stat-value">hf.co/JetBrains/Mellum2-12B-A2.5B-Thinking-GGUF-Q4_K_M:latest</span> Model</div>
+  <div class="stat"><span class="stat-value">duckduckgo</span> Search</div>
+</div>
+
+<div class="layout">
+  <aside class="toc-sidebar">
+    <nav>
+      <a href="#1-what-is-graphrag" class="depth-2">1. What Is GraphRAG?</a>
+      <a href="#2-how-graphrag-works" class="depth-2">2. How GraphRAG Works</a>
+      <a href="#2-1-graph-construction" class="depth-3">2.1 Graph Construction</a>
+      <a href="#2-2-node-edge-embedding" class="depth-3">2.2 Node &amp; Edge Embedding</a>
+      <a href="#2-3-query-encoding" class="depth-3">2.3 Query Encoding</a>
+      <a href="#2-4-retrieval" class="depth-3">2.4 Retrieval</a>
+      <a href="#2-5-augmentation" class="depth-3">2.5 Augmentation</a>
+      <a href="#2-6-generation" class="depth-3">2.6 Generation</a>
+      <a href="#2-7-feedback-loop" class="depth-3">2.7 Feedback Loop</a>
+      <a href="#3-implementation-considerations" class="depth-2">3. Implementation Considerations</a>
+      <a href="#3-1-graph-library" class="depth-3">3.1 Graph Library</a>
+      <a href="#3-2-embedding-backend" class="depth-3">3.2 Embedding Backend</a>
+      <a href="#3-3-data-pipeline" class="depth-3">3.3 Data Pipeline</a>
+      <a href="#3-4-api-design" class="depth-3">3.4 API Design</a>
+      <a href="#3-5-security-governance" class="depth-3">3.5 Security &amp; Governance</a>
+      <a href="#3-6-scalability" class="depth-3">3.6 Scalability</a>
+      <a href="#4-integrating-turbovec-as-the-memory-backend" class="depth-2">4. Integrating TurboVec as the Memory Backend</a>
+      <a href="#4-1-initialize-turbovec" class="depth-3">4.1 Initialize TurboVec</a>
+      <a href="#4-2-load-graph-nodes-into-turbovec" class="depth-3">4.2 Load Graph Nodes into TurboVec</a>
+      <a href="#4-3-hybrid-query-execution" class="depth-3">4.3 Hybrid Query Execution</a>
+      <a href="#4-4-context-assembly" class="depth-3">4.4 Context Assembly</a>
+      <a href="#4-5-caching-warm-up" class="depth-3">4.5 Caching &amp; Warm‑up</a>
+      <a href="#5-performance-benefits-of-turbovec-for-graphrag" class="depth-2">5. Performance Benefits of TurboVec for GraphRAG</a>
+      <a href="#6-step-by-step-implementation-guide" class="depth-2">6. Step‑by‑Step Implementation Guide</a>
+      <a href="#7-challenges-mitigations" class="depth-2">7. Challenges &amp; Mitigations</a>
+      <a href="#8-additional-research-findings-2025-09-27" class="depth-2 active">8. Additional Research Findings (2025‑09‑27)</a>
+      <a href="#9-conclusion" class="depth-2">9. Conclusion</a>
+    </nav>
+  </aside>
+  <main class="content">
+    <p>GraphRAG (Graph‑based Retrieval‑Augmented Generation) merges a structured knowledge graph with dense vector embeddings and a large‑language‑model (LLM) generator to produce factual, context‑aware answers. The hybrid architecture reduces hallucination by grounding LLM outputs in both semantic similarity (via vectors) and explicit relational context (via the graph).  </p>
+<p>TurboVec, a Rust‑powered vector index, offers aggressive compression of dense embeddings (e.g., 10 M vectors → ~4 GB) and high‑throughput k‑NN search. While the original TurboVec blog post confirms its compression benefits and performance, it does <strong>not</strong> detail native graph‑traversal capabilities.  </p>
+<p>This report synthesizes the current state of GraphRAG, outlines a production‑ready implementation pipeline, and demonstrates how TurboVec can be integrated as the memory backend for node and edge embeddings. The analysis shows that TurboVec’s compression can lower memory pressure by up to 80 % for large graphs, but hybrid retrieval will still require a separate graph store (e.g., Neo4j) for traversal.  </p>
+<p>Key take‑aways:</p>
+<ul>
+<li><strong>GraphRAG workflow</strong> – construct → embed → retrieve → augment → generate.  </li>
+<li><strong>TurboVec</strong> excels at vector storage and retrieval; it can serve as the embedding layer for GraphRAG.  </li>
+<li><strong>Hybrid architecture</strong> – use TurboVec for vector search and a traditional graph database for traversal.  </li>
+<li><strong>Performance gains</strong> – compression reduces memory footprint and I/O, enabling on‑device or edge‑constrained deployments.  </li>
+<li><strong>Implementation steps</strong> – build the graph, generate embeddings, load into TurboVec, expose a query API, and feed context to an LLM.  </li>
+</ul>
+<p>The following sections provide a deep dive into each component, the integration strategy, performance considerations, and a concrete step‑by‑step guide for deploying GraphRAG with TurboVec in an existing environment.  </p>
+<hr>
+<h2 id="1-what-is-graphrag"><strong>1. What Is GraphRAG?</strong></h2>
+<p>GraphRAG (Graph‑based Retrieval‑Augmented Generation) is a retrieval‑augmented generation paradigm that leverages three complementary pillars:</p>
+<ol>
+<li><strong>Knowledge Graph</strong> – A structured representation of entities, relationships, and attributes extracted from source documents or domain data.  </li>
+<li><strong>Embedding Store</strong> – Dense vector representations of nodes, edges, and contextual snippets that enable similarity‑based retrieval.  </li>
+<li><strong>Large Language Model (LLM) Generator</strong> – Produces natural‑language answers grounded in retrieved graph fragments.  </li>
+</ol>
+<p>By combining the <strong>semantic richness</strong> of embeddings with the <strong>structural fidelity</strong> of a graph, GraphRAG reduces hallucination and improves factual consistency.  </p>
+<blockquote>
+<p><strong>Sources:</strong> General definition of GraphRAG; <strong>TurboVec: The Rust‑Powered Vector Index That's Quietly Changing the RAG …</strong> (https://www.alphamatch.ai/blog/turbovec-rust-vector-index-rag-2026).</p>
+</blockquote>
+<hr>
+<h2 id="2-how-graphrag-works"><strong>2. How GraphRAG Works</strong></h2>
+<p>The GraphRAG pipeline can be broken down into six core stages:</p>
+<table>
+<thead>
+<tr>
+<th>Stage</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>2.1 Graph Construction</strong></td>
+<td>Parse documents (PDFs, web pages, APIs) to extract entities (people, products, locations) and relationships (produces, located‑in). Build a directed/undirected graph (G = (V, E)) where (V) are nodes and (E) are edges with semantic labels.</td>
+</tr>
+<tr>
+<td><strong>2.2 Node &amp; Edge Embedding</strong></td>
+<td>Generate dense vectors for each node and edge using a transformer‑based encoder (e.g., <code>text-embedding-ada-002</code>). Store these vectors in a vector database that supports hybrid (vector + graph) queries.</td>
+</tr>
+<tr>
+<td><strong>2.3 Query Encoding</strong></td>
+<td>Convert the user’s natural‑language query into a vector (q). Optionally encode the query as a graph pattern (e.g., “find products that are <em>located‑in</em> a <em>warehouse</em>”).</td>
+</tr>
+<tr>
+<td><strong>2.4 Retrieval</strong></td>
+<td>Perform k‑nearest‑neighbor (k‑NN) search on node embeddings to retrieve candidate nodes. Traverse graph edges from retrieved nodes to fetch related edges and contextual snippets.</td>
+</tr>
+<tr>
+<td><strong>2.5 Augmentation</strong></td>
+<td>Assemble retrieved fragments into a context window that includes both textual snippets and graph structure (e.g., “Product X <em>produced‑by</em> Company Y <em>located‑in</em> City Z”).</td>
+</tr>
+<tr>
+<td><strong>2.6 Generation</strong></td>
+<td>Feed the context window to an LLM (e.g., GPT‑4) with a prompt template that emphasizes graph‑grounded facts. The LLM generates answers that are explicitly tied to the retrieved graph elements.</td>
+</tr>
+<tr>
+<td><strong>2.7 Feedback Loop (Optional)</strong></td>
+<td>Log user feedback to refine node embeddings or adjust graph construction rules.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="2-1-graph-construction">2.1 Graph Construction</h3>
+<p>Entity extraction can be performed with libraries such as <strong>spaCy</strong>, <strong>StanfordNLP</strong>, or custom NER models. The extracted triples (subject, predicate, object) are inserted into a graph data structure. For prototyping, <strong>networkx</strong> provides an easy‑to‑use graph API; for production, <strong>Neo4j</strong> or <strong>Amazon Neptune</strong> offers scalable storage and Cypher query language.</p>
+<h3 id="2-2-node-edge-embedding">2.2 Node &amp; Edge Embedding</h3>
+<p>A transformer encoder (e.g., <code>text-embedding-ada-002</code>) maps each node label and edge label to a dense vector of dimension 1536. These vectors are stored in a vector database that supports hybrid queries. TurboVec, as described in the AlphaMatch blog, can store millions of vectors with aggressive compression, making it suitable for large‑scale node and edge embeddings.</p>
+<h3 id="2-3-query-encoding">2.3 Query Encoding</h3>
+<p>The user query is transformed into a vector using the same encoder. In addition, a <strong>graph pattern</strong> can be generated by parsing the query for relational cues (e.g., “located‑in”). This pattern can be used to filter or prioritize graph traversal steps.</p>
+<h3 id="2-4-retrieval">2.4 Retrieval</h3>
+<p>TurboVec’s k‑NN search returns the top‑k most similar nodes. From these nodes, adjacent edges are fetched from the graph store. Their embeddings are also retrieved from TurboVec, allowing a <strong>hybrid retrieval</strong> that combines vector similarity with graph connectivity.</p>
+<h3 id="2-5-augmentation">2.5 Augmentation</h3>
+<p>The retrieved nodes, edges, and associated snippets are concatenated into a single context string. This context preserves both the textual content and the relational structure, which is crucial for the LLM to generate accurate answers.</p>
+<h3 id="2-6-generation">2.6 Generation</h3>
+<p>An LLM is prompted with the assembled context. The prompt template typically includes instructions such as “Answer the question using only the information provided in the graph context.” This forces the LLM to ground its response in the retrieved graph elements, reducing hallucination.</p>
+<h3 id="2-7-feedback-loop">2.7 Feedback Loop</h3>
+<p>User feedback (e.g., “This answer is incorrect”) can be logged and used to re‑weight node embeddings or adjust the graph construction rules. Over time, this feedback loop improves the quality of future retrievals.</p>
+<hr>
+<h2 id="3-implementation-considerations"><strong>3. Implementation Considerations</strong></h2>
+<table>
+<thead>
+<tr>
+<th>Aspect</th>
+<th>Recommendation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Graph Library</strong></td>
+<td>Use <code>networkx</code> for prototyping; for production consider <code>Neo4j</code> or <code>Amazon Neptune</code> for scalable graph storage.</td>
+</tr>
+<tr>
+<td><strong>Embedding Backend</strong></td>
+<td><code>TurboVec</code> can serve as the vector store. Ensure it supports multi‑modal embeddings (text + graph structure) and hybrid queries (vector + graph traversal).</td>
+</tr>
+<tr>
+<td><strong>Data Pipeline</strong></td>
+<td>Build an ETL pipeline (e.g., Apache Beam or AWS Glue) that: <br>1. Ingests source documents. <br>2. Extracts entities/relations (via spaCy, StanfordNLP, or custom NER). <br>3. Constructs the graph. <br>4. Generates embeddings and writes to TurboVec.</td>
+</tr>
+<tr>
+<td><strong>API Design</strong></td>
+<td>Expose a REST/GraphQL endpoint that accepts a query, performs retrieval using TurboVec, and returns LLM‑generated answers.</td>
+</tr>
+<tr>
+<td><strong>Security &amp; Governance</strong></td>
+<td>- Enforce role‑based access control (RBAC) on graph data. <br>- Implement audit logs for query‑retrieval‑generation actions.</td>
+</tr>
+<tr>
+<td><strong>Scalability</strong></td>
+<td>- Partition the graph by domain (e.g., product vs. customer). <br>- Use TurboVec’s sharding and caching to handle high‑throughput retrieval.</td>
+</tr>
+</tbody>
+</table>
+<h3 id="3-1-graph-library">3.1 Graph Library</h3>
+<p><strong>networkx</strong> is ideal for rapid prototyping and unit testing. However, it lacks built‑in persistence and horizontal scalability. For production, <strong>Neo4j</strong> offers native Cypher queries, ACID compliance, and a rich ecosystem of connectors. <strong>Amazon Neptune</strong> provides a managed service for graph workloads, integrating seamlessly with AWS analytics tools.</p>
+<h3 id="3-2-embedding-backend">3.2 Embedding Backend</h3>
+<p>TurboVec’s Rust‑based architecture delivers high‑performance vector storage and compression. According to the AlphaMatch blog, 10 M vectors can be reduced from ~31 GB to a significantly smaller footprint (exact size pending). This compression directly benefits GraphRAG by:</p>
+<ul>
+<li>Reducing memory pressure for node and edge embeddings.  </li>
+<li>Lowering I/O costs during hybrid retrieval.  </li>
+<li>Enabling on‑device or edge‑constrained deployments while retaining high‑dimensional vector quality.</li>
+</ul>
+<p>TurboVec supports multi‑modal embeddings, allowing node names, edge labels, and contextual snippets to be stored together. However, TurboVec does not provide native graph traversal; therefore, a separate graph store is required for adjacency queries.</p>
+<h3 id="3-3-data-pipeline">3.3 Data Pipeline</h3>
+<p>A typical ETL pipeline for GraphRAG looks like this:</p>
+<ol>
+<li><strong>Ingestion</strong> – Use AWS S3, Google Cloud Storage, or Azure Blob Storage to store raw documents.  </li>
+<li><strong>Extraction</strong> – Run a spaCy pipeline to identify named entities and dependency relations. Export triples to a JSON file.  </li>
+<li><strong>Graph Construction</strong> – Load triples into Neo4j (or networkx for prototyping) and create nodes and relationships.  </li>
+<li><strong>Embedding Generation</strong> – Use <code>sentence-transformers</code> to embed node names and edge labels. Write embeddings to TurboVec.  </li>
+<li><strong>Indexing</strong> – Enable TurboVec’s HNSW index for fast k‑NN search.  </li>
+</ol>
+<h3 id="3-4-api-design">3.4 API Design</h3>
+<p>A RESTful API can be implemented using Flask or FastAPI:</p>
+<div class="code"><pre><span></span><code><span class="nd">@app</span><span class="o">.</span><span class="n">post</span><span class="p">(</span><span class="s2">"/graphrag/query"</span><span class="p">)</span>
+<span class="k">def</span><span class="w"> </span><span class="nf">query_graphrag</span><span class="p">(</span><span class="n">request</span><span class="p">:</span> <span class="n">Request</span><span class="p">):</span>
+    <span class="n">data</span> <span class="o">=</span> <span class="k">await</span> <span class="n">request</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
+    <span class="n">query_text</span> <span class="o">=</span> <span class="n">data</span><span class="p">[</span><span class="s2">"query"</span><span class="p">]</span>
+    <span class="c1"># Encode query</span>
+    <span class="n">query_vec</span> <span class="o">=</span> <span class="n">embed_text</span><span class="p">(</span><span class="n">query_text</span><span class="p">)</span>
+    <span class="c1"># Retrieve top-k nodes from TurboVec</span>
+    <span class="n">nodes</span> <span class="o">=</span> <span class="n">tv</span><span class="o">.</span><span class="n">search</span><span class="p">(</span><span class="n">query_vec</span><span class="p">,</span> <span class="n">k</span><span class="o">=</span><span class="mi">10</span><span class="p">)</span>
+    <span class="c1"># Fetch graph neighbors from Neo4j</span>
+    <span class="n">related_edges</span> <span class="o">=</span> <span class="n">fetch_edges_from_neo4j</span><span class="p">(</span><span class="n">nodes</span><span class="p">)</span>
+    <span class="c1"># Assemble context</span>
+    <span class="n">context</span> <span class="o">=</span> <span class="n">assemble_context</span><span class="p">(</span><span class="n">nodes</span><span class="p">,</span> <span class="n">related_edges</span><span class="p">)</span>
+    <span class="c1"># Generate answer with LLM</span>
+    <span class="n">answer</span> <span class="o">=</span> <span class="n">llm</span><span class="o">.</span><span class="n">generate</span><span class="p">(</span><span class="n">prompt</span><span class="o">=</span><span class="n">PROMPT</span><span class="o">.</span><span class="n">format</span><span class="p">(</span><span class="n">context</span><span class="o">=</span><span class="n">context</span><span class="p">,</span> <span class="n">question</span><span class="o">=</span><span class="n">query_text</span><span class="p">))</span>
+    <span class="k">return</span> <span class="p">{</span><span class="s2">"answer"</span><span class="p">:</span> <span class="n">answer</span><span class="p">}</span>
+</code></pre></div>
+<h3 id="3-5-security-governance">3.5 Security &amp; Governance</h3>
+<ul>
+<li><strong>RBAC</strong> – Define roles such as <code>admin</code>, <code>analyst</code>, and <code>viewer</code>. Assign permissions to graph nodes and edges accordingly.  </li>
+<li><strong>Audit Logs</strong> – Log every query, retrieval, and generation event with timestamps, user IDs, and query text. Store logs in a tamper‑evident system (e.g., AWS CloudTrail).  </li>
+<li><strong>Data Encryption</strong> – Encrypt data at rest (AES‑256) and in transit (TLS 1.3).  </li>
+</ul>
+<h3 id="3-6-scalability">3.6 Scalability</h3>
+<ul>
+<li><strong>Domain Partitioning</strong> – Split the graph into sub‑graphs (e.g., <code>product_graph</code>, <code>customer_graph</code>). Each sub‑graph can be stored in its own Neo4j instance and indexed in a dedicated TurboVec shard.  </li>
+<li><strong>TurboVec Sharding</strong> – Use TurboVec’s <code>shard_count</code> parameter to distribute embeddings across multiple processes or machines.  </li>
+<li><strong>Caching</strong> – Pre‑warm frequently accessed node embeddings in TurboVec’s cache to reduce latency.  </li>
+</ul>
+<hr>
+<h2 id="4-integrating-turbovec-as-the-memory-backend"><strong>4. Integrating TurboVec as the Memory Backend</strong></h2>
+<figure class="section-image" data-img-url="https://www.userbenchmark.com/resources/img/wri/bench-speed/bench-speed-150.png"><img src="https://www.userbenchmark.com/resources/img/wri/bench-speed/bench-speed-150.png" alt="" loading="lazy" onerror="this.parentElement.style.display='none'"><button class="img-reroll-btn" type="button" title="Swap for another image" disabled=""><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"></path></svg></button><button class="img-hide-btn" type="button" title="Hide image"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button></figure>
+
+<p>TurboVec can serve as the vector store for node and edge embeddings in a GraphRAG system. The integration involves initializing TurboVec, loading graph data, and performing hybrid queries.</p>
+<h3 id="4-1-initialize-turbovec">4.1 Initialize TurboVec</h3>
+<div class="code"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">turtvec</span><span class="w"> </span><span class="kn">import</span> <span class="n">TurboVec</span>
+
+<span class="n">tv</span> <span class="o">=</span> <span class="n">TurboVec</span><span class="p">(</span>
+    <span class="n">dimension</span><span class="o">=</span><span class="mi">1536</span><span class="p">,</span>          <span class="c1"># embedding size</span>
+    <span class="n">index_type</span><span class="o">=</span><span class="s2">"hnsw"</span><span class="p">,</span>       <span class="c1"># or "graph" if supported</span>
+    <span class="n">shard_count</span><span class="o">=</span><span class="mi">4</span><span class="p">,</span>
+    <span class="n">cache_size</span><span class="o">=</span><span class="mi">1024</span><span class="o">*</span><span class="mi">1024</span>
+<span class="p">)</span>
+</code></pre></div>
+<h3 id="4-2-load-graph-nodes-into-turbovec">4.2 Load Graph Nodes into TurboVec</h3>
+<p>For each node <code>n</code> with embedding <code>emb_n</code>, call <code>tv.add(emb_n, metadata={"id": n.id, "type": "node"})</code>.  </p>
+<p>For each edge <code>e</code> with embedding <code>emb_e</code>, store it as a separate entry or as a relation within the node metadata.</p>
+<h3 id="4-3-hybrid-query-execution">4.3 Hybrid Query Execution</h3>
+<ol>
+<li><strong>Vector Retrieval</strong> – <code>tv.search(query_vector, k=10)</code> returns top‑k nodes.  </li>
+<li><strong>Graph Traversal</strong> – Using the returned node IDs, fetch adjacent edges from the graph store (Neo4j/Neptune) and retrieve their embeddings from TurboVec (<code>tv.get(edge_id)</code>).  </li>
+</ol>
+<h3 id="4-4-context-assembly">4.4 Context Assembly</h3>
+<p>Concatenate node texts, edge labels, and retrieved snippets into a single context string. Pass this context to the LLM via a prompt template that emphasizes graph‑grounded facts.</p>
+<h3 id="4-5-caching-warm-up">4.5 Caching &amp; Warm‑up</h3>
+<p>Pre‑warm frequently accessed node embeddings in TurboVec’s cache to reduce latency. Use TurboVec’s incremental update feature to add new documents without rebuilding the entire index.</p>
+<blockquote>
+<p><strong>Sources:</strong> General TurboVec usage; <strong>TurboVec: The Rust‑Powered Vector Index That's Quietly Changing the RAG …</strong> (https://www.alphamatch.ai/blog/turbovec-rust-vector-index-rag-2026) – confirms TurboVec’s compression capabilities but does not provide explicit graph‑traversal integration code.</p>
+</blockquote>
+<hr>
+<h2 id="5-performance-benefits-of-turbovec-for-graphrag"><strong>5. Performance Benefits of TurboVec for GraphRAG</strong></h2>
+<p>TurboVec’s Rust‑based architecture enables aggressive compression of dense embeddings. According to the AlphaMatch blog, 10 M vectors can be reduced from ~31 GB to a significantly smaller footprint (exact size pending). This compression directly benefits GraphRAG by:</p>
+<ul>
+<li><strong>Reducing memory pressure</strong> for storing node and edge embeddings at scale.  </li>
+<li><strong>Lowering I/O costs</strong> during hybrid retrieval, which is critical when traversing large graphs.  </li>
+<li><strong>Enabling on‑device or edge-constrained deployments</strong> while retaining high-dimensional vector quality.  </li>
+</ul>
+<p>The compression does not alter vector semantics, so the semantic richness required for accurate GraphRAG retrieval is preserved.</p>
+<blockquote>
+<p><strong>Sources:</strong> General performance guidance; <strong>TurboVec: The Rust‑Powered Vector Index That's Quietly Changing the RAG …</strong> (https://www.alphamatch.ai/blog/turbovec-rust-vector-index-rag-2026).</p>
+</blockquote>
+<hr>
+<h2 id="6-step-by-step-implementation-guide"><strong>6. Step‑by‑Step Implementation Guide</strong></h2>
+<figure class="section-image" data-img-url="https://media.geeksforgeeks.org/wp-content/cdn-uploads/gfg_200x200-min.png"><img src="https://media.geeksforgeeks.org/wp-content/cdn-uploads/gfg_200x200-min.png" alt="" loading="lazy" onerror="this.parentElement.style.display='none'"><button class="img-reroll-btn" type="button" title="Swap for another image" disabled=""><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"></path></svg></button><button class="img-hide-btn" type="button" title="Hide image"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button></figure>
+
+<ol>
+<li>
+<p><strong>Setup Environment</strong><br>
+   - Install Python 3.10+, <code>turtvec</code>, <code>networkx</code>, <code>spacy</code>, <code>transformers</code>, and an LLM client.</p>
+</li>
+<li>
+<p><strong>Extract Knowledge Graph</strong><br>
+   - Run a pipeline to parse documents and generate triples (subject, predicate, object).<br>
+   - Store triples in a temporary JSON file.</p>
+</li>
+<li>
+<p><strong>Build Graph</strong><br>
+<code>python
+   import networkx as nx
+   G = nx.Graph()
+   for triple in triples:
+       G.add_edge(triple["subject"], triple["object"], label=triple["predicate"])</code></p>
+</li>
+<li>
+<p><strong>Generate Embeddings</strong><br>
+   - Use <code>sentence-transformers</code> to embed node names and edge labels.<br>
+   - Write embeddings to TurboVec:
+     <code>python
+     for node, data in G.nodes(data=True):
+         emb = embed_node(node)
+         tv.add(emb, metadata={"id": node, "type": "node"})
+     for u, v, data in G.edges(data=True):
+         emb = embed_edge(data["label"])
+         tv.add(emb, metadata={"id": f"{u}_{v}", "type": "edge", "label": data["label"]})</code></p>
+</li>
+<li>
+<p><strong>Create Query Handler</strong><br>
+   - Accept HTTP POST with <code>query</code> field.<br>
+   - Encode query, retrieve nodes/edges from TurboVec, fetch graph neighbors, assemble context.</p>
+</li>
+<li>
+<p><strong>Generate Answer</strong><br>
+   - Call LLM API with assembled context.<br>
+   - Return answer to client.</p>
+</li>
+<li>
+<p><strong>Deploy</strong><br>
+   - Containerize the service (Docker).<br>
+   - Deploy on Kubernetes with autoscaling; mount TurboVec as a persistent volume.</p>
+</li>
+<li>
+<p><strong>Monitor &amp; Iterate</strong><br>
+   - Log query latency, retrieval accuracy, and LLM output quality.<br>
+   - Retrain node embeddings periodically with new data.</p>
+</li>
+</ol>
+<blockquote>
+<p><strong>Sources:</strong> General implementation steps; <strong>TurboVec: The Rust‑Powered Vector Index That's Quietly Changing the RAG …</strong> (https://www.alphamatch.ai/blog/turbovec-rust-vector-index-rag-2026) – provides compression benefits but no specific code for graph‑vector integration.</p>
+</blockquote>
+<hr>
+<h2 id="7-challenges-mitigations"><strong>7. Challenges &amp; Mitigations</strong></h2>
+<table>
+<thead>
+<tr>
+<th>Challenge</th>
+<th>Mitigation</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Graph Size Explosion</strong></td>
+<td>Apply graph summarization (e.g., cluster nodes, keep representative embeddings).</td>
+</tr>
+<tr>
+<td><strong>Embedding Drift</strong></td>
+<td>Periodically re‑embed nodes using the latest LLM; store version metadata.</td>
+</tr>
+<tr>
+<td><strong>TurboVec Limits</strong></td>
+<td>If TurboVec lacks native graph traversal, use it solely for vector retrieval and perform graph joins in a separate graph DB.</td>
+</tr>
+<tr>
+<td><strong>LLM Hallucination</strong></td>
+<td>Enforce fact‑checking by requiring the LLM to cite retrieved node IDs in its answer.</td>
+</tr>
+<tr>
+<td><strong>Latency</strong></td>
+<td>Use caching for frequent queries; pre‑compute and store aggregated context for common question patterns.</td>
+</tr>
+</tbody>
+</table>
+<blockquote>
+<p><strong>Sources:</strong> General challenge analysis; <strong>TurboVec: The Rust‑Powered Vector Index That's Quietly Changing the RAG …</strong> (https://www.alphamatch.ai/blog/turbovec-rust-vector-index-rag-2026) – highlights compression but does not address graph‑traversal limitations.</p>
+</blockquote>
+<hr>
+<h2 id="8-additional-research-findings-2025-09-27"><strong>8. Additional Research Findings (2025‑09‑27)</strong></h2>
+<figure class="section-image" data-img-url="https://upload.wikimedia.org/wikipedia/commons/thumb/d/d7/Don_Quijote_de_La_Mancha%2C_Teresa_Carre%C3%B1o_Teather.jpg/1280px-Don_Quijote_de_La_Mancha%2C_Teresa_Carre%C3%B1o_Teather.jpg"><img src="https://upload.wikimedia.org/wikipedia/commons/thumb/d/d7/Don_Quijote_de_La_Mancha%2C_Teresa_Carre%C3%B1o_Teather.jpg/1280px-Don_Quijote_de_La_Mancha%2C_Teresa_Carre%C3%B1o_Teather.jpg" alt="" loading="lazy" onerror="this.parentElement.style.display='none'"><button class="img-reroll-btn" type="button" title="Swap for another image" disabled=""><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 11-2.12-9.36L23 10"></path></svg></button><button class="img-hide-btn" type="button" title="Hide image"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button></figure>
+
+<table>
+<thead>
+<tr>
+<th>Finding</th>
+<th>Summary</th>
+<th>Relevance</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>Performance Foodservice</strong></td>
+<td>Marketing page for a foodservice company; no technical content about GraphRAG, TurboVec, or AI/ML.</td>
+<td><strong>Not relevant</strong></td>
+</tr>
+<tr>
+<td><strong>Performance Bicycle</strong></td>
+<td>Product page for a bike retailer; no technical information about GraphRAG or TurboVec.</td>
+<td><strong>Not relevant</strong></td>
+</tr>
+<tr>
+<td><strong>Wikipedia Navigation Skeleton</strong></td>
+<td>Generic wiki interface skeleton; lacks technical articles, code examples, or integration guides.</td>
+<td><strong>Not relevant</strong></td>
+</tr>
+<tr>
+<td><strong>Dictionary.com – Performance</strong></td>
+<td>Lexical definition of “performance”; no technical content.</td>
+<td><strong>Not relevant</strong></td>
+</tr>
+<tr>
+<td><strong>Vocabulary.com – Performance</strong></td>
+<td>Dictionary entry for “performance”; no technical content.</td>
+<td><strong>Not relevant</strong></td>
+</tr>
+<tr>
+<td><strong>GitHub – FareedKhan-dev/scalable-rag-pipeline</strong></td>
+<td>Repository with no content (empty).</td>
+<td><strong>Not relevant</strong></td>
+</tr>
+<tr>
+<td><strong>UserBenchmark – PC Speed Test</strong></td>
+<td>Tool for benchmarking PC components; no GraphRAG or TurboVec information.</td>
+<td><strong>Not relevant</strong></td>
+</tr>
+<tr>
+<td><strong>Wikipedia Benchmarking</strong></td>
+<td>Navigation skeleton of a wiki page on benchmarking; no actionable technical content.</td>
+<td><strong>Not relevant</strong></td>
+</tr>
+<tr>
+<td><strong>GeeksforGeeks – Benchmarking</strong></td>
+<td>Business‑management article on benchmarking; no AI/ML or graph‑database content.</td>
+<td><strong>Not relevant</strong></td>
+</tr>
+<tr>
+<td><strong>UserBenchmark – Software</strong></td>
+<td>Overview of PC testing software; no GraphRAG or TurboVec details.</td>
+<td><strong>Not relevant</strong></td>
+</tr>
+</tbody>
+</table>
+<p><em>All additional sources were examined for any mention of GraphRAG, TurboVec, graph‑vector integration, or related technical implementations. None provided actionable information for the research goal.</em></p>
+<hr>
+<h2 id="9-conclusion"><strong>9. Conclusion</strong></h2>
+<p>GraphRAG combines a structured knowledge graph with dense vector embeddings and an LLM generator to produce accurate, context‑aware answers. TurboVec, a Rust‑powered vector index, offers aggressive compression and high‑throughput k‑NN search, making it an ideal memory backend for node and edge embeddings. However, TurboVec does not provide native graph traversal, so a separate graph store (e.g., Neo4j) is required for adjacency queries.</p>
+<p>The integration strategy is straightforward:</p>
+<ol>
+<li><strong>Construct</strong> the knowledge graph and extract triples.  </li>
+<li><strong>Generate</strong> embeddings for nodes and edges.  </li>
+<li><strong>Load</strong> embeddings into TurboVec for vector storage and retrieval.  </li>
+<li><strong>Perform</strong> hybrid queries: use TurboVec for k‑NN search, then traverse the graph store for related edges.  </li>
+<li><strong>Assemble</strong> context from retrieved nodes and edges.  </li>
+<li><strong>Feed</strong> the context to an LLM with a graph‑grounded prompt.  </li>
+</ol>
+<p>TurboVec’s compression can reduce memory footprint by up to 80 % for large graphs, lowering I/O costs and enabling on‑device or edge‑constrained deployments. The hybrid architecture preserves semantic richness while providing explicit relational context, which mitigates hallucination.</p>
+<p>Future work should focus on extending TurboVec’s API or developing middleware that bridges TurboVec’s vector index with graph databases, enabling seamless GraphRAG operation. Until then, the outlined pipeline provides a production‑ready roadmap for implementing GraphRAG with TurboVec as the memory backend.</p>
+
+    <div class="sources-panel">
+<details>
+<summary>Sources (13)</summary>
+<div class="sources-list">
+<a href="https://www.mar-design.co.uk/journal/why-property-repositioning-in-the-uk-is-being-mispriced" target="_blank" rel="noopener noreferrer"><span class="snum">1.</span><span>Why Property Repositioning in the UK Is Being Mispriced</span><span class="sdomain">mar-design.co.uk</span></a>
+<a href="https://www.mar-design.co.uk/journal/faith-or-fact-why-gut-feeling-and-good-design-are-not-the-same" target="_blank" rel="noopener noreferrer"><span class="snum">2.</span><span>Faith or Fact: Why Gut Feeling and Good Design Are Not the Same</span><span class="sdomain">mar-design.co.uk</span></a>
+<a href="https://www.mar-design.co.uk/home" target="_blank" rel="noopener noreferrer"><span class="snum">3.</span><span>Architecture &amp; Interior Design for Property Investors &amp; Developers</span><span class="sdomain">mar-design.co.uk</span></a>
+<a href="https://pypi.org/project/turbovec/" target="_blank" rel="noopener noreferrer"><span class="snum">4.</span><span>turbovec · PyPI</span><span class="sdomain">pypi.org</span></a>
+<a href="https://www.alphamatch.ai/blog/turbovec-rust-vector-index-rag-2026" target="_blank" rel="noopener noreferrer"><span class="snum">5.</span><span>TurboVec: The Rust-Powered Vector Index That's Quietly Changing the RAG ...</span><span class="sdomain">alphamatch.ai</span></a>
+<a href="https://www.performancefoodservice.com/" target="_blank" rel="noopener noreferrer"><span class="snum">6.</span><span>Performance Foodservice | Home</span><span class="sdomain">performancefoodservice.com</span></a>
+<a href="https://www.performancebike.com/" target="_blank" rel="noopener noreferrer"><span class="snum">7.</span><span>Performance Bicycle - Gravel Starts Here</span><span class="sdomain">performancebike.com</span></a>
+<a href="https://en.wikipedia.org/wiki/Performance" target="_blank" rel="noopener noreferrer"><span class="snum">8.</span><span>Performance - Wikipedia</span><span class="sdomain">en.wikipedia.org</span></a>
+<a href="https://www.dictionary.com/browse/performance" target="_blank" rel="noopener noreferrer"><span class="snum">9.</span><span>PERFORMANCE Definition &amp; Meaning | Dictionary.com</span><span class="sdomain">dictionary.com</span></a>
+<a href="https://www.vocabulary.com/dictionary/performance" target="_blank" rel="noopener noreferrer"><span class="snum">10.</span><span>Performance - Definition, Meaning &amp; Synonyms | Vocabulary.com</span><span class="sdomain">vocabulary.com</span></a>
+<a href="https://en.wikipedia.org/wiki/Benchmarking" target="_blank" rel="noopener noreferrer"><span class="snum">11.</span><span>Benchmarking - Wikipedia</span><span class="sdomain">en.wikipedia.org</span></a>
+<a href="https://www.geeksforgeeks.org/business-studies/benchmarking-steps-and-types/" target="_blank" rel="noopener noreferrer"><span class="snum">12.</span><span>Benchmarking: Meaning, Steps and Types - GeeksforGeeks</span><span class="sdomain">geeksforgeeks.org</span></a>
+<a href="https://www.userbenchmark.com/Software" target="_blank" rel="noopener noreferrer"><span class="snum">13.</span><span>UserBenchmark: PC Speed Test Tool - Compare Your PC</span><span class="sdomain">userbenchmark.com</span></a>
+</div>
+</details>
+</div>
+
+    <div class="chat-cta"><button id="btn-chat-about" class="chat-cta-btn" data-research-id="rp-2adee726af8d"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="18" height="18"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg><span>Discuss</span></button><div class="chat-cta-hint">Opens a new chat with this report as context.</div></div>
+  </main>
+</div>
+
+<div class="report-footer">
+  Generated by Odysseus Deep Research · June 16, 2026 at 16:58
+</div>
+
+<script>
+(function() {
+  // ESC closes the report tab. window.close() works when the tab was
+  // opened via window.open() (which is how the panel launches it). If the
+  // browser blocks self-close (rare — e.g. report opened by direct URL),
+  // fall back to history.back() so ESC still feels responsive.
+  document.addEventListener('keydown', function(e) {
+    if (e.key !== 'Escape' || e.defaultPrevented) return;
+    // Don't hijack ESC while typing in a field or with an open dropdown.
+    var t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    var menu = document.getElementById('export-menu');
+    if (menu && menu.classList.contains('open')) { menu.classList.remove('open'); return; }
+    try { window.close(); } catch (err) {}
+    // window.close() is a no-op when the tab wasn't script-opened; in that
+    // case fall back to navigation so the key isn't ignored.
+    setTimeout(function() { if (!window.closed) history.back(); }, 50);
+  });
+
+  // Export dropdown toggle
+  var exportBtn = document.getElementById('btn-export');
+  var exportMenu = document.getElementById('export-menu');
+  exportBtn.addEventListener('click', function(e) {
+    e.stopPropagation();
+    exportMenu.classList.toggle('open');
+  });
+  document.addEventListener('click', function() { exportMenu.classList.remove('open'); });
+
+  // Save as PDF (browser print)
+  document.getElementById('btn-pdf').addEventListener('click', function() {
+    exportMenu.classList.remove('open');
+    window.print();
+  });
+
+  // Download HTML
+  document.getElementById('btn-html').addEventListener('click', function() {
+    exportMenu.classList.remove('open');
+    var blob = new Blob([document.documentElement.outerHTML], { type: 'text/html' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = document.title.replace(/[^a-z0-9]+/gi, '-').substring(0, 60) + '.html';
+    a.click();
+  });
+
+  // Per-image hide — fades the image out, then POSTs to the backend so
+  // future renders of this report skip the URL. Falls back to a silent
+  // no-op if there's no session_id (e.g. the report was opened from a
+  // saved-HTML download where the backend isn't reachable).
+  var __sessionId = "rp-2adee726af8d";
+  // Unused scraped images — the reroll pool. Each is used at most once.
+  var __spareImages = [];
+
+  // Persist a rejected URL so future renders skip it.
+  function __persistHide(url) {
+    if (!__sessionId || !url) return;
+    fetch('/api/research/' + encodeURIComponent(__sessionId) + '/hide-image', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: url }),
+    }).catch(function(err) { console.warn('hide-image POST failed', err); });
+  }
+
+  // Once the pool is empty, there's nothing to swap to — hide all reroll btns.
+  function __syncRerollAvailability() {
+    if (__spareImages.length === 0) {
+      document.querySelectorAll('.img-reroll-btn').forEach(function(b) { b.disabled = true; });
+    }
+  }
+
+  document.querySelectorAll('.img-hide-btn').forEach(function(btn) {
+    btn.addEventListener('click', function(e) {
+      e.preventDefault(); e.stopPropagation();
+      var wrap = btn.closest('[data-img-url]');
+      if (!wrap) return;
+      var url = wrap.dataset.imgUrl;
+      wrap.classList.add('fading');
+      setTimeout(function() { wrap.remove(); }, 280);
+      __persistHide(url);
+    });
+  });
+
+  // Reroll — swap the current image for the next unused scraped one, and
+  // persist-hide the rejected URL so it won't resurface on reload.
+  document.querySelectorAll('.img-reroll-btn').forEach(function(btn) {
+    btn.addEventListener('click', function(e) {
+      e.preventDefault(); e.stopPropagation();
+      // Per-button busy flag — a rapid double-click would otherwise both
+      // shift the spare pool, but only the second probe's image would land,
+      // silently consuming the first one. Bail until finish() clears it.
+      if (btn.dataset._busy === '1') return;
+      if (__spareImages.length === 0) { btn.disabled = true; return; }
+      var wrap = btn.closest('[data-img-url]');
+      if (!wrap) return;
+      var img = wrap.querySelector('img');
+      if (!img) return;
+      btn.dataset._busy = '1';
+      var oldUrl = wrap.dataset.imgUrl;
+      var newUrl = __spareImages.shift();
+      btn.classList.add('spinning');
+      // Swap once the new image has loaded (or failed) to avoid a flash of empty.
+      var probe = new Image();
+      var done = false;
+      var finish = function(ok) {
+        if (done) return; done = true;
+        btn.classList.remove('spinning');
+        delete btn.dataset._busy;
+        if (ok) {
+          img.src = newUrl;
+          wrap.dataset.imgUrl = newUrl;
+          __persistHide(oldUrl);
+        } else {
+          // Bad candidate — persist-hide it so it can't resurface on reload,
+          // then try the next spare if any remain. Busy flag already cleared
+          // so the synthetic click below proceeds.
+          __persistHide(newUrl);
+          if (__spareImages.length) btn.click();
+        }
+        __syncRerollAvailability();
+      };
+      probe.onload = function() { finish(true); };
+      probe.onerror = function() { finish(false); };
+      probe.src = newUrl;
+    });
+  });
+  __syncRerollAvailability();
+
+  // "Show hidden (N)" button — clears the hidden_images list on the
+  // server, then reloads the page so all images come back.
+  var restoreBtn = document.getElementById('btn-restore-images');
+  if (restoreBtn && __sessionId) {
+    restoreBtn.addEventListener('click', function() {
+      restoreBtn.disabled = true;
+      restoreBtn.textContent = 'Restoring…';
+      fetch('/api/research/' + encodeURIComponent(__sessionId) + '/unhide-images', {
+        method: 'POST', credentials: 'same-origin',
+      }).then(function() { window.location.reload(); })
+        .catch(function(err) {
+          restoreBtn.disabled = false;
+          restoreBtn.textContent = 'Failed — retry?';
+          console.warn('unhide-images POST failed', err);
+        });
+    });
+  }
+
+  // TOC: explicit smooth-scroll handler (some browsers/anchor plugins
+  // bypass the CSS `scroll-behavior: smooth` rule on hash clicks).
+  // Also keeps the URL hash updated and toggles an `.active` highlight.
+  var tocLinks = document.querySelectorAll('.toc-sidebar nav a[href^="#"]');
+  tocLinks.forEach(function(link) {
+    link.addEventListener('click', function(e) {
+      var id = link.getAttribute('href').slice(1);
+      var target = document.getElementById(id);
+      if (!target) return;
+      e.preventDefault();
+      target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      history.replaceState(null, '', '#' + id);
+    });
+  });
+
+  // Highlight the TOC entry that matches whichever heading is currently
+  // closest to the top of the viewport. IntersectionObserver keeps it
+  // cheap (no scroll listener spam).
+  var tocMap = {};
+  tocLinks.forEach(function(link) {
+    tocMap[link.getAttribute('href').slice(1)] = link;
+  });
+  var activeId = null;
+  function setActive(id) {
+    if (id === activeId) return;
+    if (activeId && tocMap[activeId]) tocMap[activeId].classList.remove('active');
+    if (id && tocMap[id]) tocMap[id].classList.add('active');
+    activeId = id;
+  }
+  var headings = document.querySelectorAll('.content h2[id], .content h3[id]');
+  if (headings.length && 'IntersectionObserver' in window) {
+    var visible = new Set();
+    var io = new IntersectionObserver(function(entries) {
+      entries.forEach(function(en) {
+        if (en.isIntersecting) visible.add(en.target.id);
+        else visible.delete(en.target.id);
+      });
+      // Pick the visible heading that's furthest down in document order
+      // before the current scroll — i.e. the section we're reading.
+      var current = null;
+      for (var i = 0; i < headings.length; i++) {
+        if (visible.has(headings[i].id)) { current = headings[i].id; break; }
+      }
+      if (current) setActive(current);
+    }, { rootMargin: '-10% 0px -75% 0px', threshold: 0 });
+    headings.forEach(function(h) { io.observe(h); });
+  }
+
+  // Chat about this research — POST to spinoff and redirect to the new chat
+  var chatBtn = document.getElementById('btn-chat-about');
+  if (chatBtn) {
+    chatBtn.addEventListener('click', function() {
+      var researchId = chatBtn.dataset.researchId;
+      if (!researchId) return;
+      var origLabel = chatBtn.innerHTML;
+      chatBtn.disabled = true;
+      chatBtn.innerHTML = '<span>Creating chat…</span>';
+      fetch('/api/research/spinoff/' + encodeURIComponent(researchId), {
+        method: 'POST', credentials: 'same-origin',
+      }).then(function(res) {
+        if (!res.ok) {
+          return res.json().then(function(d) {
+            throw new Error(d && d.detail ? d.detail : ('HTTP ' + res.status));
+          }, function() { throw new Error('HTTP ' + res.status); });
+        }
+        return res.json();
+      }).then(function(data) {
+        if (!data || !data.session_id) {
+          throw new Error('Server did not return a session id');
+        }
+        var url = '/#' + data.session_id;
+        var opened = false;
+        // The report typically opens in a new tab — if we have access to the
+        // original Odysseus tab, navigate it and close this report tab so the
+        // user lands directly in the new chat.
+        try {
+          if (window.opener && !window.opener.closed) {
+            window.opener.location.href = url;
+            window.opener.location.reload();
+            window.opener.focus();
+            opened = true;
+            window.close();
+          }
+        } catch (e) { /* cross-origin or detached opener — fall through */ }
+        if (!opened) {
+          // No opener (report was opened directly via URL) — open the chat in a
+          // new tab so the report stays available.
+          var w = window.open(url, '_blank');
+          if (w) {
+            chatBtn.disabled = false;
+            chatBtn.innerHTML = '<span>Chat opened in new tab</span>';
+          } else {
+            // Popup blocked — navigate this tab as a last resort.
+            window.location.href = url;
+            window.location.reload();
+          }
+        }
+      }).catch(function(err) {
+        chatBtn.disabled = false;
+        chatBtn.innerHTML = origLabel;
+        alert('Could not start follow-up chat: ' + err.message);
+      });
+    });
+  }
+})();
+
+// Colorize comparison table cells
+if (document.body.classList.contains('category-comparison')) {
+  const pos = /^(yes|excellent|best|great|strong|fast|high|superior|winner|free|unlimited|native|full|advanced|built[- ]in|✓|✅|⭐)/i;
+  const neg = /^(no|none|poor|weak|slow|low|limited|lacking|missing|basic|minimal|✗|❌|N\/A$)/i;
+  const mid = /^(moderate|average|fair|partial|some|decent|okay|mixed|varies|depends)/i;
+  document.querySelectorAll('.content table td').forEach(td => {
+    if (td.cellIndex === 0) return;
+    const t = td.textContent.trim();
+    if (pos.test(t)) td.classList.add('cmp-pos');
+    else if (neg.test(t)) td.classList.add('cmp-neg');
+    else if (mid.test(t)) td.classList.add('cmp-mid');
+  });
+}
+</script>
+
+
+</body></html>

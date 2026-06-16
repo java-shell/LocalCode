@@ -79,13 +79,9 @@ function estimateTokensFromText(text: string): number {
   return Math.max(1, Math.ceil(normalized.length / 4));
 }
 
-function memoryNamespace(mode: 'chat' | 'orchestration', workspaceDir: string, model?: string): string {
-  if (mode === 'orchestration') {
-    return `${mode}:${workspaceDir}`;
-  }
-
-  const trimmedModel = String(model ?? '').trim();
-  return trimmedModel ? `${mode}:${workspaceDir}:${trimmedModel}` : `${mode}:${workspaceDir}`;
+function memoryNamespace(mode: 'chat' | 'orchestration', workspaceDir: string, suffix?: string): string {
+  const trimmedSuffix = String(suffix ?? '').trim();
+  return trimmedSuffix ? `${mode}:${workspaceDir}:${trimmedSuffix}` : `${mode}:${workspaceDir}`;
 }
 
 function runtimeContext(sender?: Electron.WebContents, eventChannel: 'chat:event' | 'orch:event' = 'chat:event') {
@@ -630,59 +626,71 @@ ipcMain.handle('orch:validate-plan', async (_event, raw: string) => {
   }
 });
 
-ipcMain.handle('orch:run', async (event, payload: { plan: OrchestrationPlan; prompt: string }): Promise<OrchestrationRunResult> => {
-  const errors = validatePlan(payload.plan);
-  if (errors.length > 0) {
-    throw new Error(errors.join(' '));
-  }
+ipcMain.handle(
+  'orch:run',
+  async (
+    event,
+    payload: { plan: OrchestrationPlan; prompt: string; memoryNamespace?: string }
+  ): Promise<OrchestrationRunResult> => {
+    const errors = validatePlan(payload.plan);
+    if (errors.length > 0) {
+      throw new Error(errors.join(' '));
+    }
 
-  const abortController = new AbortController();
-  activeOrchestrationAbortController = abortController;
+    const abortController = new AbortController();
+    activeOrchestrationAbortController = abortController;
 
-  try {
-    const run = await runOrchestration(payload.plan ?? defaultPlan, payload.prompt, message => {
-      event.sender.send('orch:event', message);
-    }, runtimeContext(event.sender, 'orch:event'), {
-      retrieve: async (config, query, stepName) => {
-        if (!turboMemory) {
-          return [];
-        }
-        const items = await turboMemory.retrieve(config, query, {
-          namespace: memoryNamespace('orchestration', selectedWorkspaceDir),
-          k: 8
-        });
-        event.sender.send('orch:event', `[memory] ${stepName} retrieved ${items.length} memory item(s).`);
-        return items;
-      },
-      store: async (config, text, stepName) => {
-        if (!turboMemory) {
-          return;
-        }
-        try {
-          await turboMemory.store(
-            config,
-            [
+    const requestedNamespace = String(payload.memoryNamespace ?? '').trim();
+    const orchestrationNamespace = requestedNamespace
+      ? memoryNamespace('orchestration', selectedWorkspaceDir, requestedNamespace)
+      : memoryNamespace('orchestration', selectedWorkspaceDir);
+
+    try {
+      const run = await runOrchestration(payload.plan ?? defaultPlan, payload.prompt, message => {
+        event.sender.send('orch:event', message);
+      }, runtimeContext(event.sender, 'orch:event'), {
+        retrieve: async (config, query, stepName) => {
+          if (!turboMemory) {
+            return [];
+          }
+          const items = await turboMemory.retrieve(config, query, {
+            namespace: orchestrationNamespace,
+            k: 8
+          });
+          event.sender.send('orch:event', `[memory] ${stepName} retrieved ${items.length} memory item(s).`);
+          return items;
+        },
+        store: async (config, text, stepName) => {
+          if (!turboMemory) {
+            return;
+          }
+          try {
+            await turboMemory.store(
+              config,
+              [
+                {
+                  text: text.slice(0, 7000),
+                  source: `orchestration:${stepName}`,
+                  metadata: { workspaceDir: selectedWorkspaceDir }
+                }
+              ],
               {
-                text: text.slice(0, 7000),
-                source: `orchestration:${stepName}`,
-                metadata: { workspaceDir: selectedWorkspaceDir }
+                namespace: orchestrationNamespace,
+                replaceSources: [`orchestration:${stepName}`]
               }
-            ],
-            {
-              namespace: memoryNamespace('orchestration', selectedWorkspaceDir)
-            }
-          );
-          event.sender.send('orch:event', `[memory] ${stepName} stored output in TurboVec memory.`);
-        } catch (error) {
-          event.sender.send('orch:event', `[memory] ${stepName} store skipped: ${error instanceof Error ? error.message : String(error)}`);
+            );
+            event.sender.send('orch:event', `[memory] ${stepName} stored output in TurboVec memory.`);
+          } catch (error) {
+            event.sender.send('orch:event', `[memory] ${stepName} store skipped: ${error instanceof Error ? error.message : String(error)}`);
+          }
         }
-      }
-    }, abortController.signal);
+      }, abortController.signal);
 
-    return run;
-  } finally {
-    if (activeOrchestrationAbortController === abortController) {
-      activeOrchestrationAbortController = null;
+      return run;
+    } finally {
+      if (activeOrchestrationAbortController === abortController) {
+        activeOrchestrationAbortController = null;
+      }
     }
   }
-});
+);
