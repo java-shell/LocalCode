@@ -16,6 +16,7 @@ import {
   OrchestrationExportResult,
   OrchestrationImportResult,
   OrchestrationPlan,
+  OrchestrationRunRequest,
   OrchestrationRunResult,
   WorkspaceState
 } from './shared/types';
@@ -30,6 +31,7 @@ let activeChatAbortController: AbortController | null = null;
 let activeOrchestrationAbortController: AbortController | null = null;
 const fileWatchRefs = new Map<string, { count: number; listener: (curr: fs.Stats, prev: fs.Stats) => void }>();
 let turboMemory: TurboVecMemory | null = null;
+const MAIN_STATE_FILE = 'localcode-main-state.json';
 
 function appResourcePath(...segments: string[]): string {
   return path.join(app.getAppPath(), ...segments);
@@ -162,6 +164,40 @@ function clearAllFileWatches() {
   fileWatchRefs.clear();
 }
 
+function mainStatePath(): string {
+  return path.join(app.getPath('userData'), MAIN_STATE_FILE);
+}
+
+function restoreLastWorkspaceSelection() {
+  try {
+    const raw = fs.readFileSync(mainStatePath(), 'utf8');
+    const parsed = JSON.parse(raw) as { lastWorkspaceDir?: unknown };
+    const candidate = String(parsed?.lastWorkspaceDir ?? '').trim();
+    if (!candidate) {
+      return;
+    }
+    const stat = fs.statSync(candidate);
+    if (stat.isDirectory()) {
+      selectedWorkspaceDir = candidate;
+    }
+  } catch {
+    // Ignore missing/invalid state file and keep default workspace.
+  }
+}
+
+function persistLastWorkspaceSelection() {
+  const payload = {
+    lastWorkspaceDir: selectedWorkspaceDir
+  };
+
+  void fs.promises
+    .mkdir(path.dirname(mainStatePath()), { recursive: true })
+    .then(() => fs.promises.writeFile(mainStatePath(), JSON.stringify(payload, null, 2), 'utf8'))
+    .catch(() => {
+      // Persistence failures should not block workspace usage.
+    });
+}
+
 async function importPlanFromDisk(): Promise<OrchestrationImportResult | null> {
   const dialogOptions: Electron.OpenDialogOptions = {
     title: 'Import Orchestration Plan',
@@ -247,6 +283,8 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  restoreLastWorkspaceSelection();
+
   const memoryRoot = path.join(app.getPath('userData'), 'turbovec-memory');
   const turboVecVenvDir = path.join(app.getPath('userData'), '.turbovec-venv');
   const bridgeScript = unpackedAppResourcePath('src', 'backend', 'turbovec_bridge.py');
@@ -546,6 +584,7 @@ ipcMain.handle('workspace:select-directory', async () => {
   if (!result.canceled && result.filePaths.length > 0) {
     clearAllFileWatches();
     selectedWorkspaceDir = result.filePaths[0];
+    persistLastWorkspaceSelection();
   }
 
   return workspaceState();
@@ -630,7 +669,7 @@ ipcMain.handle(
   'orch:run',
   async (
     event,
-    payload: { plan: OrchestrationPlan; prompt: string; memoryNamespace?: string }
+    payload: OrchestrationRunRequest
   ): Promise<OrchestrationRunResult> => {
     const errors = validatePlan(payload.plan);
     if (errors.length > 0) {
@@ -646,7 +685,9 @@ ipcMain.handle(
       : memoryNamespace('orchestration', selectedWorkspaceDir);
 
     try {
-      const run = await runOrchestration(payload.plan ?? defaultPlan, payload.prompt, message => {
+      const run = await runOrchestration(payload.plan ?? defaultPlan, payload.prompt, {
+        requestTimeoutMs: Number(payload.requestTimeoutMs ?? 0) || undefined
+      }, message => {
         event.sender.send('orch:event', message);
       }, runtimeContext(event.sender, 'orch:event'), {
         retrieve: async (config, query, stepName) => {

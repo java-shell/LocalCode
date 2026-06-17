@@ -77,6 +77,14 @@ function toPositiveInteger(value: unknown): number | undefined {
   return Number.isFinite(num) && num > 0 ? num : undefined;
 }
 
+function resolveRequestTimeoutMs(value: unknown): number {
+  const ms = Math.trunc(Number(value));
+  if (!Number.isFinite(ms)) {
+    return 180000;
+  }
+  return Math.max(1000, Math.min(600000, ms));
+}
+
 function parseUsage(usage: CompletionResponse['usage']): Omit<TokenUsage, 'requests'> {
   const promptTokens = toFiniteNumber(usage?.prompt_tokens) || toFiniteNumber(usage?.input_tokens);
   const completionTokens = toFiniteNumber(usage?.completion_tokens) || toFiniteNumber(usage?.output_tokens);
@@ -626,7 +634,7 @@ export async function chatWithTools(
   let providerToolParseFailures = 0;
   const useOllamaNativeChat = shouldUseOllamaNativeChat(config);
   const ollamaNativeEndpoint = useOllamaNativeChat ? deriveOllamaNativeChatEndpoint(config.endpoint) : undefined;
-  const requestTimeoutMs = 180000;
+  const requestTimeoutMs = resolveRequestTimeoutMs(config.requestTimeoutMs);
   const usageTotals: TokenUsage = {
     promptTokens: 0,
     completionTokens: 0,

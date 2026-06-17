@@ -215,6 +215,8 @@
       </div>
       <label class="label" for="settingMaxToolTurns">Max Tool Turns (Chat)</label>
       <input id="settingMaxToolTurns" type="number" min="1" max="200" step="1" />
+      <label class="label" for="settingRequestTimeoutMs">LLM Request Timeout (ms)</label>
+      <input id="settingRequestTimeoutMs" type="number" min="1000" max="600000" step="1000" />
       <label class="label" for="settingEndpoint">Default Endpoint</label>
       <input id="settingEndpoint" placeholder="http://localhost:11434/v1/chat/completions" />
       <label class="label" for="settingProvider">Default Provider</label>
@@ -226,7 +228,7 @@
       <input id="settingModel" placeholder="llama3" />
       <label class="label" for="settingApiKey">Default API Key (optional)</label>
       <input id="settingApiKey" type="password" placeholder="sk-..." />
-      <div class="settings-help">Default is 40. Higher values allow longer tool-calling runs.</div>
+      <div class="settings-help">Defaults: max tool turns 40, timeout 180000 ms (3 minutes).</div>
       <div class="settings-actions">
         <button id="settingsCancel" type="button">Cancel</button>
         <button id="settingsSave" type="button">Save</button>
@@ -234,18 +236,6 @@
     </div>
   </div>
 
-  <div id="apiKeyModal" class="settings-modal" aria-hidden="true">
-    <div class="settings-card">
-      <div class="settings-header">
-        <strong>OpenWeatherMap API Key</strong>
-      </div>
-      <label class="label" for="openWeatherApiKeyInput">API Key</label>
-      <input id="openWeatherApiKeyInput" type="password" placeholder="sk-..." />
-      <div class="settings-actions">
-        <button id="openWeatherApiKeySave" type="button">Save</button>
-      </div>
-    </div>
-  </div>
   <script src="./app.js"></script>
 </body>
 </html>

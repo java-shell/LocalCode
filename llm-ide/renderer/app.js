@@ -1,5 +1,4 @@
 let editor;
-// OpenWeatherMap API key modal handling will be initialized in main() after DOM is ready.
 
 let untitledCounter = 1;
 const editorTabs = new Map();
@@ -11,6 +10,7 @@ const PANEL_SIZES_STORAGE_KEY = 'localcode.panelSizes';
 
 const settingsState = {
   maxToolTurns: 40,
+  requestTimeoutMs: 180000,
   provider: 'ollama',
   endpoint: 'http://localhost:11434/v1/chat/completions',
   model: 'llama3',
@@ -34,6 +34,11 @@ const contextWindowHints = [
 function clampMaxToolTurns(value) {
   if (!Number.isFinite(value)) return 40;
   return Math.max(1, Math.min(200, Math.floor(value)));
+}
+
+function clampRequestTimeoutMs(value) {
+  if (!Number.isFinite(value)) return 180000;
+  return Math.max(1000, Math.min(600000, Math.floor(value)));
 }
 
 function clampContextWindowTokens(value) {
@@ -269,55 +274,9 @@ function loadSettings() {
     if (!raw) return;
     const parsed = JSON.parse(raw);
     settingsState.maxToolTurns = clampMaxToolTurns(Number(parsed.maxToolTurns ?? 40));
+    settingsState.requestTimeoutMs = clampRequestTimeoutMs(Number(parsed.requestTimeoutMs ?? 180000));
     settingsState.provider = normalizeProvider(parsed.provider ?? settingsState.provider);
     settingsState.endpoint = String(parsed.endpoint ?? settingsState.endpoint).trim() || settingsState.endpoint;
-  // OpenWeatherMap API key modal handling
-  const openWeatherApiKeyModal = document.getElementById('openWeatherApiKeyModal');
-  const openWeatherApiKeyInput = document.getElementById('openWeatherApiKeyInput');
-  const openWeatherApiKeySave = document.getElementById('openWeatherApiKeySave');
-
-  function openOpenWeatherModal() {
-    const storedKey = window.localStorage.getItem('openWeatherApiKey');
-    if (storedKey) {
-      openWeatherApiKeyInput.value = storedKey;
-    } else {
-      openWeatherApiKeyInput.value = '';
-    }
-    openWeatherApiKeyModal.classList.add('open');
-    openWeatherApiKeyModal.setAttribute('aria-hidden', 'false');
-    openWeatherApiKeyInput.focus();
-  }
-
-  function closeOpenWeatherModal() {
-    openWeatherApiKeyModal.classList.remove('open');
-    openWeatherApiKeyModal.setAttribute('aria-hidden', 'true');
-  }
-
-  openWeatherApiKeySave.addEventListener('click', () => {
-    const key = openWeatherApiKeyInput.value.trim();
-    if (key) {
-      window.localStorage.setItem('openWeatherApiKey', key);
-    }
-    closeOpenWeatherModal();
-  });
-
-  openWeatherApiKeyModal.addEventListener('click', event => {
-    if (event.target === openWeatherApiKeyModal) {
-      closeOpenWeatherModal();
-    }
-  });
-
-  window.addEventListener('keydown', event => {
-    if (event.key === 'Escape' && openWeatherApiKeyModal.classList.contains('open')) {
-      closeOpenWeatherModal();
-    }
-  });
-
-  // Show modal if key not set
-  if (!window.localStorage.getItem('openWeatherApiKey')) {
-    openOpenWeatherModal();
-  }
-
     settingsState.model = String(parsed.model ?? settingsState.model).trim() || settingsState.model;
     settingsState.apiKey = String(parsed.apiKey ?? settingsState.apiKey);
     settingsState.modelContextWindows =
@@ -332,6 +291,7 @@ function loadSettings() {
     settingsState.chatSettingsCollapsed = Boolean(parsed.chatSettingsCollapsed ?? settingsState.chatSettingsCollapsed);
   } catch {
     settingsState.maxToolTurns = 40;
+    settingsState.requestTimeoutMs = 180000;
     settingsState.provider = 'ollama';
     settingsState.endpoint = 'http://localhost:11434/v1/chat/completions';
     settingsState.model = 'llama3';
@@ -940,6 +900,7 @@ function initSettingsMenu() {
   const openButton = document.getElementById('openSettings');
   const modal = document.getElementById('settingsModal');
   const input = document.getElementById('settingMaxToolTurns');
+  const timeoutInput = document.getElementById('settingRequestTimeoutMs');
   const endpointInput = document.getElementById('settingEndpoint');
   const providerInput = document.getElementById('settingProvider');
   const modelInput = document.getElementById('settingModel');
@@ -954,6 +915,7 @@ function initSettingsMenu() {
 
   function openModal() {
     input.value = String(settingsState.maxToolTurns);
+    timeoutInput.value = String(settingsState.requestTimeoutMs);
     endpointInput.value = settingsState.endpoint;
     providerInput.value = normalizeProvider(settingsState.provider);
     modelInput.value = settingsState.model;
@@ -974,6 +936,7 @@ function initSettingsMenu() {
 
   save.addEventListener('click', () => {
     settingsState.maxToolTurns = clampMaxToolTurns(Number(input.value));
+    settingsState.requestTimeoutMs = clampRequestTimeoutMs(Number(timeoutInput.value));
     settingsState.endpoint = endpointInput.value.trim() || settingsState.endpoint;
     settingsState.provider = normalizeProvider(providerInput.value);
     settingsState.model = modelInput.value.trim() || settingsState.model;
@@ -1019,7 +982,8 @@ function setupMonaco() {
           theme: 'vs-dark',
           minimap: { enabled: false },
           automaticLayout: true,
-          fontSize: 14
+          fontSize: 14,
+          mouseWheelZoom: true
         });
         openScratchTab();
         resolve();
@@ -1273,7 +1237,6 @@ async function initChat() {
 
     settingsState.provider = normalizeProvider(provider.value);
     settingsState.endpoint = endpoint.value.trim() || settingsState.endpoint;
-    settingsState.model = model.value || settingsState.model;
     settingsState.chatMemoryNamespace = String(session.config?.memoryNamespace || '');
     saveSettings();
 
@@ -1436,11 +1399,12 @@ async function initChat() {
   function setModelOptions(models, preferred) {
     model.innerHTML = '';
     if (!models.length) {
+      const fallbackModel = preferred || settingsState.model || 'llama3';
       const option = document.createElement('option');
-      option.value = 'llama3';
-      option.textContent = 'llama3 (fallback)';
+      option.value = fallbackModel;
+      option.textContent = `${fallbackModel} (fallback)`;
       model.appendChild(option);
-      model.value = 'llama3';
+      model.value = fallbackModel;
       return;
     }
 
@@ -1482,14 +1446,14 @@ async function initChat() {
       });
       const discoveredContextWindows = result?.contextWindows;
       const contextWindowsChanged = rememberDiscoveredContextWindows(discoveredContextWindows);
-      setModelOptions(result.models, preferredModel || currentModel || 'llama3');
+      setModelOptions(result.models, preferredModel || currentModel || settingsState.model || 'llama3');
       if (contextWindowsChanged) {
         syncChatContextWindowInput();
         renderContextUsageGraph();
       }
       status.textContent = `Loaded ${result.models.length} models`;
     } catch (error) {
-      setModelOptions([], preferredModel || currentModel || 'llama3');
+      setModelOptions([], preferredModel || currentModel || settingsState.model || 'llama3');
       status.textContent = `Model load failed: ${error instanceof Error ? error.message : String(error)}`;
     } finally {
       refreshModels.disabled = false;
@@ -1617,7 +1581,8 @@ async function initChat() {
           model: model.value,
           apiKey: apiKey.value.trim() || undefined,
           temperature: 0.2,
-          maxTokens: 0
+          maxTokens: 0,
+          requestTimeoutMs: settingsState.requestTimeoutMs
         },
         historyMessages: priorMessages,
         contextWindowTokens: resolveSelectedContextWindowTokens(),
@@ -2434,7 +2399,8 @@ async function initOrchestration() {
       const result = await window.llmIde.runOrchestration({
         plan: parsed,
         prompt: promptText,
-        memoryNamespace: selectedOrchestrationMemoryNamespace() || undefined
+        memoryNamespace: selectedOrchestrationMemoryNamespace() || undefined,
+        requestTimeoutMs: settingsState.requestTimeoutMs
       });
       outputEl.textContent = result.output || '(empty output)';
       renderOutputLogEntry(result, promptText, parsed);

@@ -13,6 +13,10 @@ export interface OrchestrationMemoryAdapter {
   store: (config: LLMConfig, text: string, stepName: string) => Promise<void>;
 }
 
+export interface OrchestrationRunOptions {
+  requestTimeoutMs?: number;
+}
+
 function truncateText(value: string, maxChars: number): string {
   const text = String(value ?? '').trim();
   if (text.length <= maxChars) {
@@ -126,6 +130,7 @@ async function runSingleIteration(
   originalPrompt: string,
   iterationPrompt: string,
   iteration: number,
+  options?: OrchestrationRunOptions,
   onEvent?: (event: string) => void,
   runtimeContext?: RuntimeContext,
   memoryAdapter?: OrchestrationMemoryAdapter,
@@ -149,7 +154,8 @@ async function runSingleIteration(
       apiKey: step.apiKey,
       temperature: step.temperature ?? 0.2,
       maxTokens: step.maxTokens,
-      contextWindowTokens: Math.max(0, Number(step.contextWindowTokens ?? 0)) || undefined
+      contextWindowTokens: Math.max(0, Number(step.contextWindowTokens ?? 0)) || undefined,
+      requestTimeoutMs: Number(options?.requestTimeoutMs || 0) || undefined
     };
 
     const messages: ChatMessage[] = [];
@@ -274,6 +280,7 @@ async function runSingleIteration(
 export async function runOrchestration(
   plan: OrchestrationPlan,
   userPrompt: string,
+  options?: OrchestrationRunOptions,
   onEvent?: (event: string) => void,
   runtimeContext?: RuntimeContext,
   memoryAdapter?: OrchestrationMemoryAdapter,
@@ -298,6 +305,7 @@ export async function runOrchestration(
       userPrompt,
       iterationPrompt,
       iteration,
+      options,
       onEvent,
       runtimeContext,
       memoryAdapter,

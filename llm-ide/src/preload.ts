@@ -4,6 +4,7 @@ import {
   ChatSessionSummary,
   ChatStreamResult,
   ChatStreamRequest,
+  OrchestrationRunRequest,
   OrchestrationExportResult,
   LLMConfig,
   OrchestrationImportResult,
@@ -99,7 +100,7 @@ const api = {
     ipcRenderer.invoke('orch:export-plan', plan),
   savePlan: async (plan: OrchestrationPlan): Promise<void> => ipcRenderer.invoke('orch:save-plan', plan),
   validatePlan: async (raw: string): Promise<string[]> => ipcRenderer.invoke('orch:validate-plan', raw),
-  runOrchestration: async (payload: { plan: OrchestrationPlan; prompt: string; memoryNamespace?: string }): Promise<OrchestrationRunResult> => {
+  runOrchestration: async (payload: OrchestrationRunRequest): Promise<OrchestrationRunResult> => {
     return ipcRenderer.invoke('orch:run', payload);
   },
   stopOrchestration: async (): Promise<{ stopped: boolean; reason?: string }> => {

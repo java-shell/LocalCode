@@ -24,6 +24,7 @@ export interface LLMConfig {
   temperature: number;
   maxTokens?: number;
   contextWindowTokens?: number;
+  requestTimeoutMs?: number;
 }
 
 export interface ChatStreamRequest {
@@ -34,6 +35,13 @@ export interface ChatStreamRequest {
   maxToolTurns?: number;
   memoryNamespace?: string;
   contextWindowTokens?: number;
+}
+
+export interface OrchestrationRunRequest {
+  plan: OrchestrationPlan;
+  prompt: string;
+  memoryNamespace?: string;
+  requestTimeoutMs?: number;
 }
 
 export interface TokenUsage {
