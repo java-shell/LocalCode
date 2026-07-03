@@ -1,0 +1,455 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/LM3TZG3R/AI-Rules/ai-rules-config.schema.json",
+  "title": "AI Rules Configuration",
+  "description": "Configuration schema for AI-assisted coding rules and standards",
+  "type": "object",
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Configuration version (semantic versioning)",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$",
+      "default": "1.0.0"
+    },
+    "rules": {
+      "type": "object",
+      "description": "Rule enforcement configuration",
+      "properties": {
+        "function_documentation": {
+          "type": "object",
+          "properties": {
+            "required": {
+              "type": "boolean",
+              "default": true,
+              "description": "Require comprehensive function documentation (§3)"
+            },
+            "min_complexity_threshold": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 10,
+              "default": 3,
+              "description": "Minimum complexity requiring full documentation template"
+            }
+          }
+        },
+        "todo_management": {
+          "type": "object",
+          "properties": {
+            "required": {
+              "type": "boolean",
+              "default": true,
+              "description": "Require TODO ledger for multi-step tasks (§4)"
+            },
+            "id_prefix": {
+              "type": "string",
+              "default": "AI-",
+              "description": "Prefix for TODO IDs (e.g., 'AI-' for AI-001)"
+            },
+            "issue_tracker_integration": {
+              "type": "boolean",
+              "default": false,
+              "description": "Use issue tracker IDs instead of AI-### format"
+            }
+          }
+        },
+        "backward_compatibility": {
+          "type": "object",
+          "description": "Configuration for the non-breaking change policy. The schema key remains backward_compatibility for stability; prose docs prefer the term non-breaking changes.",
+          "properties": {
+            "enforce": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enforce non-breaking changes by default (§5)"
+            },
+            "require_migration_plan": {
+              "type": "boolean",
+              "default": true,
+              "description": "Require migration plan for breaking changes"
+            }
+          }
+        },
+        "documentation_updates": {
+          "type": "object",
+          "properties": {
+            "required": {
+              "type": "boolean",
+              "default": true,
+              "description": "Require README/API/CHANGELOG updates when changes affect behavior, usage, or public contracts (§8)"
+            }
+          }
+        },
+        "testing": {
+          "type": "object",
+          "properties": {
+            "required": {
+              "type": "boolean",
+              "default": true,
+              "description": "Require tests for all changes (§6)"
+            },
+            "min_coverage": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "default": 80,
+              "description": "Minimum test coverage percentage"
+            },
+            "browser_testing_tool": {
+              "type": "string",
+              "enum": ["chrome-devtools-mcp", "selenium", "playwright", "cypress"],
+              "default": "chrome-devtools-mcp",
+              "description": "Preferred browser testing tool (§6.1)"
+            }
+          }
+        },
+        "code_quality": {
+          "type": "object",
+          "properties": {
+            "max_function_length": {
+              "type": "integer",
+              "minimum": 10,
+              "maximum": 500,
+              "default": 50,
+              "description": "Maximum function length in lines"
+            },
+            "max_complexity": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 50,
+              "default": 10,
+              "description": "Maximum cyclomatic complexity"
+            }
+          }
+        }
+      }
+    },
+    "standards": {
+      "type": "object",
+      "description": "Additional standards enforcement",
+      "properties": {
+        "security": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable security best practices (§19)"
+            },
+            "owasp_compliance": {
+              "type": "boolean",
+              "default": true
+            }
+          }
+        },
+        "accessibility": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable accessibility standards (§20)"
+            },
+            "wcag_level": {
+              "type": "string",
+              "enum": ["A", "AA", "AAA"],
+              "default": "AA",
+              "description": "WCAG conformance level"
+            }
+          }
+        },
+        "performance": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable performance optimization guidelines (§21)"
+            },
+            "require_profiling": {
+              "type": "boolean",
+              "default": true,
+              "description": "Require profiling before optimization"
+            }
+          }
+        },
+        "logging_observability": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable structured logging, metrics, correlation IDs, and alerting guidance (§15, §22, §23)"
+            },
+            "structured_logging": {
+              "type": "boolean",
+              "default": true,
+              "description": "Prefer structured logs over ad hoc plain text logs"
+            },
+            "metrics_enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Track baseline latency, throughput, error, and saturation metrics"
+            },
+            "correlation_ids": {
+              "type": "boolean",
+              "default": true,
+              "description": "Require correlation or trace identifiers across request boundaries where applicable"
+            }
+          }
+        },
+        "ethics": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true,
+              "description": "Enable ethical AI coding considerations (§24)"
+            },
+            "bias_detection": {
+              "type": "boolean",
+              "default": true,
+              "description": "Keep the baseline bias-detection requirement enabled for AI-facing features"
+            },
+            "advanced_bias_detection": {
+              "type": "boolean",
+              "default": true,
+              "description": "Require protected-attribute bias analysis, severity scoring, and mitigation recommendations"
+            },
+            "content_moderation": {
+              "type": "boolean",
+              "default": true,
+              "description": "Require multi-layer moderation for harmful content, misinformation, and privacy risks"
+            },
+            "protected_attributes": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["gender", "racial", "cultural", "age", "disability", "socioeconomic"]
+              },
+              "default": ["gender", "racial", "cultural", "age", "disability", "socioeconomic"],
+              "description": "Protected-attribute categories that must be considered in ethics reviews"
+            },
+            "fairness_metrics": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["demographic_parity", "equal_opportunity"]
+              },
+              "default": ["demographic_parity", "equal_opportunity"],
+              "description": "Fairness metrics that should be measured when automated decisions or rankings are involved"
+            },
+            "review_threshold": {
+              "type": "string",
+              "enum": ["low", "medium", "high", "critical"],
+              "default": "medium",
+              "description": "Lowest severity that requires human review"
+            },
+            "block_threshold": {
+              "type": "string",
+              "enum": ["low", "medium", "high", "critical"],
+              "default": "critical",
+              "description": "Lowest severity that must be blocked before user display"
+            },
+            "context_aware_allowances": {
+              "type": "boolean",
+              "default": true,
+              "description": "Allow documented moderation exceptions for legitimate technical or safety discussions"
+            },
+            "fallback_responses": {
+              "type": "boolean",
+              "default": true,
+              "description": "Require safe fallback responses when moderation blocks an output"
+            },
+            "moderation_logging": {
+              "type": "boolean",
+              "default": true,
+              "description": "Require structured logging of moderation decisions and triggered categories"
+            },
+            "processing_time_tracking": {
+              "type": "boolean",
+              "default": true,
+              "description": "Track moderation and bias-analysis latency in service telemetry"
+            }
+          }
+        },
+        "internationalization": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable i18n/l10n requirements (§25)"
+            },
+            "default_locale": {
+              "type": "string",
+              "default": "en"
+            }
+          }
+        }
+      }
+    },
+    "project": {
+      "type": "object",
+      "description": "Project-specific configuration",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Project name"
+        },
+        "type": {
+          "type": "string",
+          "enum": ["web", "api", "library", "cli", "mobile", "desktop", "other"],
+          "description": "Project type"
+        },
+        "languages": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Primary programming languages"
+        },
+        "frameworks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Primary frameworks used"
+        }
+      }
+    },
+    "automation": {
+      "type": "object",
+      "description": "Automation and CI/CD configuration",
+      "properties": {
+        "pre_commit_hooks": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable pre-commit hooks for rule enforcement"
+        },
+        "ci_checks": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable CI/CD checks (§23)"
+        },
+        "linting": {
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": true
+            },
+            "tools": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "default": ["eslint", "flake8", "markdownlint"]
+            }
+          }
+        }
+      }
+    },
+    "token_optimization": {
+      "type": "object",
+      "description": "Token usage optimization settings (§26)",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "target_reduction": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100,
+          "default": 60,
+          "description": "Target token reduction percentage (40-80%)"
+        },
+        "batch_operations": {
+          "type": "boolean",
+          "default": true,
+          "description": "Use batched operations where possible"
+        },
+        "parallel_reads": {
+          "type": "boolean",
+          "default": true,
+          "description": "Parallelize independent read operations"
+        },
+        "semantic_retrieval": {
+          "type": "object",
+          "description": "Optional semantic retrieval and vector search settings for large or concept-heavy repositories (§26)",
+          "properties": {
+            "enabled": {
+              "type": "boolean",
+              "default": false,
+              "description": "Enable semantic retrieval/vector search when it improves accuracy or token efficiency"
+            },
+            "mode": {
+              "type": "string",
+              "enum": ["keyword", "vector", "hybrid"],
+              "default": "hybrid",
+              "description": "Retrieval strategy; hybrid keeps keyword fallback while adding semantic recall"
+            },
+            "provider": {
+              "type": "string",
+              "enum": ["none", "luna", "azure-ai-search", "elasticsearch", "pgvector", "custom"],
+              "default": "none",
+              "description": "Retrieval backend/provider. Keep this explicit rather than hard-coding it in the core rules"
+            },
+            "index_scope": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "enum": ["docs", "code", "adrs", "tickets", "custom"]
+              },
+              "uniqueItems": true,
+              "default": ["docs", "code"],
+              "description": "Content collections indexed for retrieval"
+            },
+            "fallback_to_keyword_search": {
+              "type": "boolean",
+              "default": true,
+              "description": "Keep deterministic keyword/grep fallback when semantic retrieval is unavailable or lower precision"
+            },
+            "require_benchmarks": {
+              "type": "boolean",
+              "default": true,
+              "description": "Document retrieval quality, latency, and cost benchmarks before relying on semantic retrieval in production"
+            },
+            "document_tradeoffs": {
+              "type": "boolean",
+              "default": true,
+              "description": "Document rationale, privacy/security constraints, fallback behavior, and cost/performance trade-offs"
+            },
+            "luna": {
+              "type": "object",
+              "description": "Optional Luna-specific settings when provider is set to luna",
+              "properties": {
+                "profile": {
+                  "type": "string",
+                  "enum": ["balanced", "quality", "latency"],
+                  "default": "balanced",
+                  "description": "High-level Luna retrieval tuning profile"
+                },
+                "embedding_model": {
+                  "type": "string",
+                  "description": "Optional Luna embedding model identifier"
+                },
+                "reranker": {
+                  "type": "string",
+                  "description": "Optional Luna reranker identifier"
+                },
+                "max_candidates": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 500,
+                  "default": 50,
+                  "description": "Maximum candidate chunks returned before reranking"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "required": ["version"]
+}

@@ -1,0 +1,44 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "AI: Show Rules Checklist",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "Get-Content -Raw 'RULES-QUICKREF.md'"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "AI: Show Full Rules",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "Get-Content -Raw 'rules.md'"
+      ],
+      "problemMatcher": []
+    },
+    {
+      "label": "AI: Open Rules in Editor",
+      "type": "shell",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "if (Get-Command code -ErrorAction SilentlyContinue) { code -r 'RULES-QUICKREF.md' 'rules.md' } else { Write-Host 'VS Code CLI not found on PATH. Open RULES-QUICKREF.md and rules.md manually.' }"
+      ],
+      "problemMatcher": []
+    }
+  ]
+}

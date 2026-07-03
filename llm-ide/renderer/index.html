@@ -44,13 +44,17 @@
         <div class="editor-header">
           <span>Monaco Editor</span>
           <div class="editor-actions">
+            <button id="markdownViewToggle" type="button" hidden>Preview Markdown</button>
             <button id="saveFile">Save File</button>
             <button id="saveAllFiles">Save All</button>
             <button id="openSample">Load Sample</button>
           </div>
         </div>
         <div id="editorTabs" class="editor-tabs"></div>
-        <div id="editor"></div>
+        <div id="editorSurface" class="editor-surface">
+          <div id="editor"></div>
+          <div id="markdownPreview" class="markdown-preview" hidden></div>
+        </div>
         <div id="terminalResizeHandle" class="terminal-resizer" role="separator" aria-label="Resize terminal panel" tabindex="0"></div>
         <div class="terminal-panel">
           <div class="terminal-header">

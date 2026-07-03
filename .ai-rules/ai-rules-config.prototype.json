@@ -1,0 +1,98 @@
+{
+  "$schema": "./ai-rules-config.schema.json",
+  "version": "1.0.0",
+  "rules": {
+    "function_documentation": {
+      "required": true,
+      "min_complexity_threshold": 8
+    },
+    "todo_management": {
+      "required": false,
+      "id_prefix": "AI-",
+      "issue_tracker_integration": false
+    },
+    "backward_compatibility": {
+      "enforce": false,
+      "require_migration_plan": false
+    },
+    "documentation_updates": {
+      "required": false
+    },
+    "testing": {
+      "required": false,
+      "min_coverage": 0,
+      "browser_testing_tool": "chrome-devtools-mcp"
+    },
+    "code_quality": {
+      "max_function_length": 80,
+      "max_complexity": 15
+    }
+  },
+  "standards": {
+    "security": {
+      "enabled": true,
+      "owasp_compliance": true
+    },
+    "accessibility": {
+      "enabled": false,
+      "wcag_level": "AA"
+    },
+    "performance": {
+      "enabled": false,
+      "require_profiling": false
+    },
+    "logging_observability": {
+      "enabled": true,
+      "structured_logging": true,
+      "metrics_enabled": true,
+      "correlation_ids": true
+    },
+    "ethics": {
+      "enabled": true,
+      "bias_detection": true,
+      "advanced_bias_detection": true,
+      "content_moderation": true,
+      "protected_attributes": ["gender", "racial", "cultural", "age", "disability", "socioeconomic"],
+      "fairness_metrics": ["demographic_parity", "equal_opportunity"],
+      "review_threshold": "medium",
+      "block_threshold": "critical",
+      "context_aware_allowances": true,
+      "fallback_responses": true,
+      "moderation_logging": true,
+      "processing_time_tracking": true
+    },
+    "internationalization": {
+      "enabled": false,
+      "default_locale": "en"
+    }
+  },
+  "project": {
+    "name": "Prototype Project",
+    "type": "other",
+    "languages": ["TypeScript"],
+    "frameworks": []
+  },
+  "automation": {
+    "pre_commit_hooks": false,
+    "ci_checks": false,
+    "linting": {
+      "enabled": false,
+      "tools": []
+    }
+  },
+  "token_optimization": {
+    "enabled": true,
+    "target_reduction": 60,
+    "batch_operations": true,
+    "parallel_reads": true,
+    "semantic_retrieval": {
+      "enabled": false,
+      "mode": "keyword",
+      "provider": "none",
+      "index_scope": ["docs", "code"],
+      "fallback_to_keyword_search": true,
+      "require_benchmarks": false,
+      "document_tradeoffs": false
+    }
+  }
+}

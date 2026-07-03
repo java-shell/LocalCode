@@ -1,4 +1,7 @@
 let editor;
+let markdownViewToggleButton = null;
+let markdownPreviewEl = null;
+let markdownPreviewMode = false;
 
 let untitledCounter = 1;
 const editorTabs = new Map();
@@ -603,6 +606,59 @@ function escapeHtml(raw) {
     .replaceAll("'", '&#39;');
 }
 
+function renderBasicMarkdownToHtml(markdownText) {
+  const source = String(markdownText || '').replace(/\r\n/g, '\n');
+  if (!source.trim()) {
+    return '';
+  }
+
+  const codeBlocks = [];
+  let text = source.replace(/```([\w-]+)?\n([\s\S]*?)```/g, (_, lang, code) => {
+    const languageClass = lang ? ` class="language-${escapeHtml(String(lang).trim())}"` : '';
+    const html = `<pre><code${languageClass}>${escapeHtml(code)}</code></pre>`;
+    const token = `@@CODEBLOCK_${codeBlocks.length}@@`;
+    codeBlocks.push(html);
+    return token;
+  });
+
+  text = text
+    .split('\n')
+    .map(line => {
+      if (/^\s*---\s*$/.test(line)) return '<hr />';
+      if (/^\s*####\s+/.test(line)) return `<h4>${line.replace(/^\s*####\s+/, '')}</h4>`;
+      if (/^\s*###\s+/.test(line)) return `<h3>${line.replace(/^\s*###\s+/, '')}</h3>`;
+      if (/^\s*##\s+/.test(line)) return `<h2>${line.replace(/^\s*##\s+/, '')}</h2>`;
+      if (/^\s*#\s+/.test(line)) return `<h1>${line.replace(/^\s*#\s+/, '')}</h1>`;
+      if (/^\s*>\s?/.test(line)) return `<blockquote>${line.replace(/^\s*>\s?/, '')}</blockquote>`;
+      if (/^\s*[-*]\s+/.test(line)) return `<li>${line.replace(/^\s*[-*]\s+/, '')}</li>`;
+      if (/^\s*\d+\.\s+/.test(line)) return `<li data-ordered="true">${line.replace(/^\s*\d+\.\s+/, '')}</li>`;
+      if (!line.trim()) return '';
+      if (/^@@CODEBLOCK_\d+@@$/.test(line.trim())) return line.trim();
+      return `<p>${line}</p>`;
+    })
+    .join('\n');
+
+  text = text
+    .replace(/(<li data-ordered="true">[\s\S]*?<\/li>\n?)+/g, match => {
+      const items = match.replace(/\s*data-ordered="true"/g, '');
+      return `<ol>${items}</ol>`;
+    })
+    .replace(/(<li>(?!<\/li>)[\s\S]*?<\/li>\n?)+/g, match => `<ul>${match}</ul>`);
+
+  text = text
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/`([^`]+)`/g, (_, code) => `<code>${escapeHtml(code)}</code>`)
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, label, href) => {
+      const safeLabel = escapeHtml(label);
+      const safeHref = escapeHtml(String(href || '').trim());
+      return `<a href="${safeHref}" target="_blank" rel="noopener noreferrer">${safeLabel}</a>`;
+    });
+
+  text = text.replace(/@@CODEBLOCK_(\d+)@@/g, (_, idx) => codeBlocks[Number(idx)] || '');
+  return text;
+}
+
 function renderMarkdownToHtml(markdownText) {
   const markdownLib = window.marked;
   const purifier = window.DOMPurify;
@@ -618,7 +674,11 @@ function renderMarkdownToHtml(markdownText) {
     return rawHtml;
   }
 
-  return `<pre>${escapeHtml(markdownText || '')}</pre>`;
+  const fallbackHtml = renderBasicMarkdownToHtml(markdownText || '');
+  if (purifier && typeof purifier.sanitize === 'function') {
+    return purifier.sanitize(fallbackHtml);
+  }
+  return fallbackHtml;
 }
 
 function createModelUri(kind, value) {
@@ -626,6 +686,71 @@ function createModelUri(kind, value) {
     return monaco.Uri.parse(`file:///${value.replace(/^\/+/, '')}`);
   }
   return monaco.Uri.parse(`inmemory:///${value}`);
+}
+
+function getActiveEditorTab() {
+  if (!activeEditorKey) return null;
+  return editorTabs.get(activeEditorKey) || null;
+}
+
+function isMarkdownTab(tab) {
+  if (!tab || !tab.model || typeof tab.model.getLanguageId !== 'function') {
+    return false;
+  }
+  return tab.model.getLanguageId() === 'markdown';
+}
+
+function renderActiveMarkdownPreview() {
+  if (!markdownPreviewEl) return;
+  const tab = getActiveEditorTab();
+  if (!isMarkdownTab(tab)) {
+    markdownPreviewEl.innerHTML = '';
+    return;
+  }
+  markdownPreviewEl.className = 'markdown-preview assistant-markdown';
+  markdownPreviewEl.innerHTML = renderMarkdownToHtml(tab.model.getValue());
+}
+
+function syncMarkdownEditorView() {
+  const editorEl = document.getElementById('editor');
+  if (!editorEl || !markdownPreviewEl) return;
+
+  const activeTab = getActiveEditorTab();
+  const markdownActive = isMarkdownTab(activeTab);
+  if (!markdownActive) {
+    markdownPreviewMode = false;
+  }
+
+  if (markdownViewToggleButton) {
+    markdownViewToggleButton.hidden = false;
+    markdownViewToggleButton.classList.toggle('markdown-toggle-inert', !markdownActive);
+    markdownViewToggleButton.disabled = !markdownActive;
+    markdownViewToggleButton.textContent = markdownPreviewMode ? 'Raw Markdown' : 'Preview Markdown';
+  }
+
+  if (markdownActive && markdownPreviewMode) {
+    renderActiveMarkdownPreview();
+    markdownPreviewEl.hidden = false;
+    markdownPreviewEl.classList.add('active');
+    editorEl.classList.add('editor-hidden');
+    return;
+  }
+
+  markdownPreviewEl.hidden = true;
+  markdownPreviewEl.classList.remove('active');
+  editorEl.classList.remove('editor-hidden');
+  if (editor && typeof editor.layout === 'function') {
+    editor.layout();
+  }
+}
+
+function toggleActiveMarkdownViewMode() {
+  const tab = getActiveEditorTab();
+  if (!isMarkdownTab(tab)) {
+    return;
+  }
+  markdownPreviewMode = !markdownPreviewMode;
+  syncMarkdownEditorView();
 }
 
 function renderEditorTabs() {
@@ -671,6 +796,7 @@ function activateEditorTab(key) {
   activeEditorKey = key;
   editor.setModel(tab.model);
   renderEditorTabs();
+  syncMarkdownEditorView();
 }
 
 async function ensureFileWatch(relativePath) {
@@ -689,6 +815,9 @@ function attachDirtyTracking(tab) {
   tab.changeDisposable = tab.model.onDidChangeContent(() => {
     if (tab.suppressChange) return;
     tab.isDirty = tab.model.getValue() !== tab.lastSavedContent;
+    if (tab.key === activeEditorKey && markdownPreviewMode && isMarkdownTab(tab)) {
+      renderActiveMarkdownPreview();
+    }
     renderEditorTabs();
   });
 }
@@ -761,19 +890,67 @@ async function closeEditorTab(key) {
   activateEditorTab(remaining[Math.max(0, Math.min(idx, remaining.length - 1))]);
 }
 
-function openScratchTab(content) {
+function openScratchTab(content, options = {}) {
   const id = `scratch-${untitledCounter++}`;
-  openEditorTab({
+  const language = String(options.language || 'markdown').trim() || 'markdown';
+  const extension = String(options.extension || (language === 'markdown' ? 'md' : 'txt')).trim() || 'txt';
+  const tab = openEditorTab({
     key: `scratch:${id}`,
     kind: 'scratch',
     uriValue: id,
-    label: `${id}.ts`,
+    label: `${id}.${extension}`,
     path: null,
-    language: 'typescript',
+    language,
     content:
       content ||
-      "// Scratch\nexport async function run() {\n  return 'Edit code here with Monaco and ask the LLM to help.';\n}\n"
+      [
+        '# LocalCode Quick Start',
+        '',
+        'Welcome to LocalCode. This scratch tab is markdown by default so you can keep notes, plans, and prompts while you work.',
+        '',
+        '## Core Workflow',
+        '',
+        '1. Select a workspace folder in the left panel.',
+        '2. Open or edit files in Monaco.',
+        '3. Use Chat for code generation and problem solving.',
+        '4. Use Orchestration for multi-step workflows with tools.',
+        '5. Save your file tabs before running external commands.',
+        '',
+        '## Chat Tips',
+        '',
+        '- Be explicit about target file paths and expected output format.',
+        '- Ask for step-by-step updates when doing multi-file changes.',
+        '- Request markdown output when you want structured summaries.',
+        '',
+        '## Orchestration Tips',
+        '',
+        '- Start with 2-3 steps, then expand once the flow is stable.',
+        '- Keep tool sets minimal per step to reduce tool-call noise.',
+        '- Use clear completion markers when looping is enabled.',
+        '',
+        '## Examples',
+        '',
+        '```text',
+        'Chat prompt:',
+        'Refactor src/backend/toolRuntime.ts to extract input validation into a helper and add tests.',
+        '```',
+        '',
+        '```text',
+        'Orchestration prompt:',
+        'Audit renderer markdown rendering, fix ordering bugs, and summarize changed files.',
+        '```',
+        '',
+        '## Markdown View',
+        '',
+        'Use the `Preview Markdown` button in the editor toolbar to switch between rendered markdown and raw markdown editing.',
+        ''
+      ].join('\n')
   });
+
+  if (options.startInPreview === true && tab && isMarkdownTab(tab)) {
+    markdownPreviewMode = true;
+    syncMarkdownEditorView();
+  }
 }
 
 async function openWorkspaceFileTab(relativePath) {
@@ -976,6 +1153,8 @@ function setupMonaco() {
     window.require(
       ['vs/editor/editor.main'],
       () => {
+        markdownViewToggleButton = document.getElementById('markdownViewToggle');
+        markdownPreviewEl = document.getElementById('markdownPreview');
         editor = monaco.editor.create(document.getElementById('editor'), {
           value: '',
           language: 'typescript',
@@ -985,7 +1164,11 @@ function setupMonaco() {
           fontSize: 14,
           mouseWheelZoom: true
         });
-        openScratchTab();
+        if (markdownViewToggleButton) {
+          markdownViewToggleButton.addEventListener('click', toggleActiveMarkdownViewMode);
+        }
+        openScratchTab(undefined, { startInPreview: true });
+        syncMarkdownEditorView();
         resolve();
       },
       reject
@@ -1075,7 +1258,7 @@ async function initChat() {
     conversation.appendChild(assistantRow);
     conversation.scrollTop = conversation.scrollHeight;
 
-    return { markdown: assistantMarkdown };
+    return { row: assistantRow, markdown: assistantMarkdown };
   }
 
   function renderConversationMessages(messages) {
@@ -1298,15 +1481,69 @@ async function initChat() {
   applyChatSettingsVisibility();
 
   let assistantMarkdownRaw = '';
+  let assistantRowEl = null;
   let assistantMarkdownEl = null;
+  let runningIndicatorEl = null;
   let assistantReceivedToken = false;
   let markdownRenderQueued = false;
   let chatRunning = false;
+
+  function ensureRunningIndicator() {
+    if (runningIndicatorEl && runningIndicatorEl.parentElement === conversation) {
+      return;
+    }
+    const row = document.createElement('div');
+    row.className = 'log-line log-line-running';
+
+    const label = document.createElement('span');
+    label.className = 'running-label';
+    label.textContent = 'Assistant is running';
+
+    const dots = document.createElement('span');
+    dots.className = 'running-ellipsis';
+    dots.setAttribute('aria-hidden', 'true');
+
+    row.appendChild(label);
+    row.appendChild(dots);
+    conversation.appendChild(row);
+    conversation.scrollTop = conversation.scrollHeight;
+    runningIndicatorEl = row;
+  }
+
+  function removeRunningIndicator() {
+    if (runningIndicatorEl && runningIndicatorEl.parentElement) {
+      runningIndicatorEl.parentElement.removeChild(runningIndicatorEl);
+    }
+    runningIndicatorEl = null;
+  }
 
   function setChatRunning(running) {
     chatRunning = running;
     send.disabled = running;
     stop.disabled = !running;
+    if (running) {
+      ensureRunningIndicator();
+    } else {
+      removeRunningIndicator();
+    }
+  }
+
+  function ensureAssistantMessageRendered() {
+    if (assistantRowEl && assistantMarkdownEl) {
+      return;
+    }
+    removeRunningIndicator();
+    const assistantRender = renderAssistantMessage('');
+    assistantRowEl = assistantRender.row;
+    assistantMarkdownEl = assistantRender.markdown;
+  }
+
+  function renderAssistantMarkdownNow() {
+    if (!assistantMarkdownRaw) return;
+    ensureAssistantMessageRendered();
+    if (!assistantMarkdownEl) return;
+    assistantMarkdownEl.innerHTML = renderMarkdownToHtml(assistantMarkdownRaw);
+    conversation.scrollTop = conversation.scrollHeight;
   }
 
   function scheduleAssistantMarkdownRender() {
@@ -1314,21 +1551,29 @@ async function initChat() {
     markdownRenderQueued = true;
     requestAnimationFrame(() => {
       markdownRenderQueued = false;
-      if (!assistantMarkdownEl) return;
-      assistantMarkdownEl.innerHTML = renderMarkdownToHtml(assistantMarkdownRaw);
-      conversation.scrollTop = conversation.scrollHeight;
+      renderAssistantMarkdownNow();
     });
   }
 
   const offToken = window.llmIde.onChatToken(token => {
-    if (!assistantMarkdownEl) return;
     assistantReceivedToken = true;
     assistantMarkdownRaw += token;
+    if (!assistantMarkdownEl) {
+      ensureAssistantMessageRendered();
+    }
     scheduleAssistantMarkdownRender();
   });
 
   const offChatEvent = window.llmIde.onChatEvent(event => {
-    appendLog(conversation, `[tool] ${event}`);
+    const row = document.createElement('div');
+    row.className = 'log-line';
+    row.textContent = `[tool] ${event}`;
+    if (assistantRowEl && assistantRowEl.parentElement === conversation) {
+      conversation.insertBefore(row, assistantRowEl);
+    } else {
+      conversation.appendChild(row);
+    }
+    conversation.scrollTop = conversation.scrollHeight;
   });
 
   function syncNewNamespaceVisibility() {
@@ -1565,8 +1810,8 @@ async function initChat() {
     }
 
     appendLog(conversation, `You: ${text}`);
-    const assistantRender = renderAssistantMessage('');
-    assistantMarkdownEl = assistantRender.markdown;
+    assistantRowEl = null;
+    assistantMarkdownEl = null;
     assistantMarkdownRaw = '';
     assistantReceivedToken = false;
     status.textContent = 'Streaming...';
@@ -1609,9 +1854,11 @@ async function initChat() {
         ]
       });
 
-      if (assistantMarkdownEl && !assistantMarkdownRaw && result?.text) {
+      if (!assistantMarkdownRaw && result?.text) {
         assistantMarkdownRaw = result.text;
-        scheduleAssistantMarkdownRender();
+        renderAssistantMarkdownNow();
+      } else if (assistantMarkdownRaw) {
+        renderAssistantMarkdownNow();
       }
 
       if (assistantMarkdownRaw.trim()) {
@@ -1634,6 +1881,10 @@ async function initChat() {
       status.textContent = /canceled/i.test(error instanceof Error ? error.message : String(error)) ? 'Chat stopped' : 'Error';
     } finally {
       setChatRunning(false);
+      assistantRowEl = null;
+      assistantMarkdownEl = null;
+      assistantReceivedToken = false;
+      assistantMarkdownRaw = '';
       refreshChatNamespaceOptions();
     }
   });
@@ -1978,6 +2229,102 @@ async function initOrchestration() {
     logMarkdownEl.querySelectorAll('details').forEach(details => {
       details.open = open;
     });
+  }
+
+  function renderOrchestrationOutput(result, promptText, planSnapshot) {
+    outputEl.innerHTML = '';
+
+    const markerInfo = result.completionMarker
+      ? `marker=${result.completionMarker} completed=${result.completed ? 'yes' : 'no'}`
+      : 'single-pass run';
+    const steps = Array.isArray(result.steps) ? result.steps : [];
+
+    const container = document.createElement('div');
+    container.className = 'orchestration-output-cards';
+
+    const summaryCard = document.createElement('div');
+    summaryCard.className = 'assistant-markdown orchestration-log-markdown-content orchestration-output-card';
+    summaryCard.innerHTML = renderMarkdownToHtml([
+      `## ${planSnapshot.name || 'Workflow'} output`,
+      `**Prompt:** ${promptText || '(empty prompt)'}`,
+      `**Iterations:** ${result.iterations || 1}`,
+      `**Completion:** ${markerInfo}`
+    ].join('\n\n'));
+    container.appendChild(summaryCard);
+
+    if (!steps.length) {
+      const emptyCard = document.createElement('div');
+      emptyCard.className = 'orchestration-output-card settings-help';
+      emptyCard.textContent = '(no step output)';
+      container.appendChild(emptyCard);
+    } else {
+      steps.forEach((step, index) => {
+        const stepDetails = document.createElement('details');
+        stepDetails.className = 'orchestration-log-step orchestration-output-step';
+        stepDetails.open = index === steps.length - 1;
+
+        const stepSummary = document.createElement('summary');
+        const toolCalls = Array.isArray(step.toolCalls) ? step.toolCalls : [];
+        stepSummary.textContent = `Iteration ${step.iteration} | ${step.name} (${step.id})${toolCalls.length ? ` | ${toolCalls.length} tool call(s)` : ''}`;
+        stepDetails.appendChild(stepSummary);
+
+        const stepBody = document.createElement('div');
+        stepBody.className = 'assistant-markdown orchestration-log-markdown-content orchestration-log-step-body';
+        stepBody.innerHTML = renderMarkdownToHtml(step.output || '(empty output)');
+        stepDetails.appendChild(stepBody);
+
+        if (toolCalls.length) {
+          const tcDetails = document.createElement('details');
+          tcDetails.className = 'orchestration-log-tool-calls';
+
+          const tcSummary = document.createElement('summary');
+          tcSummary.textContent = `Tool Calls (${toolCalls.length})`;
+          tcDetails.appendChild(tcSummary);
+
+          const tcList = document.createElement('div');
+          tcList.className = 'orchestration-log-tool-calls-list';
+
+          for (const tc of toolCalls) {
+            const row = document.createElement('div');
+            row.className = 'orchestration-log-tool-call-row';
+
+            const timeEl = document.createElement('span');
+            timeEl.className = 'orchestration-log-tool-call-time';
+            timeEl.textContent = new Date(tc.timestamp).toLocaleTimeString();
+
+            const nameEl = document.createElement('span');
+            nameEl.className = 'orchestration-log-tool-call-name';
+            nameEl.textContent = tc.name;
+
+            const intentEl = document.createElement('span');
+            intentEl.className = 'orchestration-log-tool-call-intent';
+            intentEl.textContent = tc.intent;
+
+            row.appendChild(timeEl);
+            row.appendChild(nameEl);
+            row.appendChild(intentEl);
+            tcList.appendChild(row);
+          }
+
+          tcDetails.appendChild(tcList);
+          stepDetails.appendChild(tcDetails);
+        }
+
+        container.appendChild(stepDetails);
+      });
+    }
+
+    outputEl.appendChild(container);
+    outputEl.scrollTop = outputEl.scrollHeight;
+  }
+
+  function renderOrchestrationError(errorText) {
+    outputEl.innerHTML = '';
+    const card = document.createElement('div');
+    card.className = 'assistant-markdown orchestration-log-markdown-content orchestration-output-card';
+    card.innerHTML = renderMarkdownToHtml(`## Run failed\n\n\`\`\`\n${String(errorText || 'Unknown orchestration error')}\n\`\`\``);
+    outputEl.appendChild(card);
+    outputEl.scrollTop = outputEl.scrollHeight;
   }
 
   function renderOutputLogEntry(result, promptText, planSnapshot) {
@@ -2389,7 +2736,7 @@ async function initOrchestration() {
 
   document.getElementById('orchRun').addEventListener('click', async () => {
     eventsEl.textContent = '';
-    outputEl.textContent = '';
+    outputEl.innerHTML = '';
     status.textContent = 'Running orchestration...';
     setOrchestrationRunning(true);
 
@@ -2402,14 +2749,14 @@ async function initOrchestration() {
         memoryNamespace: selectedOrchestrationMemoryNamespace() || undefined,
         requestTimeoutMs: settingsState.requestTimeoutMs
       });
-      outputEl.textContent = result.output || '(empty output)';
+      renderOrchestrationOutput(result, promptText, parsed);
       renderOutputLogEntry(result, promptText, parsed);
       if (Array.isArray(result.usageByModel)) {
         recordModelUsage(result.usageByModel);
       }
       status.textContent = 'Run complete';
     } catch (error) {
-      outputEl.textContent = error instanceof Error ? error.message : String(error);
+      renderOrchestrationError(error instanceof Error ? error.message : String(error));
       status.textContent = /stopped by user|canceled/i.test(error instanceof Error ? error.message : String(error)) ? 'Run stopped' : 'Run failed';
     }
     finally {
@@ -2728,7 +3075,8 @@ async function main() {
   document.getElementById('diagTab').addEventListener('click', () => setActiveTab('diagnostics'));
   document.getElementById('openSample').addEventListener('click', () => {
     openScratchTab(
-      "// Sample file\nexport async function run() {\n  return 'Edit code here with Monaco and ask the LLM to help.';\n}\n"
+      "// Sample file\nexport async function run() {\n  return 'Edit code here with Monaco and ask the LLM to help.';\n}\n",
+      { language: 'typescript', extension: 'ts' }
     );
   });
 

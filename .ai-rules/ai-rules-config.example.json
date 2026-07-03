@@ -1,0 +1,104 @@
+{
+  "$schema": "./ai-rules-config.schema.json",
+  "version": "1.0.0",
+  "rules": {
+    "function_documentation": {
+      "required": true,
+      "min_complexity_threshold": 3
+    },
+    "todo_management": {
+      "required": true,
+      "id_prefix": "AI-",
+      "issue_tracker_integration": false
+    },
+    "backward_compatibility": {
+      "enforce": true,
+      "require_migration_plan": true
+    },
+    "documentation_updates": {
+      "required": true
+    },
+    "testing": {
+      "required": true,
+      "min_coverage": 80,
+      "browser_testing_tool": "chrome-devtools-mcp"
+    },
+    "code_quality": {
+      "max_function_length": 50,
+      "max_complexity": 10
+    }
+  },
+  "standards": {
+    "security": {
+      "enabled": true,
+      "owasp_compliance": true
+    },
+    "accessibility": {
+      "enabled": true,
+      "wcag_level": "AA"
+    },
+    "performance": {
+      "enabled": true,
+      "require_profiling": true
+    },
+    "logging_observability": {
+      "enabled": true,
+      "structured_logging": true,
+      "metrics_enabled": true,
+      "correlation_ids": true
+    },
+    "ethics": {
+      "enabled": true,
+      "bias_detection": true,
+      "advanced_bias_detection": true,
+      "content_moderation": true,
+      "protected_attributes": ["gender", "racial", "cultural", "age", "disability", "socioeconomic"],
+      "fairness_metrics": ["demographic_parity", "equal_opportunity"],
+      "review_threshold": "medium",
+      "block_threshold": "critical",
+      "context_aware_allowances": true,
+      "fallback_responses": true,
+      "moderation_logging": true,
+      "processing_time_tracking": true
+    },
+    "internationalization": {
+      "enabled": false,
+      "default_locale": "en"
+    }
+  },
+  "project": {
+    "name": "Example Project",
+    "type": "web",
+    "languages": ["TypeScript"],
+    "frameworks": ["React", "Node.js"]
+  },
+  "automation": {
+    "pre_commit_hooks": false,
+    "ci_checks": false,
+    "linting": {
+      "enabled": true,
+      "tools": ["eslint", "markdownlint"]
+    }
+  },
+  "token_optimization": {
+    "enabled": true,
+    "target_reduction": 60,
+    "batch_operations": true,
+    "parallel_reads": true,
+    "semantic_retrieval": {
+      "enabled": true,
+      "mode": "hybrid",
+      "provider": "luna",
+      "index_scope": ["docs", "code", "adrs"],
+      "fallback_to_keyword_search": true,
+      "require_benchmarks": true,
+      "document_tradeoffs": true,
+      "luna": {
+        "profile": "balanced",
+        "embedding_model": "luna-embed",
+        "reranker": "luna-rerank",
+        "max_candidates": 40
+      }
+    }
+  }
+}
