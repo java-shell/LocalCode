@@ -18,6 +18,7 @@ export const defaultPlan: OrchestrationPlan = {
       systemPrompt: 'Plan how to solve the user request and call tools as needed.',
       temperature: 0.2,
       maxTokens: 1200,
+      maxToolTurns: 40,
       tools: [
         { name: 'browser_fetch', enabled: true },
         { name: 'list_repo_tree', enabled: true },
@@ -40,6 +41,7 @@ export const defaultPlan: OrchestrationPlan = {
       systemPrompt: 'Generate concrete implementation output and perform safe code edits using available tools.',
       temperature: 0.1,
       maxTokens: 2200,
+      maxToolTurns: 40,
       tools: [
         { name: 'browser_fetch', enabled: true },
         { name: 'list_repo_tree', enabled: true },
@@ -123,6 +125,12 @@ export function validatePlan(value: unknown): string[] {
     }
     if (step.allowCompletionTool !== undefined && typeof step.allowCompletionTool !== 'boolean') {
       errors.push(`steps[${i}].allowCompletionTool must be a boolean when provided.`);
+    }
+    if (step.maxToolTurns !== undefined) {
+      const maxToolTurns = Number(step.maxToolTurns);
+      if (!Number.isInteger(maxToolTurns) || maxToolTurns < 1 || maxToolTurns > 200) {
+        errors.push(`steps[${i}].maxToolTurns must be an integer between 1 and 200 when provided.`);
+      }
     }
   }
 

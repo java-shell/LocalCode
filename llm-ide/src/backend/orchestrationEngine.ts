@@ -196,6 +196,7 @@ async function runSingleIteration(
     let taskCompleted = false;
     let completionSummary = '';
     const stepToolCalls: Array<{ name: string; intent: string; timestamp: string }> = [];
+    const stepMaxToolTurns = Math.max(1, Math.min(200, Math.floor(Number(step.maxToolTurns ?? 40) || 40)));
 
     let output = '';
     let usage: TokenUsage | undefined;
@@ -233,7 +234,7 @@ async function runSingleIteration(
             stepToolCalls.push({ name: toolName, intent, timestamp: new Date().toISOString() });
           }
         },
-        40,
+        stepMaxToolTurns,
         signal
       );
       output = result.text;

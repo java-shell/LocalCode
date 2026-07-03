@@ -2072,6 +2072,7 @@ async function initOrchestration() {
       systemPrompt: '',
       temperature: 0.2,
       maxTokens: 0,
+      maxToolTurns: 40,
       tools: defaultTools(),
       passOutputToNext: true,
       allowCompletionTool: false
@@ -2094,6 +2095,7 @@ async function initOrchestration() {
       systemPrompt: step.systemPrompt || '',
       temperature: Number.isFinite(step.temperature) ? Number(step.temperature) : 0.2,
       maxTokens: Number.isFinite(step.maxTokens) ? Number(step.maxTokens) : 0,
+      maxToolTurns: clampMaxToolTurns(Number(step.maxToolTurns || 40)),
       tools: availableTools.map(name => ({ name, enabled: Boolean(enabledMap.get(name)) })),
       passOutputToNext: step.passOutputToNext !== false,
       allowCompletionTool: typeof step.allowCompletionTool === 'boolean' ? step.allowCompletionTool : fallbackAllowsCompletion
@@ -2538,6 +2540,10 @@ async function initOrchestration() {
         step.maxTokens = Number(value || 0);
         syncPlanJson();
       }, { type: 'number', min: 0, step: 1 });
+      addLabeledInput('Max Tool Calls', step.maxToolTurns ?? 40, value => {
+        step.maxToolTurns = clampMaxToolTurns(Number(value || 40));
+        syncPlanJson();
+      }, { type: 'number', min: 1, step: 1 });
       addLabeledInput('System Prompt', step.systemPrompt || '', value => {
         step.systemPrompt = value;
         syncPlanJson();

@@ -99,6 +99,37 @@ const mutatingTools = new Set([
   'delete_path'
 ]);
 
+const binaryExtensions = new Set([
+  '.7z', '.a', '.bin', '.bmp', '.class', '.dll', '.dylib', '.exe', '.gif', '.gz', '.ico', '.jar',
+  '.jpeg', '.jpg', '.lock', '.mp3', '.mp4', '.o', '.obj', '.pdf', '.png', '.pyc', '.so', '.tar',
+  '.ttf', '.wav', '.webp', '.woff', '.woff2', '.zip'
+]);
+
+function likelyBinaryByExtension(filePath: string): boolean {
+  return binaryExtensions.has(path.extname(filePath).toLowerCase());
+}
+
+function likelyBinaryBuffer(content: Buffer): boolean {
+  if (content.length === 0) {
+    return false;
+  }
+
+  let suspicious = 0;
+  const sampleSize = Math.min(content.length, 4096);
+  for (let i = 0; i < sampleSize; i += 1) {
+    const byte = content[i];
+    if (byte === 0) {
+      return true;
+    }
+    const isControl = byte < 7 || (byte > 13 && byte < 32);
+    if (isControl) {
+      suspicious += 1;
+    }
+  }
+
+  return suspicious / sampleSize > 0.2;
+}
+
 export const toolDefinitions: ToolDefinition[] = [
   {
     type: 'function',
@@ -109,7 +140,13 @@ export const toolDefinitions: ToolDefinition[] = [
         type: 'object',
         properties: {
           url: { type: 'string' },
-          maxChars: { type: 'number' }
+          maxChars: { type: 'number' },
+          headers: {
+            type: 'object',
+            additionalProperties: { type: 'string' }
+          },
+          followRedirects: { type: 'boolean' },
+          maxRedirects: { type: 'number' }
         },
         required: ['url']
       }
@@ -141,7 +178,8 @@ export const toolDefinitions: ToolDefinition[] = [
         properties: {
           scope: scopeProperty,
           includeUntracked: { type: 'boolean' },
-          maxEntries: { type: 'number' }
+          maxEntries: { type: 'number' },
+          offset: { type: 'number' }
         }
       }
     }
@@ -288,7 +326,12 @@ export const toolDefinitions: ToolDefinition[] = [
       description: 'Regex search across text files in selected scope.',
       parameters: {
         type: 'object',
-        properties: { query: { type: 'string' }, maxResults: { type: 'number' }, scope: scopeProperty },
+        properties: {
+          query: { type: 'string' },
+          maxResults: { type: 'number' },
+          includeBinary: { type: 'boolean' },
+          scope: scopeProperty
+        },
         required: ['query']
       }
     }
@@ -493,12 +536,54 @@ async function browserFetch(args: Record<string, unknown>) {
   }
 
   const maxChars = Math.max(500, Math.min(200000, Number(args.maxChars ?? 12000)));
-  const response = await axios.get<string>(url.toString(), {
+  const rawHeaders = args.headers;
+  const requestHeaders: Record<string, string> = {};
+  if (rawHeaders && typeof rawHeaders === 'object' && !Array.isArray(rawHeaders)) {
+    for (const [key, value] of Object.entries(rawHeaders)) {
+      if (!key) {
+        continue;
+      }
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        requestHeaders[key] = String(value);
+      }
+    }
+  }
+
+  const followRedirects = Boolean(args.followRedirects ?? true);
+  const maxRedirects = followRedirects
+    ? Math.max(0, Math.min(10, Number(args.maxRedirects ?? 5)))
+    : 0;
+
+  const redirects: Array<{ from: string; to: string; status: number }> = [];
+  let currentUrl = url.toString();
+  let response = await axios.get<string>(currentUrl, {
     responseType: 'text',
     timeout: 15000,
     maxContentLength: 2_000_000,
-    validateStatus: () => true
+    validateStatus: () => true,
+    maxRedirects: 0,
+    headers: requestHeaders
   });
+
+  while (
+    followRedirects &&
+    response.status >= 300 &&
+    response.status < 400 &&
+    typeof response.headers.location === 'string' &&
+    redirects.length < maxRedirects
+  ) {
+    const nextUrl = new URL(response.headers.location, currentUrl).toString();
+    redirects.push({ from: currentUrl, to: nextUrl, status: response.status });
+    currentUrl = nextUrl;
+    response = await axios.get<string>(currentUrl, {
+      responseType: 'text',
+      timeout: 15000,
+      maxContentLength: 2_000_000,
+      validateStatus: () => true,
+      maxRedirects: 0,
+      headers: requestHeaders
+    });
+  }
 
   const html = typeof response.data === 'string' ? response.data : String(response.data ?? '');
   const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
@@ -517,11 +602,21 @@ async function browserFetch(args: Record<string, unknown>) {
 
   return {
     url: url.toString(),
+    finalUrl: currentUrl,
     status: response.status,
     title,
     content: textContent.slice(0, maxChars),
     truncated: textContent.length > maxChars,
-    links
+    links,
+    redirects,
+    redirected: redirects.length > 0,
+    redirectLimitReached:
+      followRedirects &&
+      response.status >= 300 &&
+      response.status < 400 &&
+      typeof response.headers.location === 'string' &&
+      redirects.length >= maxRedirects,
+    location: typeof response.headers.location === 'string' ? response.headers.location : null
   };
 }
 
@@ -646,7 +741,8 @@ async function listRepoTree(args: Record<string, unknown>, context?: RuntimeCont
   const scope = parseScope(args);
   const base = scopeBaseDir(scope, context);
   const includeUntracked = Boolean(args.includeUntracked ?? true);
-  const maxEntries = Math.max(200, Math.min(100000, Number(args.maxEntries ?? 30000)));
+  const maxEntries = Math.max(1, Math.min(100000, Number(args.maxEntries ?? 30000)));
+  const offset = Math.max(0, Math.trunc(Number(args.offset ?? 0)));
 
   try {
     const git = simpleGit(base);
@@ -660,14 +756,20 @@ async function listRepoTree(args: Record<string, unknown>, context?: RuntimeCont
         : [];
 
       const files = Array.from(new Set([...tracked, ...untracked])).sort((a, b) => a.localeCompare(b));
-      const limited = files.slice(0, maxEntries);
+      const start = Math.min(offset, files.length);
+      const end = Math.min(files.length, start + maxEntries);
+      const page = files.slice(start, end);
+      const nextOffset = end < files.length ? end : null;
 
       return {
         scope,
         root: path.basename(base),
         fileCount: files.length,
-        truncated: files.length > limited.length,
-        tree: renderTreeFromFilePaths(limited, path.basename(base) || '.')
+        offset: start,
+        returnedCount: page.length,
+        nextOffset,
+        truncated: nextOffset !== null,
+        tree: renderTreeFromFilePaths(page, path.basename(base) || '.')
       };
     }
   } catch {
@@ -676,10 +778,6 @@ async function listRepoTree(args: Record<string, unknown>, context?: RuntimeCont
 
   const files: string[] = [];
   async function walk(dir: string): Promise<void> {
-    if (files.length >= maxEntries) {
-      return;
-    }
-
     const entries = await fs.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
       if (entry.name === '.git') {
@@ -691,20 +789,26 @@ async function listRepoTree(args: Record<string, unknown>, context?: RuntimeCont
         await walk(full);
       } else {
         files.push(path.relative(base, full).replace(/\\/g, '/'));
-        if (files.length >= maxEntries) {
-          return;
-        }
       }
     }
   }
 
   await walk(base);
+  files.sort((a, b) => a.localeCompare(b));
+  const start = Math.min(offset, files.length);
+  const end = Math.min(files.length, start + maxEntries);
+  const page = files.slice(start, end);
+  const nextOffset = end < files.length ? end : null;
+
   return {
     scope,
     root: path.basename(base),
     fileCount: files.length,
-    truncated: files.length >= maxEntries,
-    tree: renderTreeFromFilePaths(files.sort((a, b) => a.localeCompare(b)), path.basename(base) || '.')
+    offset: start,
+    returnedCount: page.length,
+    nextOffset,
+    truncated: nextOffset !== null,
+    tree: renderTreeFromFilePaths(page, path.basename(base) || '.')
   };
 }
 
@@ -865,6 +969,7 @@ async function grepSearch(args: Record<string, unknown>, context?: RuntimeContex
   const base = scopeBaseDir(scope, context);
   const query = String(args.query ?? '');
   const maxResults = Math.max(1, Math.min(200, Number(args.maxResults ?? 50)));
+  const includeBinary = Boolean(args.includeBinary ?? false);
   const regex = new RegExp(query, 'i');
   const matches: Array<{ file: string; line: number; text: string }> = [];
 
@@ -882,10 +987,20 @@ async function grepSearch(args: Record<string, unknown>, context?: RuntimeContex
         await walk(full);
         continue;
       }
-      const raw = await fs.readFile(full, 'utf8').catch(() => '');
-      if (!raw) {
+
+      if (!includeBinary && likelyBinaryByExtension(full)) {
         continue;
       }
+
+      const rawBuffer = await fs.readFile(full).catch(() => null);
+      if (!rawBuffer) {
+        continue;
+      }
+      if (!includeBinary && likelyBinaryBuffer(rawBuffer)) {
+        continue;
+      }
+
+      const raw = rawBuffer.toString('utf8');
       const lines = raw.split(/\r?\n/);
       for (let i = 0; i < lines.length; i += 1) {
         if (regex.test(lines[i])) {
@@ -904,9 +1019,26 @@ async function grepSearch(args: Record<string, unknown>, context?: RuntimeContex
 
 async function gitStatus(args: Record<string, unknown>, context?: RuntimeContext) {
   const scope = parseScope(args);
-  const git = simpleGit(scopeBaseDir(scope, context));
+  const base = scopeBaseDir(scope, context);
+  const git = simpleGit(base);
+  const isRepo = await git.checkIsRepo();
+  if (!isRepo) {
+    return {
+      isRepo: false,
+      path: base,
+      branch: null,
+      modified: [],
+      created: [],
+      deleted: [],
+      staged: [],
+      not_added: [],
+      message: 'Not a git repository at selected scope base.'
+    };
+  }
+
   const status = await git.status();
   return {
+    isRepo: true,
     branch: status.current,
     modified: status.modified,
     created: status.created,

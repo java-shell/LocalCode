@@ -84,6 +84,8 @@ interface HybridExpandResult {
 }
 
 const TARGET_EMBEDDING_DIM = 256;
+const MAX_BRIDGE_STDOUT_BYTES = 8 * 1024 * 1024;
+const MAX_BRIDGE_STDERR_BYTES = 1 * 1024 * 1024;
 
 export interface TurboVecNamespaceDiagnostics {
   namespace: string;
@@ -860,15 +862,45 @@ export class TurboVecMemory {
         env: process.env
       });
 
-      let stdout = '';
-      let stderr = '';
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let stdoutOverflowed = false;
+
+      const appendChunk = (
+        chunks: Buffer[],
+        chunk: Buffer | string,
+        currentBytes: number,
+        maxBytes: number
+      ): { nextBytes: number; overflowed: boolean } => {
+        const bufferChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        if (currentBytes >= maxBytes) {
+          return { nextBytes: currentBytes, overflowed: true };
+        }
+
+        const available = maxBytes - currentBytes;
+        if (bufferChunk.length <= available) {
+          chunks.push(bufferChunk);
+          return { nextBytes: currentBytes + bufferChunk.length, overflowed: false };
+        }
+
+        chunks.push(bufferChunk.subarray(0, available));
+        return { nextBytes: maxBytes, overflowed: true };
+      };
 
       child.stdout.on('data', (chunk: Buffer | string) => {
-        stdout += chunk.toString();
+        const result = appendChunk(stdoutChunks, chunk, stdoutBytes, MAX_BRIDGE_STDOUT_BYTES);
+        stdoutBytes = result.nextBytes;
+        if (result.overflowed && !stdoutOverflowed) {
+          stdoutOverflowed = true;
+          child.kill();
+        }
       });
 
       child.stderr.on('data', (chunk: Buffer | string) => {
-        stderr += chunk.toString();
+        const result = appendChunk(stderrChunks, chunk, stderrBytes, MAX_BRIDGE_STDERR_BYTES);
+        stderrBytes = result.nextBytes;
       });
 
       child.on('error', err => {
@@ -876,6 +908,14 @@ export class TurboVecMemory {
       });
 
       child.on('close', code => {
+        const stdout = Buffer.concat(stdoutChunks).toString('utf8');
+        const stderr = Buffer.concat(stderrChunks).toString('utf8');
+
+        if (stdoutOverflowed) {
+          reject(new Error(`TurboVec bridge output exceeded ${MAX_BRIDGE_STDOUT_BYTES} bytes.`));
+          return;
+        }
+
         if (code !== 0) {
           reject(new Error(stderr.trim() || `TurboVec bridge failed with code ${String(code)}`));
           return;

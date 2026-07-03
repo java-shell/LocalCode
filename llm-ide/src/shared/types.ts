@@ -101,6 +101,7 @@ export interface OrchestrationStep {
   systemPrompt?: string;
   temperature?: number;
   maxTokens?: number;
+  maxToolTurns?: number;
   tools: ToolPermission[];
   passOutputToNext: boolean;
   allowCompletionTool?: boolean;

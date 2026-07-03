@@ -646,6 +646,37 @@ export async function chatWithTools(
     onEvent?.(`provider:ollama | using native /api/chat with options.num_ctx=${toPositiveInteger(config.contextWindowTokens)}`);
   }
 
+  async function requestAssistantWithoutTools(prompt: string): Promise<string | null> {
+    const summaryMessages: ChatMessage[] = [
+      ...messages,
+      {
+        role: 'system',
+        content: prompt
+      }
+    ];
+
+    if (useOllamaNativeChat && ollamaNativeEndpoint) {
+      const payload = buildOllamaNativePayload(config, summaryMessages, []);
+      const response = await axios.post<OllamaNativeChatResponse>(ollamaNativeEndpoint, payload, {
+        headers: buildHeaders(config),
+        timeout: requestTimeoutMs,
+        signal
+      });
+      return String(ollamaResponseToAssistant(response.data)?.content ?? '').trim() || null;
+    }
+
+    const payload: Record<string, unknown> = {
+      ...payloadBase(config, summaryMessages),
+      stream: false
+    };
+    const response = await axios.post<CompletionResponse>(config.endpoint, payload, {
+      headers: buildHeaders(config),
+      timeout: requestTimeoutMs,
+      signal
+    });
+    return String(response.data.choices?.[0]?.message?.content ?? '').trim() || null;
+  }
+
   function handleProviderToolParseFailure(error: unknown, context: { operation: string; endpoint: string; model?: string }): boolean {
     if (!isProviderToolParseFailure(error) || activeTools.length === 0) {
       return false;
@@ -842,8 +873,26 @@ export async function chatWithTools(
     }
   }
 
+  const exhaustedMessage = `Tool-call budget reached (${maxTurns}) for this response.`;
+  onEvent?.(`tool-budget-exhausted:${maxTurns}`);
+
+  try {
+    const summary = await requestAssistantWithoutTools(
+      'You have reached the tool-call budget and cannot call any more tools in this response. ' +
+      'Do not request or invoke tools. Summarize: (1) what you accomplished so far, (2) what remains, and (3) the best next action for the user.'
+    );
+    if (summary) {
+      return {
+        text: `${exhaustedMessage}\n\n${summary}`,
+        usage: usageTotals
+      };
+    }
+  } catch (error) {
+    onEvent?.(`tool-budget-summary-failed:${error instanceof Error ? error.message : String(error)}`);
+  }
+
   return {
-    text: `Stopped after max tool turns (${maxTurns}).`,
+    text: `${exhaustedMessage}\n\nSummary unavailable. Please continue from this state or raise the per-step tool-call budget.`,
     usage: usageTotals
   };
 }
