@@ -81,6 +81,108 @@ function estimateTokensFromText(text: string): number {
   return Math.max(1, Math.ceil(normalized.length / 4));
 }
 
+interface ChatContextDebugMessage {
+  role: ChatMessage['role'];
+  content: string;
+  contentChars: number;
+  toolCallCount: number;
+  contentTruncated: boolean;
+}
+
+async function writeChatContextDebugDump(payload: {
+  workspaceDir: string;
+  namespace: string;
+  model: string;
+  contextWindowTokens?: number;
+  recalledPromptTokens: number;
+  historyMessageCount: number;
+  initialMessages: ChatMessage[];
+  finalMessages?: ChatMessage[];
+  turns?: Array<{
+    turn: number;
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    messageCountBefore: number;
+    messageCountAfter: number;
+    assistantToolCalls: number;
+  }>;
+  totalToolCalls?: number;
+  usage: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    requests: number;
+  };
+}): Promise<string | null> {
+  try {
+    const debugDir = path.join(app.getPath('userData'), 'debug');
+    await fs.promises.mkdir(debugDir, { recursive: true });
+
+    const timestamp = new Date().toISOString();
+    const compactStamp = timestamp.replace(/[:.]/g, '-');
+    const dumpFilePath = path.join(debugDir, `chat-context-${compactStamp}.json`);
+    const latestFilePath = path.join(debugDir, 'chat-context-latest.json');
+
+    const messageRoleCounts = payload.initialMessages.reduce<Record<string, number>>((acc, message) => {
+      const key = String(message.role || 'unknown');
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+
+    const maxMessageChars = 12000;
+    const serializeMessages = (messages: ChatMessage[]): ChatContextDebugMessage[] =>
+      messages.map(message => {
+        const raw = String(message.content ?? '');
+        const contentTruncated = raw.length > maxMessageChars;
+        return {
+          role: message.role,
+          content: contentTruncated ? `${raw.slice(0, maxMessageChars)}...[truncated]` : raw,
+          contentChars: raw.length,
+          toolCallCount: Array.isArray(message.tool_calls) ? message.tool_calls.length : 0,
+          contentTruncated
+        };
+      });
+
+    const serializedInitialMessages = serializeMessages(payload.initialMessages);
+    const serializedFinalMessages = serializeMessages(payload.finalMessages ?? payload.initialMessages);
+    const finalRoleCounts = (payload.finalMessages ?? payload.initialMessages).reduce<Record<string, number>>((acc, message) => {
+      const key = String(message.role || 'unknown');
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
+
+    const dump = {
+      timestamp,
+      workspaceDir: payload.workspaceDir,
+      namespace: payload.namespace,
+      model: payload.model,
+      contextWindowTokens: Math.max(0, Number(payload.contextWindowTokens ?? 0)) || null,
+      recalledPromptTokens: Math.max(0, Number(payload.recalledPromptTokens ?? 0)),
+      historyMessageCount: Math.max(0, Number(payload.historyMessageCount ?? 0)),
+      initialMessageCount: serializedInitialMessages.length,
+      finalMessageCount: serializedFinalMessages.length,
+      messageRoleCounts,
+      finalMessageRoleCounts: finalRoleCounts,
+      totalToolCalls: Math.max(0, Number(payload.totalToolCalls ?? 0)),
+      turns: Array.isArray(payload.turns) ? payload.turns : [],
+      usage: payload.usage,
+      initialMessages: serializedInitialMessages,
+      finalMessages: serializedFinalMessages
+    };
+
+    const raw = `${JSON.stringify(dump, null, 2)}\n`;
+    await Promise.all([
+      fs.promises.writeFile(dumpFilePath, raw, 'utf8'),
+      fs.promises.writeFile(latestFilePath, raw, 'utf8')
+    ]);
+
+    return latestFilePath;
+  } catch {
+    return null;
+  }
+}
+
 function memoryNamespace(mode: 'chat' | 'orchestration', workspaceDir: string, suffix?: string): string {
   const trimmedSuffix = String(suffix ?? '').trim();
   return trimmedSuffix ? `${mode}:${workspaceDir}:${trimmedSuffix}` : `${mode}:${workspaceDir}`;
@@ -386,6 +488,24 @@ ipcMain.handle(
         abortController.signal
       );
       const text = result.text;
+
+      const debugDumpPath = await writeChatContextDebugDump({
+        workspaceDir: selectedWorkspaceDir,
+        namespace: chatNamespace,
+        model: config.model,
+        contextWindowTokens: payload.contextWindowTokens,
+        recalledPromptTokens,
+        historyMessageCount: Array.isArray(payload.historyMessages) ? payload.historyMessages.length : 0,
+        initialMessages: messages,
+        finalMessages: result.debug?.finalMessages,
+        turns: result.debug?.turns,
+        totalToolCalls: result.debug?.totalToolCalls,
+        usage: result.usage
+      });
+
+      if (debugDumpPath) {
+        event.sender.send('chat:event', `[debug] wrote chat context dump: ${debugDumpPath}`);
+      }
 
       if (turboMemory) {
         try {

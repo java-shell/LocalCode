@@ -105,6 +105,10 @@ const binaryExtensions = new Set([
   '.ttf', '.wav', '.webp', '.woff', '.woff2', '.zip'
 ]);
 
+const DEFAULT_READ_FILE_MAX_CHARS = 24000;
+const MAX_READ_FILE_MAX_CHARS = 100000;
+const TERMINAL_CAPTURE_MAX_CHARS = 24000;
+
 function likelyBinaryByExtension(filePath: string): boolean {
   return binaryExtensions.has(path.extname(filePath).toLowerCase());
 }
@@ -128,6 +132,27 @@ function likelyBinaryBuffer(content: Buffer): boolean {
   }
 
   return suspicious / sampleSize > 0.2;
+}
+
+function truncateText(raw: string, maxChars: number): { text: string; truncated: boolean; originalChars: number } {
+  if (raw.length <= maxChars) {
+    return {
+      text: raw,
+      truncated: false,
+      originalChars: raw.length
+    };
+  }
+
+  const headChars = Math.floor(maxChars * 0.75);
+  const tailChars = Math.max(0, maxChars - headChars);
+  const head = raw.slice(0, headChars);
+  const tail = tailChars > 0 ? raw.slice(-tailChars) : '';
+
+  return {
+    text: `${head}\n\n...[truncated ${raw.length - (head.length + tail.length)} chars]...\n\n${tail}`,
+    truncated: true,
+    originalChars: raw.length
+  };
 }
 
 export const toolDefinitions: ToolDefinition[] = [
@@ -218,6 +243,7 @@ export const toolDefinitions: ToolDefinition[] = [
           path: { type: 'string' },
           startLine: { type: 'number' },
           endLine: { type: 'number' },
+          maxChars: { type: 'number' },
           scope: scopeProperty
         },
         required: ['path']
@@ -856,13 +882,25 @@ async function readFile(args: Record<string, unknown>, context?: RuntimeContext)
   const requestedEnd = Math.max(start, toPositiveInteger(args.endLine, defaultEnd));
   const end = totalLines === 0 ? 1 : Math.min(totalLines, requestedEnd);
   const slice = totalLines === 0 ? [] : lines.slice(start - 1, end);
+  const requestedMaxChars = toPositiveInteger(args.maxChars, DEFAULT_READ_FILE_MAX_CHARS);
+  const maxChars = Math.min(MAX_READ_FILE_MAX_CHARS, Math.max(500, requestedMaxChars));
+  const contentRaw = slice.join('\n');
+  const numberedRaw = slice.map((line, index) => `${start + index}: ${line}`).join('\n');
+  const contentView = truncateText(contentRaw, maxChars);
+  const numberedView = truncateText(numberedRaw, Math.max(500, Math.floor(maxChars / 2)));
+
   return {
     path: String(args.path ?? ''),
     startLine: start,
     endLine: end,
     totalLines,
-    content: slice.join('\n'),
-    numberedContent: slice.map((line, index) => `${start + index}: ${line}`).join('\n')
+    maxChars,
+    content: contentView.text,
+    numberedContent: numberedView.text,
+    contentTruncated: contentView.truncated,
+    numberedContentTruncated: numberedView.truncated,
+    contentOriginalChars: contentView.originalChars,
+    numberedContentOriginalChars: numberedView.originalChars
   };
 }
 
@@ -1133,6 +1171,9 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
     signal?: string | null;
     stdout: string;
     stderr: string;
+    stdoutTruncated?: boolean;
+    stderrTruncated?: boolean;
+    maxCaptureChars?: number;
   }>(resolve => {
     const child = spawn(shellConfig.executable, shellConfig.args, {
       cwd,
@@ -1143,6 +1184,8 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
 
     let stdout = '';
     let stderr = '';
+    let stdoutTruncated = false;
+    let stderrTruncated = false;
     let completed = false;
 
     const finish = (result: {
@@ -1178,7 +1221,10 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
         code: result.code,
         signal: result.signal,
         stdout,
-        stderr
+        stderr,
+        stdoutTruncated,
+        stderrTruncated,
+        maxCaptureChars: TERMINAL_CAPTURE_MAX_CHARS
       });
     };
 
@@ -1192,13 +1238,37 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
 
     child.stdout.on('data', (chunk: Buffer | string) => {
       const text = chunk.toString();
-      stdout += text;
+      if (!stdoutTruncated) {
+        const next = stdout.length + text.length;
+        if (next <= TERMINAL_CAPTURE_MAX_CHARS) {
+          stdout += text;
+        } else {
+          const remaining = Math.max(0, TERMINAL_CAPTURE_MAX_CHARS - stdout.length);
+          stdout += text.slice(0, remaining);
+          stdoutTruncated = true;
+          const notice = '\n...[stdout truncated for context safety]...\n';
+          stdout += notice;
+          context?.onTerminalOutput?.({ source: 'stdout', text: notice });
+        }
+      }
       context?.onTerminalOutput?.({ source: 'stdout', text });
     });
 
     child.stderr.on('data', (chunk: Buffer | string) => {
       const text = chunk.toString();
-      stderr += text;
+      if (!stderrTruncated) {
+        const next = stderr.length + text.length;
+        if (next <= TERMINAL_CAPTURE_MAX_CHARS) {
+          stderr += text;
+        } else {
+          const remaining = Math.max(0, TERMINAL_CAPTURE_MAX_CHARS - stderr.length);
+          stderr += text.slice(0, remaining);
+          stderrTruncated = true;
+          const notice = '\n...[stderr truncated for context safety]...\n';
+          stderr += notice;
+          context?.onTerminalOutput?.({ source: 'stderr', text: notice });
+        }
+      }
       context?.onTerminalOutput?.({ source: 'stderr', text });
     });
 

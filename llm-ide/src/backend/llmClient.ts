@@ -65,6 +65,44 @@ export interface ModelCatalog {
 export interface ChatWithToolsResult {
   text: string;
   usage: TokenUsage;
+  debug?: {
+    initialMessageCount: number;
+    finalMessageCount: number;
+    totalToolCalls: number;
+    turns: Array<{
+      turn: number;
+      promptTokens: number;
+      completionTokens: number;
+      totalTokens: number;
+      messageCountBefore: number;
+      messageCountAfter: number;
+      assistantToolCalls: number;
+    }>;
+    finalMessages: ChatMessage[];
+  };
+}
+
+type ChatWithToolsDebug = NonNullable<ChatWithToolsResult['debug']>;
+const MAX_TOOL_RESULT_MESSAGE_CHARS = 16000;
+
+function clampToolResultForPrompt(raw: string): string {
+  if (raw.length <= MAX_TOOL_RESULT_MESSAGE_CHARS) {
+    return raw;
+  }
+
+  const headChars = Math.floor(MAX_TOOL_RESULT_MESSAGE_CHARS * 0.75);
+  const tailChars = Math.max(0, MAX_TOOL_RESULT_MESSAGE_CHARS - headChars);
+  const head = raw.slice(0, headChars);
+  const tail = tailChars > 0 ? raw.slice(-tailChars) : '';
+
+  return JSON.stringify({
+    truncated: true,
+    originalChars: raw.length,
+    keptChars: head.length + tail.length,
+    head,
+    tail,
+    note: 'Tool output was truncated to protect context window. Narrow the tool query for full fidelity.'
+  });
 }
 
 function toFiniteNumber(value: unknown): number {
@@ -386,6 +424,28 @@ function tryParseToolArguments(value: string): unknown {
   }
 }
 
+/**
+ * Purpose: Normalize model-provided thought/intent text into a compact single-line status message for the chat pane.
+ * Inputs: Raw free-form text from provider fields such as assistant content or thinking traces.
+ * Outputs: Trimmed, whitespace-normalized string capped to keep event rows readable.
+ * Side Effects: None.
+ * Errors: Never throws; always returns a string.
+ * Performance: O(n) in input length.
+ * Security/Privacy: Does not alter trust boundaries; purely presentational.
+ * Concurrency: Pure function, safe for concurrent calls.
+ * Rationale: Keeps event rows legible while preserving user-visible model intent context.
+ */
+function summarizeThoughtText(value: unknown, maxChars = 500): string {
+  const normalized = String(value ?? '').replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return '';
+  }
+  if (normalized.length <= maxChars) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
 function buildToolNameByCallId(messages: ChatMessage[]): Map<string, string> {
   const toolNames = new Map<string, string>();
   for (const message of messages) {
@@ -641,6 +701,36 @@ export async function chatWithTools(
     totalTokens: 0,
     requests: 0
   };
+  const debugTurns: ChatWithToolsDebug['turns'] = [];
+  let totalToolCalls = 0;
+
+  function snapshotMessages(items: ChatMessage[]): ChatMessage[] {
+    return items.map(message => ({
+      role: message.role,
+      content: String(message.content ?? ''),
+      tool_call_id: message.tool_call_id,
+      tool_calls: Array.isArray(message.tool_calls)
+        ? message.tool_calls.map(call => ({
+            id: String(call.id ?? ''),
+            type: 'function',
+            function: {
+              name: String(call.function?.name ?? ''),
+              arguments: String(call.function?.arguments ?? '')
+            }
+          }))
+        : undefined
+    }));
+  }
+
+  function buildDebug(): NonNullable<ChatWithToolsResult['debug']> {
+    return {
+      initialMessageCount: initialMessages.length,
+      finalMessageCount: messages.length,
+      totalToolCalls,
+      turns: [...debugTurns],
+      finalMessages: snapshotMessages(messages)
+    };
+  }
 
   if (useOllamaNativeChat && ollamaNativeEndpoint && toPositiveInteger(config.contextWindowTokens)) {
     onEvent?.(`provider:ollama | using native /api/chat with options.num_ctx=${toPositiveInteger(config.contextWindowTokens)}`);
@@ -756,7 +846,9 @@ export async function chatWithTools(
 
   for (let i = 0; i < maxTurns; i += 1) {
     onEvent?.(`llm-turn:${i + 1}/${maxTurns}`);
+    const messageCountBefore = messages.length;
     let assistant: ChatMessage | undefined;
+    let assistantThinking = '';
     let usage: Omit<TokenUsage, 'requests'>;
 
     if (useOllamaNativeChat && ollamaNativeEndpoint) {
@@ -784,6 +876,7 @@ export async function chatWithTools(
       }
 
       assistant = ollamaResponseToAssistant(response.data);
+      assistantThinking = summarizeThoughtText(response.data.message?.thinking);
       usage = parseOllamaUsage(response.data);
     } else {
       const payload: Record<string, unknown> = {
@@ -829,16 +922,37 @@ export async function chatWithTools(
     if (!assistant) {
       return {
         text: '',
-        usage: usageTotals
+        usage: usageTotals,
+        debug: buildDebug()
       };
     }
 
+    const assistantThought = summarizeThoughtText(assistant.content);
+    if ((assistant.tool_calls?.length ?? 0) > 0) {
+      const combinedThought = [assistantThinking, assistantThought].filter(Boolean).join(' | ');
+      if (combinedThought) {
+        onEvent?.(`thought:${combinedThought}`);
+      }
+    }
+
     messages.push(assistant);
+    const assistantToolCalls = assistant.tool_calls?.length ?? 0;
+    totalToolCalls += assistantToolCalls;
 
     if (!assistant.tool_calls || assistant.tool_calls.length === 0) {
+      debugTurns.push({
+        turn: i + 1,
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        totalTokens: usage.totalTokens,
+        messageCountBefore,
+        messageCountAfter: messages.length,
+        assistantToolCalls: 0
+      });
       return {
         text: assistant.content ?? '',
-        usage: usageTotals
+        usage: usageTotals,
+        debug: buildDebug()
       };
     }
 
@@ -854,7 +968,8 @@ export async function chatWithTools(
       const summarizedArgs = (parsedArgs && typeof parsedArgs === 'object')
         ? (parsedArgs as Record<string, unknown>)
         : {};
-      onEvent?.(`tool:${toolName} | intent: ${intentSummary(toolName, summarizedArgs)}`);
+      onEvent?.(`thought:intent: ${intentSummary(toolName, summarizedArgs)}`);
+      onEvent?.(`tool:${toolName}`);
       let result: unknown;
       try {
         result = await executeTool(toolName, parsedArgs);
@@ -868,9 +983,19 @@ export async function chatWithTools(
       messages.push({
         role: 'tool',
         tool_call_id: call.id,
-        content: safeJsonStringify(result)
+        content: clampToolResultForPrompt(safeJsonStringify(result))
       });
     }
+
+    debugTurns.push({
+      turn: i + 1,
+      promptTokens: usage.promptTokens,
+      completionTokens: usage.completionTokens,
+      totalTokens: usage.totalTokens,
+      messageCountBefore,
+      messageCountAfter: messages.length,
+      assistantToolCalls
+    });
   }
 
   const exhaustedMessage = `Tool-call budget reached (${maxTurns}) for this response.`;
@@ -884,7 +1009,8 @@ export async function chatWithTools(
     if (summary) {
       return {
         text: `${exhaustedMessage}\n\n${summary}`,
-        usage: usageTotals
+        usage: usageTotals,
+        debug: buildDebug()
       };
     }
   } catch (error) {
@@ -893,6 +1019,7 @@ export async function chatWithTools(
 
   return {
     text: `${exhaustedMessage}\n\nSummary unavailable. Please continue from this state or raise the per-step tool-call budget.`,
-    usage: usageTotals
+    usage: usageTotals,
+    debug: buildDebug()
   };
 }

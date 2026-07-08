@@ -225,10 +225,10 @@ function renderContextUsageGraph() {
 
   for (const row of rows) {
     const avgRecalled = (row.recalledPromptTokens || 0) / Math.max(1, row.requests);
-    const avgTotal = row.totalTokens / Math.max(1, row.requests);
-    const avgSession = Math.max(0, avgTotal - avgRecalled);
+    const avgPrompt = row.promptTokens / Math.max(1, row.requests);
+    const avgSession = Math.max(0, avgPrompt - avgRecalled);
     const contextWindow = resolveContextWindow(row.model, row.contextWindowTokens);
-    const avgPct = Math.min(100, Math.round((avgTotal / Math.max(1, contextWindow)) * 100));
+    const avgPct = Math.min(100, Math.round((avgPrompt / Math.max(1, contextWindow)) * 100));
     const recalledPct = Math.min(100, (avgRecalled / Math.max(1, contextWindow)) * 100);
     const sessionPct = Math.max(0, Math.min(100 - recalledPct, (avgSession / Math.max(1, contextWindow)) * 100));
 
@@ -260,7 +260,7 @@ function renderContextUsageGraph() {
 
     const meta = document.createElement('div');
     meta.className = 'context-usage-meta';
-    meta.textContent = `TurboVec=${formatCount(avgRecalled)} avg | session=${formatCount(avgSession)} avg | total=${formatCount(row.totalTokens)} over ${formatCount(row.requests)} req`;
+    meta.textContent = `TurboVec=${formatCount(avgRecalled)} avg | session=${formatCount(avgSession)} avg | prompt=${formatCount(avgPrompt)} avg | total=${formatCount(row.totalTokens)} over ${formatCount(row.requests)} req`;
 
     bar.appendChild(recalled);
     bar.appendChild(session);
@@ -1208,6 +1208,7 @@ async function initChat() {
   let activeChatSessionTitle = '';
   let activeChatSessionCreatedAt = '';
   let activeChatMessages = [];
+  let forceFreshContextForNextSend = false;
   let sessionListMutating = false;
 
   function workspaceLabel(workspaceDir) {
@@ -1402,6 +1403,7 @@ async function initChat() {
     activeChatSessionTitle = session.title;
     activeChatSessionCreatedAt = session.createdAt;
     activeChatMessages = Array.isArray(session.messages) ? session.messages : [];
+    forceFreshContextForNextSend = false;
 
     provider.value = normalizeProvider(session.config?.provider || settingsState.provider);
     endpoint.value = session.config?.endpoint || settingsState.endpoint;
@@ -1456,6 +1458,7 @@ async function initChat() {
     activeChatSessionTitle = `Chat ${new Date().toLocaleString()}`;
     activeChatSessionCreatedAt = timestamp;
     activeChatMessages = [];
+    forceFreshContextForNextSend = true;
     conversation.innerHTML = '';
     await persistActiveChatSession();
     await refreshChatSessions();
@@ -1564,10 +1567,85 @@ async function initChat() {
     scheduleAssistantMarkdownRender();
   });
 
+  function parseChatEvent(rawEvent) {
+    const raw = String(rawEvent ?? '').trim();
+    if (!raw) {
+      return null;
+    }
+
+    if (raw.startsWith('thought:')) {
+      return {
+        kind: 'thought',
+        text: raw.slice('thought:'.length).trim()
+      };
+    }
+
+    if (raw.startsWith('tool:')) {
+      return {
+        kind: 'tool',
+        text: raw.slice('tool:'.length).trim()
+      };
+    }
+
+    if (raw.startsWith('llm-turn:')) {
+      return {
+        kind: 'status',
+        text: `llm turn ${raw.slice('llm-turn:'.length).trim()}`
+      };
+    }
+
+    return {
+      kind: 'status',
+      text: raw
+    };
+  }
+
+  function createEventVisibilityToggle(row, textNode, kind) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'log-line-visibility-toggle';
+    button.setAttribute('aria-label', `Hide ${kind} segment`);
+    button.setAttribute('aria-pressed', 'false');
+    button.title = `Hide ${kind} segment`;
+    button.innerHTML =
+      '<svg class="eye-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+      '<path d="M12 5c5.2 0 9.5 4.4 10.4 6.7.2.4.2.8 0 1.2C21.5 15.2 17.2 19.6 12 19.6S2.5 15.2 1.6 12.9a1.5 1.5 0 0 1 0-1.2C2.5 9.4 6.8 5 12 5Z"></path>' +
+      '<circle cx="12" cy="12.3" r="3.1"></circle>' +
+      '<path class="eye-slash" d="M4 4l16 16"></path>' +
+      '</svg>';
+
+    button.addEventListener('click', () => {
+      const hidden = !row.classList.contains('segment-hidden');
+      row.classList.toggle('segment-hidden', hidden);
+      textNode.hidden = hidden;
+      button.setAttribute('aria-pressed', hidden ? 'true' : 'false');
+      button.setAttribute('aria-label', `${hidden ? 'Show' : 'Hide'} ${kind} segment`);
+      button.title = `${hidden ? 'Show' : 'Hide'} ${kind} segment`;
+    });
+
+    return button;
+  }
+
   const offChatEvent = window.llmIde.onChatEvent(event => {
+    const parsed = parseChatEvent(event);
+    if (!parsed || !parsed.text) {
+      return;
+    }
+
     const row = document.createElement('div');
-    row.className = 'log-line';
-    row.textContent = `[tool] ${event}`;
+    row.className = `log-line log-line-event log-line-event-${parsed.kind}`;
+    const kindLabel = document.createElement('span');
+    kindLabel.className = 'log-line-event-kind';
+    kindLabel.textContent = `[${parsed.kind}]`;
+
+    const text = document.createElement('span');
+    text.className = 'log-line-event-text';
+    text.textContent = parsed.text;
+
+    const finalToggle = createEventVisibilityToggle(row, text, parsed.kind);
+    row.appendChild(finalToggle);
+    row.appendChild(kindLabel);
+    row.appendChild(text);
     if (assistantRowEl && assistantRowEl.parentElement === conversation) {
       conversation.insertBefore(row, assistantRowEl);
     } else {
@@ -1795,7 +1873,8 @@ async function initChat() {
         await createNewChatSession();
       }
 
-      priorMessages = activeChatMessages.slice();
+      priorMessages = forceFreshContextForNextSend ? [] : activeChatMessages.slice();
+      forceFreshContextForNextSend = false;
       const userMessage = { role: 'user', content: text };
       activeChatMessages.push(userMessage);
       if (!activeChatSessionTitle || /^Chat\s\d/.test(activeChatSessionTitle)) {
