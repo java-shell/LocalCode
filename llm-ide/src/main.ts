@@ -5,8 +5,9 @@ import { ChildProcessWithoutNullStreams } from 'child_process';
 import { chatWithTools, listModelCatalog } from './backend/llmClient';
 import { runOrchestration } from './backend/orchestrationEngine';
 import { deleteChatSession, listChatSessions, loadChatSession, saveChatSession } from './backend/chatSessionStore';
-import { defaultPlan, validatePlan } from './backend/schema';
+import { defaultPlan, normalizeAdvancedStageIds, validatePlan } from './backend/schema';
 import { loadPlan, savePlan } from './backend/planStore';
+import { pruneChatContextDumps } from './backend/chatDebugDumps';
 import {
   ChatSession,
   ChatStreamResult,
@@ -177,6 +178,9 @@ async function writeChatContextDebugDump(payload: {
       fs.promises.writeFile(latestFilePath, raw, 'utf8')
     ]);
 
+    // Best-effort retention so debug dumps do not grow without bound on disk.
+    await pruneChatContextDumps(debugDir);
+
     return latestFilePath;
   } catch {
     return null;
@@ -330,26 +334,28 @@ async function importPlanFromDisk(): Promise<OrchestrationImportResult | null> {
     );
   }
 
-  const errors = validatePlan(parsed);
+  const normalizedPlan = normalizeAdvancedStageIds(parsed as OrchestrationPlan);
+  const errors = validatePlan(normalizedPlan);
   if (errors.length > 0) {
     throw new Error(`Invalid orchestration plan in ${path.basename(filePath)}: ${errors.join(' ')}`);
   }
 
   return {
-    plan: parsed as OrchestrationPlan,
+    plan: normalizedPlan,
     filePath
   };
 }
 
 async function exportPlanToDisk(plan: OrchestrationPlan): Promise<OrchestrationExportResult | null> {
-  const errors = validatePlan(plan);
+  const normalizedPlan = normalizeAdvancedStageIds(plan);
+  const errors = validatePlan(normalizedPlan);
   if (errors.length > 0) {
     throw new Error(`Invalid orchestration plan: ${errors.join(' ')}`);
   }
 
   const dialogOptions: Electron.SaveDialogOptions = {
     title: 'Export Orchestration Plan',
-    defaultPath: `${plan.name || 'orchestration-plan'}.json`,
+    defaultPath: `${normalizedPlan.name || 'orchestration-plan'}.json`,
     filters: [
       { name: 'JSON Files', extensions: ['json'] },
       { name: 'All Files', extensions: ['*'] }
@@ -364,7 +370,7 @@ async function exportPlanToDisk(plan: OrchestrationPlan): Promise<OrchestrationE
     return null;
   }
 
-  await fs.promises.writeFile(result.filePath, JSON.stringify(plan, null, 2), 'utf8');
+  await fs.promises.writeFile(result.filePath, JSON.stringify(normalizedPlan, null, 2), 'utf8');
   return { filePath: result.filePath };
 }
 
@@ -489,19 +495,22 @@ ipcMain.handle(
       );
       const text = result.text;
 
-      const debugDumpPath = await writeChatContextDebugDump({
-        workspaceDir: selectedWorkspaceDir,
-        namespace: chatNamespace,
-        model: config.model,
-        contextWindowTokens: payload.contextWindowTokens,
-        recalledPromptTokens,
-        historyMessageCount: Array.isArray(payload.historyMessages) ? payload.historyMessages.length : 0,
-        initialMessages: messages,
-        finalMessages: result.debug?.finalMessages,
-        turns: result.debug?.turns,
-        totalToolCalls: result.debug?.totalToolCalls,
-        usage: result.usage
-      });
+      const debugDumpEnabled = payload.chatDebugDumpsEnabled !== false;
+      const debugDumpPath = debugDumpEnabled
+        ? await writeChatContextDebugDump({
+            workspaceDir: selectedWorkspaceDir,
+            namespace: chatNamespace,
+            model: config.model,
+            contextWindowTokens: payload.contextWindowTokens,
+            recalledPromptTokens,
+            historyMessageCount: Array.isArray(payload.historyMessages) ? payload.historyMessages.length : 0,
+            initialMessages: messages,
+            finalMessages: result.debug?.finalMessages,
+            turns: result.debug?.turns,
+            totalToolCalls: result.debug?.totalToolCalls,
+            usage: result.usage
+          })
+        : null;
 
       if (debugDumpPath) {
         event.sender.send('chat:event', `[debug] wrote chat context dump: ${debugDumpPath}`);
@@ -778,8 +787,8 @@ ipcMain.handle('orch:save-plan', async (_event, plan: OrchestrationPlan) => {
 
 ipcMain.handle('orch:validate-plan', async (_event, raw: string) => {
   try {
-    const parsed = JSON.parse(raw);
-    return validatePlan(parsed);
+    const parsed = JSON.parse(raw) as OrchestrationPlan;
+    return validatePlan(normalizeAdvancedStageIds(parsed));
   } catch (error) {
     return [error instanceof Error ? `Invalid JSON: ${error.message}` : 'Invalid JSON'];
   }
@@ -791,7 +800,8 @@ ipcMain.handle(
     event,
     payload: OrchestrationRunRequest
   ): Promise<OrchestrationRunResult> => {
-    const errors = validatePlan(payload.plan);
+    const normalizedPlan = normalizeAdvancedStageIds(payload.plan ?? defaultPlan);
+    const errors = validatePlan(normalizedPlan);
     if (errors.length > 0) {
       throw new Error(errors.join(' '));
     }
@@ -805,7 +815,7 @@ ipcMain.handle(
       : memoryNamespace('orchestration', selectedWorkspaceDir);
 
     try {
-      const run = await runOrchestration(payload.plan ?? defaultPlan, payload.prompt, {
+      const run = await runOrchestration(normalizedPlan, payload.prompt, {
         requestTimeoutMs: Number(payload.requestTimeoutMs ?? 0) || undefined
       }, message => {
         event.sender.send('orch:event', message);

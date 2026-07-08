@@ -8,6 +8,8 @@ const editorTabs = new Map();
 const watchedFilePaths = new Set();
 const externalPromptLocks = new Set();
 let activeEditorKey = null;
+let activeTabKey = 'chat';
+let advancedFullscreenRequested = false;
 const SETTINGS_STORAGE_KEY = 'localcode.settings';
 const PANEL_SIZES_STORAGE_KEY = 'localcode.panelSizes';
 
@@ -21,6 +23,7 @@ const settingsState = {
   modelContextWindows: {},
   chatMemoryNamespace: '',
   orchestrationMemoryNamespace: '',
+  chatDebugDumpsEnabled: true,
   chatSettingsCollapsed: true
 };
 
@@ -291,6 +294,7 @@ function loadSettings() {
     settingsState.chatMemoryNamespace = String(parsed.chatMemoryNamespace ?? settingsState.chatMemoryNamespace).trim();
     settingsState.orchestrationMemoryNamespace =
       String(parsed.orchestrationMemoryNamespace ?? settingsState.orchestrationMemoryNamespace).trim();
+    settingsState.chatDebugDumpsEnabled = Boolean(parsed.chatDebugDumpsEnabled ?? true);
     settingsState.chatSettingsCollapsed = Boolean(parsed.chatSettingsCollapsed ?? settingsState.chatSettingsCollapsed);
   } catch {
     settingsState.maxToolTurns = 40;
@@ -302,6 +306,7 @@ function loadSettings() {
     settingsState.modelContextWindows = {};
     settingsState.chatMemoryNamespace = '';
     settingsState.orchestrationMemoryNamespace = '';
+    settingsState.chatDebugDumpsEnabled = true;
     settingsState.chatSettingsCollapsed = true;
   }
 }
@@ -572,20 +577,28 @@ function initResizablePanels() {
 function setActiveTab(which) {
   const chatTab = document.getElementById('chatTab');
   const orchTab = document.getElementById('orchTab');
+  const orchAdvancedTab = document.getElementById('orchAdvancedTab');
   const diagTab = document.getElementById('diagTab');
   const chatView = document.getElementById('chatView');
   const orchView = document.getElementById('orchView');
+  const orchAdvancedView = document.getElementById('orchAdvancedView');
   const diagView = document.getElementById('diagView');
 
   const chatOn = which === 'chat';
   const orchOn = which === 'orchestration';
+  const orchAdvancedOn = which === 'orchestration-advanced';
   const diagOn = which === 'diagnostics';
+
+  activeTabKey = which;
+  document.body.classList.toggle('advanced-fullscreen-active', advancedFullscreenRequested && orchAdvancedOn);
 
   chatTab.classList.toggle('active', chatOn);
   orchTab.classList.toggle('active', orchOn);
+  orchAdvancedTab.classList.toggle('active', orchAdvancedOn);
   diagTab.classList.toggle('active', diagOn);
   chatView.classList.toggle('active', chatOn);
   orchView.classList.toggle('active', orchOn);
+  orchAdvancedView.classList.toggle('active', orchAdvancedOn);
   diagView.classList.toggle('active', diagOn);
 }
 
@@ -1082,6 +1095,7 @@ function initSettingsMenu() {
   const providerInput = document.getElementById('settingProvider');
   const modelInput = document.getElementById('settingModel');
   const apiKeyInput = document.getElementById('settingApiKey');
+  const chatDebugDumpsInput = document.getElementById('settingChatDebugDumpsEnabled');
   const cancel = document.getElementById('settingsCancel');
   const save = document.getElementById('settingsSave');
 
@@ -1097,6 +1111,7 @@ function initSettingsMenu() {
     providerInput.value = normalizeProvider(settingsState.provider);
     modelInput.value = settingsState.model;
     apiKeyInput.value = settingsState.apiKey;
+    chatDebugDumpsInput.checked = settingsState.chatDebugDumpsEnabled;
     modal.classList.add('open');
     modal.setAttribute('aria-hidden', 'false');
     input.focus();
@@ -1118,6 +1133,7 @@ function initSettingsMenu() {
     settingsState.provider = normalizeProvider(providerInput.value);
     settingsState.model = modelInput.value.trim() || settingsState.model;
     settingsState.apiKey = apiKeyInput.value;
+    settingsState.chatDebugDumpsEnabled = Boolean(chatDebugDumpsInput.checked);
 
     chatProvider.value = settingsState.provider;
     chatEndpoint.value = settingsState.endpoint;
@@ -1911,6 +1927,7 @@ async function initChat() {
         historyMessages: priorMessages,
         contextWindowTokens: resolveSelectedContextWindowTokens(),
         memoryNamespace: selectedChatMemoryNamespace() || undefined,
+        chatDebugDumpsEnabled: settingsState.chatDebugDumpsEnabled,
         maxToolTurns: settingsState.maxToolTurns,
         toolNames: [
           'browser_fetch',
@@ -2152,6 +2169,7 @@ async function initOrchestration() {
       temperature: 0.2,
       maxTokens: 0,
       maxToolTurns: 40,
+      maxRetries: 1,
       tools: defaultTools(),
       passOutputToNext: true,
       allowCompletionTool: false
@@ -2175,6 +2193,7 @@ async function initOrchestration() {
       temperature: Number.isFinite(step.temperature) ? Number(step.temperature) : 0.2,
       maxTokens: Number.isFinite(step.maxTokens) ? Number(step.maxTokens) : 0,
       maxToolTurns: clampMaxToolTurns(Number(step.maxToolTurns || 40)),
+      maxRetries: Math.max(0, Math.min(10, Math.floor(Number(step.maxRetries || 0)))),
       tools: availableTools.map(name => ({ name, enabled: Boolean(enabledMap.get(name)) })),
       passOutputToNext: step.passOutputToNext !== false,
       allowCompletionTool: typeof step.allowCompletionTool === 'boolean' ? step.allowCompletionTool : fallbackAllowsCompletion
@@ -2623,6 +2642,10 @@ async function initOrchestration() {
         step.maxToolTurns = clampMaxToolTurns(Number(value || 40));
         syncPlanJson();
       }, { type: 'number', min: 1, step: 1 });
+      addLabeledInput('Max Retries', step.maxRetries ?? 0, value => {
+        step.maxRetries = Math.max(0, Math.min(10, Math.floor(Number(value || 0))));
+        syncPlanJson();
+      }, { type: 'number', min: 0, step: 1 });
       addLabeledInput('System Prompt', step.systemPrompt || '', value => {
         step.systemPrompt = value;
         syncPlanJson();
@@ -2791,7 +2814,11 @@ async function initOrchestration() {
   exportButton.addEventListener('click', async () => {
     try {
       const parsed = readPlanFromUi();
-      const exported = await window.llmIde.exportPlan(parsed);
+      const basicOnlyPlan = {
+        ...parsed,
+        advanced: undefined
+      };
+      const exported = await window.llmIde.exportPlan(basicOnlyPlan);
       if (!exported) {
         status.textContent = 'Export canceled';
         return;
@@ -2854,6 +2881,1280 @@ async function initOrchestration() {
   await reload();
   await refreshOrchestrationNamespaceOptions();
 
+  window.addEventListener('beforeunload', () => {
+    offEvent();
+  });
+}
+
+async function initAdvancedOrchestration() {
+  const status = document.getElementById('orchAdvancedStatus');
+  const promptEl = document.getElementById('orchAdvancedPrompt');
+  const nameEl = document.getElementById('orchAdvancedPlanName');
+  const descriptionEl = document.getElementById('orchAdvancedPlanDescription');
+  const loopEl = document.getElementById('orchAdvancedLoopUntilComplete');
+  const maxLoopsEl = document.getElementById('orchAdvancedMaxLoops');
+  const completionMarkerEl = document.getElementById('orchAdvancedCompletionMarker');
+  const entryStageEl = document.getElementById('orchAdvancedEntryStage');
+  const maxStageExecutionsEl = document.getElementById('orchAdvancedMaxStageExecutions');
+  const addStageButton = document.getElementById('orchAdvancedAddStage');
+  const addLinkButton = document.getElementById('orchAdvancedAddLink');
+  const importButton = document.getElementById('orchAdvancedImport');
+  const exportButton = document.getElementById('orchAdvancedExport');
+  const fullscreenToggleButton = document.getElementById('orchAdvancedFullscreenToggle');
+  const loadButton = document.getElementById('orchAdvancedLoad');
+  const validateButton = document.getElementById('orchAdvancedValidate');
+  const saveButton = document.getElementById('orchAdvancedSave');
+  const runButton = document.getElementById('orchAdvancedRun');
+  const stopButton = document.getElementById('orchAdvancedStop');
+  const clearOutputLogButton = document.getElementById('orchAdvancedClearOutputLog');
+  const popoutOutputLogButton = document.getElementById('orchAdvancedPopoutOutputLog');
+  const gridEl = document.getElementById('orchAdvancedGrid');
+  const eventsEl = document.getElementById('orchAdvancedEvents');
+  const outputEl = document.getElementById('orchAdvancedOutput');
+  const outputLogEl = document.getElementById('orchAdvancedOutputLog');
+  const modalEl = document.getElementById('orchLogModal');
+  const markdownEl = document.getElementById('orchLogMarkdown');
+
+  const availableTools = [
+    'browser_fetch',
+    'web_search',
+    'list_repo_tree',
+    'list_dir',
+    'file_search',
+    'read_file',
+    'create_file',
+    'write_file',
+    'replace_in_file',
+    'insert_in_file',
+    'create_directory',
+    'move_path',
+    'delete_path',
+    'grep_search',
+    'git_status',
+    'git_diff',
+    'git_add',
+    'git_commit',
+    'run_terminal_command'
+  ];
+
+  let advancedRunning = false;
+  const outputLogEntries = [];
+  const lastStageMetrics = new Map();
+  let advancedPlan = {
+    version: 1,
+    name: 'Agentic Workflow',
+    description: 'Grid-based advanced orchestration workflow.',
+    loopUntilComplete: false,
+    maxLoops: 3,
+    completionMarker: 'TASK_COMPLETE',
+    steps: [],
+    advanced: {
+      enabled: true,
+      entryStageId: '',
+      maxStageExecutions: 100,
+      stages: [],
+      links: []
+    }
+  };
+
+  const GRID_WIDTH = 1800;
+  const GRID_HEIGHT = 1200;
+  const CARD_WIDTH = 390;
+  const CARD_HEADER_HEIGHT = 38;
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const stageCardById = new Map();
+  const linkPathById = new Map();
+  let surfaceEl = null;
+  let linksSvgEl = null;
+  let cardsLayerEl = null;
+  let connectMode = false;
+  let connectionDraft = null;
+  let dragState = null;
+
+  function syncAdvancedFullscreenUi() {
+    if (!fullscreenToggleButton) {
+      return;
+    }
+    const enabled = Boolean(advancedFullscreenRequested);
+    fullscreenToggleButton.textContent = enabled ? 'Exit Full Screen' : 'Full Screen';
+    fullscreenToggleButton.setAttribute('aria-pressed', enabled ? 'true' : 'false');
+    document.body.classList.toggle(
+      'advanced-fullscreen-active',
+      enabled && activeTabKey === 'orchestration-advanced'
+    );
+  }
+
+  function defaultTools() {
+    return availableTools.map(toolName => ({
+      name: toolName,
+      enabled: ['list_repo_tree', 'list_dir', 'read_file', 'grep_search'].includes(toolName)
+    }));
+  }
+
+  function stageTemplate(index) {
+    return {
+      id: `agentic-stage-${Date.now()}-${index}`,
+      name: `Agentic Stage ${index + 1}`,
+      provider: 'openai-compatible',
+      endpoint: settingsState.endpoint,
+      model: settingsState.model,
+      contextWindowTokens: resolveContextWindow(settingsState.model),
+      apiKey: settingsState.apiKey || '',
+      systemPrompt: '',
+      temperature: 0.2,
+      maxTokens: 0,
+      maxToolTurns: 40,
+      maxRetries: 1,
+      tools: defaultTools(),
+      passOutputToNext: true,
+      allowCompletionTool: false,
+      positionX: 24 + (index % 3) * 420,
+      positionY: 24 + Math.floor(index / 3) * 220,
+      collapsed: false
+    };
+  }
+
+  function normalizeStage(stage, index, totalStages) {
+    const existingTools = Array.isArray(stage.tools) ? stage.tools : [];
+    const enabledMap = new Map(existingTools.map(tool => [tool.name, Boolean(tool.enabled)]));
+    return {
+      id: String(stage.id || `agentic-stage-${index + 1}`),
+      name: String(stage.name || `Agentic Stage ${index + 1}`),
+      provider: stage.provider === 'ollama' ? 'ollama' : 'openai-compatible',
+      endpoint: String(stage.endpoint || settingsState.endpoint),
+      model: String(stage.model || settingsState.model),
+      contextWindowTokens: clampContextWindowTokens(Number(stage.contextWindowTokens || 0)) || resolveContextWindow(stage.model || settingsState.model),
+      apiKey: String(stage.apiKey || ''),
+      systemPrompt: String(stage.systemPrompt || ''),
+      temperature: Number.isFinite(Number(stage.temperature)) ? Number(stage.temperature) : 0.2,
+      maxTokens: Number.isFinite(Number(stage.maxTokens)) ? Number(stage.maxTokens) : 0,
+      maxToolTurns: clampMaxToolTurns(Number(stage.maxToolTurns || 40)),
+      maxRetries: Math.max(0, Math.min(10, Math.floor(Number(stage.maxRetries || 0)))),
+      tools: availableTools.map(toolName => ({ name: toolName, enabled: Boolean(enabledMap.get(toolName)) })),
+      passOutputToNext: stage.passOutputToNext !== false,
+      allowCompletionTool: typeof stage.allowCompletionTool === 'boolean' ? stage.allowCompletionTool : index === totalStages - 1,
+      positionX: Number(stage.positionX || (24 + (index % 3) * 420)),
+      positionY: Number(stage.positionY || (24 + Math.floor(index / 3) * 220)),
+      collapsed: Boolean(stage.collapsed)
+    };
+  }
+
+  function normalizeLink(link, index) {
+    return {
+      id: String(link.id || `link-${Date.now()}-${index}`),
+      fromStageId: String(link.fromStageId || ''),
+      toStageId: String(link.toStageId || ''),
+      condition: String(link.condition || 'always'),
+      matchPattern: String(link.matchPattern || '')
+    };
+  }
+
+  function normalizeStageIdBase(value, index) {
+    const trimmed = String(value ?? '').trim();
+    return trimmed || `agentic-stage-${index + 1}`;
+  }
+
+  function buildUniqueStageId(baseId, usedIds) {
+    if (!usedIds.has(baseId)) {
+      usedIds.add(baseId);
+      return baseId;
+    }
+
+    let suffix = 2;
+    let candidate = `${baseId}-${suffix}`;
+    while (usedIds.has(candidate)) {
+      suffix += 1;
+      candidate = `${baseId}-${suffix}`;
+    }
+    usedIds.add(candidate);
+    return candidate;
+  }
+
+  function normalizeAdvancedIdFlow(stages, links, entryStageId) {
+    const usedIds = new Set();
+    const firstResolvedByOriginal = new Map();
+    let changed = false;
+
+    const normalizedStages = (Array.isArray(stages) ? stages : []).map((stage, index) => {
+      const originalId = normalizeStageIdBase(stage?.id, index);
+      const uniqueId = buildUniqueStageId(originalId, usedIds);
+      if (!firstResolvedByOriginal.has(originalId)) {
+        firstResolvedByOriginal.set(originalId, uniqueId);
+      }
+      if (String(stage?.id ?? '') !== uniqueId) {
+        changed = true;
+      }
+      return {
+        ...stage,
+        id: uniqueId
+      };
+    });
+
+    const resolveLegacyId = value => {
+      const raw = String(value ?? '').trim();
+      if (!raw) {
+        return raw;
+      }
+      return firstResolvedByOriginal.get(raw) || raw;
+    };
+
+    const normalizedLinks = (Array.isArray(links) ? links : []).map(link => {
+      const resolvedFrom = resolveLegacyId(link?.fromStageId);
+      const resolvedTo = resolveLegacyId(link?.toStageId);
+      if (String(link?.fromStageId ?? '') !== resolvedFrom || String(link?.toStageId ?? '') !== resolvedTo) {
+        changed = true;
+      }
+      return {
+        ...link,
+        fromStageId: resolvedFrom,
+        toStageId: resolvedTo
+      };
+    });
+
+    const normalizedEntryStageId = resolveLegacyId(entryStageId);
+    if (String(entryStageId ?? '') !== normalizedEntryStageId) {
+      changed = true;
+    }
+
+    return {
+      stages: normalizedStages,
+      links: normalizedLinks,
+      entryStageId: normalizedEntryStageId,
+      changed
+    };
+  }
+
+  function normalizePlan(plan) {
+    const stages = Array.isArray(plan?.advanced?.stages) ? plan.advanced.stages : [];
+    const links = Array.isArray(plan?.advanced?.links) ? plan.advanced.links : [];
+    const normalizedStages = stages.map((stage, index) => normalizeStage(stage, index, stages.length));
+    const normalizedLinks = links.map((link, index) => normalizeLink(link, index));
+    const normalizedFlow = normalizeAdvancedIdFlow(
+      normalizedStages,
+      normalizedLinks,
+      String(plan?.advanced?.entryStageId || '')
+    );
+    return {
+      version: 1,
+      name: String(plan?.name || 'Agentic Workflow'),
+      description: String(plan?.description || 'Grid-based advanced orchestration workflow.'),
+      loopUntilComplete: Boolean(plan?.loopUntilComplete),
+      maxLoops: Math.max(1, Math.min(20, Number(plan?.maxLoops ?? 3))),
+      completionMarker: String(plan?.completionMarker || 'TASK_COMPLETE').trim() || 'TASK_COMPLETE',
+      steps: Array.isArray(plan?.steps) ? plan.steps : [],
+      advanced: {
+        enabled: true,
+        entryStageId: normalizedFlow.entryStageId,
+        maxStageExecutions: Math.max(1, Math.min(300, Number(plan?.advanced?.maxStageExecutions ?? 100))),
+        stages: normalizedFlow.stages,
+        links: normalizedFlow.links
+      }
+    };
+  }
+
+  function clampStagePosition(stage) {
+    stage.positionX = Math.max(0, Math.min(GRID_WIDTH - CARD_WIDTH, Math.round(Number(stage.positionX || 0))));
+    stage.positionY = Math.max(0, Math.min(GRID_HEIGHT - CARD_HEADER_HEIGHT, Math.round(Number(stage.positionY || 0))));
+  }
+
+  function setRunning(running) {
+    advancedRunning = running;
+    stopButton.disabled = !running;
+    runButton.disabled = running;
+    loadButton.disabled = running;
+    validateButton.disabled = running;
+    saveButton.disabled = running;
+    importButton.disabled = running;
+    exportButton.disabled = running;
+    addStageButton.disabled = running;
+    addLinkButton.disabled = running;
+  }
+
+  function buildPlanFromUi() {
+    advancedPlan.name = nameEl.value.trim() || 'Agentic Workflow';
+    advancedPlan.description = descriptionEl.value.trim() || 'Grid-based advanced orchestration workflow.';
+    advancedPlan.loopUntilComplete = Boolean(loopEl.checked);
+    advancedPlan.maxLoops = Math.max(1, Math.min(20, Number(maxLoopsEl.value || 3)));
+    advancedPlan.completionMarker = completionMarkerEl.value.trim() || 'TASK_COMPLETE';
+    advancedPlan.advanced.enabled = true;
+    advancedPlan.advanced.entryStageId = entryStageEl.value.trim();
+    advancedPlan.advanced.maxStageExecutions = Math.max(1, Math.min(300, Number(maxStageExecutionsEl.value || 100)));
+    advancedPlan.advanced.stages.forEach(stage => clampStagePosition(stage));
+    const normalizedFlow = normalizeAdvancedIdFlow(
+      advancedPlan.advanced.stages,
+      advancedPlan.advanced.links,
+      advancedPlan.advanced.entryStageId
+    );
+    advancedPlan.advanced.stages = normalizedFlow.stages;
+    advancedPlan.advanced.links = normalizedFlow.links;
+    advancedPlan.advanced.entryStageId = normalizedFlow.entryStageId;
+    if (entryStageEl.value.trim() !== advancedPlan.advanced.entryStageId) {
+      entryStageEl.value = advancedPlan.advanced.entryStageId;
+    }
+    advancedPlan.advanced.links = advancedPlan.advanced.links.filter(link =>
+      advancedPlan.advanced.stages.some(stage => stage.id === link.fromStageId)
+      && advancedPlan.advanced.stages.some(stage => stage.id === link.toStageId)
+    );
+    return advancedPlan;
+  }
+
+  function formatPct(value) {
+    if (!Number.isFinite(value) || value < 0) {
+      return 'n/a';
+    }
+    if (value >= 1000) {
+      return `${Math.round(value)}%`;
+    }
+    if (value >= 100) {
+      return `${value.toFixed(1)}%`;
+    }
+    return `${value.toFixed(1)}%`;
+  }
+
+  function stageMetricDetails(stage) {
+    const metric = lastStageMetrics.get(stage.id);
+    if (!metric) {
+      return {
+        hasRun: false,
+        summaryText: 'Last run: none',
+        debugLines: ['No execution metrics recorded yet.'],
+        suspiciousContextUsage: false
+      };
+    }
+
+    const configuredContextWindow = Math.max(0, Number(stage.contextWindowTokens || 0));
+    const runContextWindow = Math.max(0, Number(metric.contextWindow || 0));
+    const denominator = runContextWindow > 0 ? runContextWindow : configuredContextWindow;
+    const promptTokens = Math.max(0, Number(metric.promptTokens || 0));
+    const recalledPromptTokens = Math.max(0, Number(metric.recalledPromptTokens || 0));
+    const completionTokens = Math.max(0, Number(metric.completionTokens || 0));
+    const totalTokens = Math.max(0, Number(metric.totalTokens || 0));
+
+    const contextPct = denominator > 0 ? (promptTokens / denominator) * 100 : NaN;
+    const turboPct = denominator > 0 ? (recalledPromptTokens / denominator) * 100 : NaN;
+    const suspiciousContextUsage = Number.isFinite(contextPct) && contextPct >= 95;
+    const contextWindowSource = runContextWindow > 0 ? 'run' : configuredContextWindow > 0 ? 'configured' : 'unknown';
+
+    const summaryParts = [
+      `Last Execution Length: ${Math.max(0, Number(metric.durationMs || 0))} ms`,
+      `Context: ${formatPct(contextPct)} (prompt=${promptTokens}${denominator > 0 ? `/${denominator}` : ''})`,
+      `TurboVec: ${formatPct(turboPct)} (${recalledPromptTokens})`,
+      `Attempts: ${Math.max(1, Number(metric.attempts || 1))}`
+    ];
+    if (suspiciousContextUsage) {
+      summaryParts.push('Potential context saturation');
+    }
+
+    const debugLines = [
+      `status: ${metric.success === false ? 'error' : 'success'}`,
+      `attempts: ${Math.max(1, Number(metric.attempts || 1))}`,
+      `durationMs: ${Math.max(0, Number(metric.durationMs || 0))}`,
+      `promptTokens: ${promptTokens}`,
+      `completionTokens: ${completionTokens}`,
+      `totalTokens: ${totalTokens}`,
+      `turboVecRecalledPromptTokens: ${recalledPromptTokens}`,
+      `contextWindowTokens(run): ${runContextWindow}`,
+      `contextWindowTokens(configured): ${configuredContextWindow}`,
+      `contextWindowSource: ${contextWindowSource}`,
+      `contextPct(prompt/context): ${formatPct(contextPct)}`,
+      `turboVecPct(recalled/context): ${formatPct(turboPct)}`
+    ];
+    if (suspiciousContextUsage) {
+      debugLines.push('warning: prompt token usage is >= 95% of context window; stage may be truncating important context.');
+    }
+
+    return {
+      hasRun: true,
+      summaryText: summaryParts.join(' | '),
+      debugLines,
+      suspiciousContextUsage
+    };
+  }
+
+  function appendToolCallsDetails(host, toolCalls) {
+    const calls = Array.isArray(toolCalls) ? toolCalls : [];
+    if (!calls.length) {
+      return;
+    }
+
+    const tcDetails = document.createElement('details');
+    tcDetails.className = 'orchestration-log-tool-calls';
+
+    const tcSummary = document.createElement('summary');
+    tcSummary.textContent = `Tool Calls (${calls.length})`;
+    tcDetails.appendChild(tcSummary);
+
+    const tcList = document.createElement('div');
+    tcList.className = 'orchestration-log-tool-calls-list';
+
+    for (const tc of calls) {
+      const row = document.createElement('div');
+      row.className = 'orchestration-log-tool-call-row';
+
+      const timeEl = document.createElement('span');
+      timeEl.className = 'orchestration-log-tool-call-time';
+      timeEl.textContent = new Date(tc.timestamp).toLocaleTimeString();
+
+      const nameEl = document.createElement('span');
+      nameEl.className = 'orchestration-log-tool-call-name';
+      nameEl.textContent = tc.name;
+
+      const intentEl = document.createElement('span');
+      intentEl.className = 'orchestration-log-tool-call-intent';
+      intentEl.textContent = tc.intent;
+
+      row.appendChild(timeEl);
+      row.appendChild(nameEl);
+      row.appendChild(intentEl);
+      tcList.appendChild(row);
+    }
+
+    tcDetails.appendChild(tcList);
+    host.appendChild(tcDetails);
+  }
+
+  function addLabeledInput(host, labelText, value, onChange, options = {}) {
+    const wrapper = document.createElement('div');
+    if (options.wide) wrapper.className = 'orch-step-grid-wide';
+    const label = document.createElement('label');
+    label.className = 'label';
+    label.textContent = labelText;
+    let input;
+    if (options.type === 'textarea') {
+      input = document.createElement('textarea');
+      input.value = String(value ?? '');
+    } else if (options.type === 'select') {
+      input = document.createElement('select');
+      for (const item of options.items || []) {
+        const option = document.createElement('option');
+        option.value = item.value;
+        option.textContent = item.label;
+        input.appendChild(option);
+      }
+      input.value = String(value ?? '');
+    } else {
+      input = document.createElement('input');
+      input.type = options.type || 'text';
+      input.value = String(value ?? '');
+      if (options.min !== undefined) input.min = String(options.min);
+      if (options.step !== undefined) input.step = String(options.step);
+    }
+    input.addEventListener('input', () => {
+      onChange(input.value);
+      drawLinks();
+    });
+    wrapper.appendChild(label);
+    wrapper.appendChild(input);
+    host.appendChild(wrapper);
+  }
+
+  function surfacePointFromEvent(event) {
+    if (!surfaceEl) {
+      return { x: 0, y: 0 };
+    }
+    const rect = surfaceEl.getBoundingClientRect();
+    return {
+      x: Math.max(0, Math.min(GRID_WIDTH, event.clientX - rect.left + surfaceEl.scrollLeft)),
+      y: Math.max(0, Math.min(GRID_HEIGHT, event.clientY - rect.top + surfaceEl.scrollTop))
+    };
+  }
+
+  function connectorCenter(stageId, kind) {
+    const card = stageCardById.get(stageId);
+    if (!card || !surfaceEl) {
+      return null;
+    }
+    const connector = card.querySelector(`.orch-connector-${kind}`);
+    if (!connector) {
+      return null;
+    }
+    const rect = connector.getBoundingClientRect();
+    const surfaceRect = surfaceEl.getBoundingClientRect();
+    return {
+      x: rect.left - surfaceRect.left + surfaceEl.scrollLeft + rect.width / 2,
+      y: rect.top - surfaceRect.top + surfaceEl.scrollTop + rect.height / 2
+    };
+  }
+
+  function edgePath(from, to) {
+    const dx = Math.max(70, Math.abs(to.x - from.x) * 0.4);
+    return `M ${from.x} ${from.y} C ${from.x + dx} ${from.y}, ${to.x - dx} ${to.y}, ${to.x} ${to.y}`;
+  }
+
+  function removeLink(linkId) {
+    advancedPlan.advanced.links = advancedPlan.advanced.links.filter(link => link.id !== linkId);
+    drawLinks();
+    renderGrid();
+  }
+
+  function drawLinks() {
+    if (!linksSvgEl) {
+      return;
+    }
+
+    linksSvgEl.innerHTML = '';
+    linkPathById.clear();
+
+    for (const link of advancedPlan.advanced.links) {
+      const from = connectorCenter(link.fromStageId, 'output');
+      const to = connectorCenter(link.toStageId, 'input');
+      if (!from || !to) {
+        continue;
+      }
+
+      const path = document.createElementNS(SVG_NS, 'path');
+      path.setAttribute('d', edgePath(from, to));
+      path.setAttribute('class', 'orch-edge-path');
+      path.setAttribute('data-link-id', link.id);
+      path.setAttribute('title', `${link.fromStageId} -> ${link.toStageId} (${link.condition})`);
+      path.addEventListener('dblclick', () => removeLink(link.id));
+      linksSvgEl.appendChild(path);
+      linkPathById.set(link.id, path);
+    }
+
+    if (connectionDraft) {
+      const path = document.createElementNS(SVG_NS, 'path');
+      path.setAttribute('d', edgePath({ x: connectionDraft.startX, y: connectionDraft.startY }, { x: connectionDraft.currentX, y: connectionDraft.currentY }));
+      path.setAttribute('class', 'orch-edge-path orch-edge-draft');
+      linksSvgEl.appendChild(path);
+    }
+  }
+
+  function startConnection(fromStageId, event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const start = connectorCenter(fromStageId, 'output') || surfacePointFromEvent(event);
+    connectionDraft = {
+      fromStageId,
+      startX: start.x,
+      startY: start.y,
+      currentX: start.x,
+      currentY: start.y
+    };
+    if (surfaceEl) {
+      surfaceEl.classList.add('is-connecting');
+    }
+    drawLinks();
+  }
+
+  function completeConnection(toStageId) {
+    if (!connectionDraft) {
+      return;
+    }
+    const fromStageId = connectionDraft.fromStageId;
+    connectionDraft = null;
+    if (surfaceEl) {
+      surfaceEl.classList.remove('is-connecting');
+    }
+    if (!fromStageId || !toStageId || fromStageId === toStageId) {
+      drawLinks();
+      return;
+    }
+
+    const duplicate = advancedPlan.advanced.links.some(link => link.fromStageId === fromStageId && link.toStageId === toStageId);
+    if (!duplicate) {
+      advancedPlan.advanced.links.push({
+        id: `link-${Date.now()}-${advancedPlan.advanced.links.length + 1}`,
+        fromStageId,
+        toStageId,
+        condition: 'always',
+        matchPattern: ''
+      });
+      status.textContent = `Connected ${fromStageId} -> ${toStageId}`;
+    }
+    renderGrid();
+  }
+
+  function cancelConnection() {
+    if (!connectionDraft) {
+      return;
+    }
+    connectionDraft = null;
+    if (surfaceEl) {
+      surfaceEl.classList.remove('is-connecting');
+    }
+    drawLinks();
+  }
+
+  function renderLinksEditor(stage) {
+    const wrap = document.createElement('div');
+    wrap.className = 'orch-advanced-links';
+    const title = document.createElement('div');
+    title.className = 'label';
+    title.textContent = 'Outgoing Links';
+    wrap.appendChild(title);
+
+    const links = advancedPlan.advanced.links.filter(link => link.fromStageId === stage.id);
+    if (!links.length) {
+      const empty = document.createElement('div');
+      empty.className = 'settings-help';
+      empty.textContent = 'Drag from output handle to another stage input to create links.';
+      wrap.appendChild(empty);
+      return wrap;
+    }
+
+    for (const link of links) {
+      const row = document.createElement('div');
+      row.className = 'orch-advanced-link-editor';
+
+      const toInput = document.createElement('input');
+      toInput.value = link.toStageId;
+      toInput.placeholder = 'Target stage id';
+      toInput.addEventListener('input', () => {
+        link.toStageId = toInput.value.trim();
+        drawLinks();
+      });
+
+      const conditionInput = document.createElement('input');
+      conditionInput.value = link.condition;
+      conditionInput.placeholder = 'always | success | error | error:tag';
+      conditionInput.addEventListener('input', () => {
+        link.condition = conditionInput.value.trim() || 'always';
+      });
+
+      const matchInput = document.createElement('input');
+      matchInput.value = link.matchPattern || '';
+      matchInput.placeholder = 'Optional match pattern';
+      matchInput.addEventListener('input', () => {
+        link.matchPattern = matchInput.value;
+      });
+
+      const deleteButton = document.createElement('button');
+      deleteButton.type = 'button';
+      deleteButton.textContent = 'Delete';
+      deleteButton.addEventListener('click', () => removeLink(link.id));
+
+      row.appendChild(toInput);
+      row.appendChild(conditionInput);
+      row.appendChild(matchInput);
+      row.appendChild(deleteButton);
+      wrap.appendChild(row);
+    }
+
+    return wrap;
+  }
+
+  function createCard(stage, index) {
+    const card = document.createElement('div');
+    card.className = `orch-advanced-card${stage.collapsed ? ' is-collapsed' : ''}`;
+    card.dataset.stageId = stage.id;
+    card.style.left = `${Math.round(stage.positionX)}px`;
+    card.style.top = `${Math.round(stage.positionY)}px`;
+
+    const inputHandle = document.createElement('button');
+    inputHandle.type = 'button';
+    inputHandle.className = 'orch-connector orch-connector-input';
+    inputHandle.title = 'Input connector';
+    inputHandle.addEventListener('pointerup', event => {
+      event.preventDefault();
+      event.stopPropagation();
+      completeConnection(stage.id);
+    });
+
+    const outputHandle = document.createElement('button');
+    outputHandle.type = 'button';
+    outputHandle.className = 'orch-connector orch-connector-output';
+    outputHandle.title = 'Output connector (drag to target stage input)';
+    outputHandle.addEventListener('pointerdown', event => startConnection(stage.id, event));
+
+    const header = document.createElement('div');
+    header.className = 'orch-advanced-card-header';
+    const title = document.createElement('strong');
+    title.textContent = `${index + 1}. ${stage.name}`;
+    const actions = document.createElement('div');
+    actions.className = 'orch-step-actions';
+
+    const collapseBtn = document.createElement('button');
+    collapseBtn.type = 'button';
+    collapseBtn.textContent = stage.collapsed ? 'Expand' : 'Collapse';
+    collapseBtn.addEventListener('click', () => {
+      stage.collapsed = !stage.collapsed;
+      renderGrid();
+    });
+
+    const duplicateBtn = document.createElement('button');
+    duplicateBtn.type = 'button';
+    duplicateBtn.textContent = 'Duplicate';
+    duplicateBtn.addEventListener('click', () => {
+      const duplicate = normalizeStage({
+        ...stage,
+        id: `${stage.id}-copy-${Date.now()}`,
+        name: `${stage.name} Copy`,
+        positionX: stage.positionX + 40,
+        positionY: stage.positionY + 40,
+        collapsed: false
+      }, advancedPlan.advanced.stages.length, advancedPlan.advanced.stages.length + 1);
+      advancedPlan.advanced.stages.push(duplicate);
+      renderGrid();
+    });
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.type = 'button';
+    deleteBtn.textContent = 'Delete';
+    deleteBtn.addEventListener('click', () => {
+      advancedPlan.advanced.stages = advancedPlan.advanced.stages.filter(item => item.id !== stage.id);
+      advancedPlan.advanced.links = advancedPlan.advanced.links.filter(link => link.fromStageId !== stage.id && link.toStageId !== stage.id);
+      renderGrid();
+    });
+
+    actions.appendChild(collapseBtn);
+    actions.appendChild(duplicateBtn);
+    actions.appendChild(deleteBtn);
+    header.appendChild(title);
+    header.appendChild(actions);
+
+    const metricDetails = stageMetricDetails(stage);
+    const metrics = document.createElement('div');
+    metrics.className = `orch-advanced-meta${metricDetails.suspiciousContextUsage ? ' orch-advanced-meta-warning' : ''}`;
+    metrics.textContent = metricDetails.summaryText;
+
+    const debugDetails = document.createElement('details');
+    debugDetails.className = 'orchestration-log-tool-calls';
+    const debugSummary = document.createElement('summary');
+    debugSummary.textContent = 'Context Debug';
+    debugDetails.appendChild(debugSummary);
+    const debugBody = document.createElement('pre');
+    debugBody.className = 'diag-raw';
+    debugBody.textContent = metricDetails.debugLines.join('\n');
+    debugDetails.appendChild(debugBody);
+
+    const body = document.createElement('div');
+    body.className = 'orch-advanced-body';
+
+    const grid = document.createElement('div');
+    grid.className = 'orch-step-grid';
+
+    addLabeledInput(grid, 'Stage ID', stage.id, value => {
+      const oldId = stage.id;
+      stage.id = normalizeStageIdBase(value, index);
+      if (oldId !== stage.id) {
+        advancedPlan.advanced.links.forEach(link => {
+          if (link.fromStageId === oldId) link.fromStageId = stage.id;
+          if (link.toStageId === oldId) link.toStageId = stage.id;
+        });
+      }
+      const normalizedFlow = normalizeAdvancedIdFlow(
+        advancedPlan.advanced.stages,
+        advancedPlan.advanced.links,
+        advancedPlan.advanced.entryStageId
+      );
+      advancedPlan.advanced.stages = normalizedFlow.stages;
+      advancedPlan.advanced.links = normalizedFlow.links;
+      advancedPlan.advanced.entryStageId = normalizedFlow.entryStageId;
+      if (normalizedFlow.changed) {
+        status.textContent = 'Stage IDs normalized to keep advanced stage IDs unique.';
+      }
+      renderGrid();
+    });
+    addLabeledInput(grid, 'Stage Name', stage.name, value => {
+      stage.name = value || stage.name;
+      title.textContent = `${index + 1}. ${stage.name}`;
+    });
+    addLabeledInput(grid, 'Provider', stage.provider, value => {
+      stage.provider = value;
+    }, {
+      type: 'select',
+      items: [
+        { value: 'openai-compatible', label: 'openai-compatible' },
+        { value: 'ollama', label: 'ollama' }
+      ]
+    });
+    addLabeledInput(grid, 'Model', stage.model, value => {
+      stage.model = value;
+    });
+    addLabeledInput(grid, 'Context Window Tokens', stage.contextWindowTokens, value => {
+      stage.contextWindowTokens = clampContextWindowTokens(Number(value || 0)) || resolveContextWindow(stage.model);
+    }, { type: 'number', min: 1, step: 1 });
+    addLabeledInput(grid, 'Endpoint', stage.endpoint, value => {
+      stage.endpoint = value;
+    }, { wide: true });
+    addLabeledInput(grid, 'Temperature', stage.temperature ?? 0.2, value => {
+      stage.temperature = Number(value || 0.2);
+    }, { type: 'number', min: 0, step: 0.1 });
+    addLabeledInput(grid, 'Max Tokens', stage.maxTokens ?? 0, value => {
+      stage.maxTokens = Number(value || 0);
+    }, { type: 'number', min: 0, step: 1 });
+    addLabeledInput(grid, 'Max Tool Calls', stage.maxToolTurns ?? 40, value => {
+      stage.maxToolTurns = clampMaxToolTurns(Number(value || 40));
+    }, { type: 'number', min: 1, step: 1 });
+    addLabeledInput(grid, 'Max Retries', stage.maxRetries ?? 0, value => {
+      stage.maxRetries = Math.max(0, Math.min(10, Math.floor(Number(value || 0))));
+    }, { type: 'number', min: 0, step: 1 });
+    addLabeledInput(grid, 'System Prompt', stage.systemPrompt || '', value => {
+      stage.systemPrompt = value;
+    }, { type: 'textarea', wide: true });
+
+    const passWrap = document.createElement('label');
+    passWrap.className = 'orch-tool-item orch-step-grid-wide';
+    const passCheckbox = document.createElement('input');
+    passCheckbox.type = 'checkbox';
+    passCheckbox.checked = stage.passOutputToNext !== false;
+    passCheckbox.addEventListener('change', () => {
+      stage.passOutputToNext = passCheckbox.checked;
+    });
+    passWrap.appendChild(passCheckbox);
+    passWrap.appendChild(document.createTextNode('Pass output to downstream stages'));
+    grid.appendChild(passWrap);
+
+    const completionWrap = document.createElement('label');
+    completionWrap.className = 'orch-tool-item orch-step-grid-wide';
+    const completionCheckbox = document.createElement('input');
+    completionCheckbox.type = 'checkbox';
+    completionCheckbox.checked = Boolean(stage.allowCompletionTool);
+    completionCheckbox.addEventListener('change', () => {
+      stage.allowCompletionTool = completionCheckbox.checked;
+    });
+    completionWrap.appendChild(completionCheckbox);
+    completionWrap.appendChild(document.createTextNode('Allow completion tool in this stage'));
+    grid.appendChild(completionWrap);
+
+    const toolsBlock = document.createElement('div');
+    toolsBlock.className = 'orch-tools';
+    const toolsLabel = document.createElement('div');
+    toolsLabel.className = 'label';
+    toolsLabel.textContent = 'Enabled Tools';
+    const toolsList = document.createElement('div');
+    toolsList.className = 'orch-tools-list';
+    stage.tools.forEach(tool => {
+      const item = document.createElement('label');
+      item.className = 'orch-tool-item';
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.checked = Boolean(tool.enabled);
+      checkbox.addEventListener('change', () => {
+        tool.enabled = checkbox.checked;
+      });
+      item.appendChild(checkbox);
+      item.appendChild(document.createTextNode(tool.name));
+      toolsList.appendChild(item);
+    });
+    toolsBlock.appendChild(toolsLabel);
+    toolsBlock.appendChild(toolsList);
+
+    body.appendChild(grid);
+    body.appendChild(toolsBlock);
+    body.appendChild(renderLinksEditor(stage));
+    body.appendChild(debugDetails);
+
+    header.addEventListener('pointerdown', event => {
+      const target = event.target;
+      if (target instanceof Element && target.closest('button,input,select,textarea,label,.orch-connector')) {
+        return;
+      }
+
+      event.preventDefault();
+      const pointer = surfacePointFromEvent(event);
+      dragState = {
+        stageId: stage.id,
+        offsetX: pointer.x - Number(stage.positionX || 0),
+        offsetY: pointer.y - Number(stage.positionY || 0)
+      };
+      header.setPointerCapture?.(event.pointerId);
+      if (surfaceEl) {
+        surfaceEl.classList.add('is-dragging-stage');
+      }
+    });
+
+    card.appendChild(inputHandle);
+    card.appendChild(outputHandle);
+    card.appendChild(header);
+    card.appendChild(metrics);
+    card.appendChild(body);
+    stageCardById.set(stage.id, card);
+    return card;
+  }
+
+  function buildGraphSurface() {
+    surfaceEl = document.createElement('div');
+    surfaceEl.className = `orch-advanced-surface${connectMode ? ' connect-mode' : ''}`;
+    surfaceEl.style.setProperty('--grid-width', `${GRID_WIDTH}px`);
+    surfaceEl.style.setProperty('--grid-height', `${GRID_HEIGHT}px`);
+
+    linksSvgEl = document.createElementNS(SVG_NS, 'svg');
+    linksSvgEl.setAttribute('class', 'orch-advanced-links-svg');
+    linksSvgEl.setAttribute('viewBox', `0 0 ${GRID_WIDTH} ${GRID_HEIGHT}`);
+    linksSvgEl.setAttribute('preserveAspectRatio', 'none');
+
+    cardsLayerEl = document.createElement('div');
+    cardsLayerEl.className = 'orch-advanced-cards-layer';
+
+    surfaceEl.appendChild(linksSvgEl);
+    surfaceEl.appendChild(cardsLayerEl);
+
+    surfaceEl.addEventListener('pointermove', event => {
+      if (connectionDraft) {
+        const point = surfacePointFromEvent(event);
+        connectionDraft.currentX = point.x;
+        connectionDraft.currentY = point.y;
+        drawLinks();
+      }
+
+      if (!dragState) {
+        return;
+      }
+
+      const stage = advancedPlan.advanced.stages.find(item => item.id === dragState.stageId);
+      if (!stage) {
+        return;
+      }
+
+      const pointer = surfacePointFromEvent(event);
+      stage.positionX = pointer.x - dragState.offsetX;
+      stage.positionY = pointer.y - dragState.offsetY;
+      clampStagePosition(stage);
+      const card = stageCardById.get(stage.id);
+      if (card) {
+        card.style.left = `${stage.positionX}px`;
+        card.style.top = `${stage.positionY}px`;
+      }
+      drawLinks();
+    });
+
+    surfaceEl.addEventListener('pointerup', () => {
+      if (dragState) {
+        dragState = null;
+        surfaceEl.classList.remove('is-dragging-stage');
+      }
+      if (connectionDraft) {
+        cancelConnection();
+      }
+    });
+
+    surfaceEl.addEventListener('pointerleave', () => {
+      if (!dragState && connectionDraft) {
+        cancelConnection();
+      }
+    });
+
+    return surfaceEl;
+  }
+
+  function renderGrid() {
+    stageCardById.clear();
+    gridEl.innerHTML = '';
+    const stages = advancedPlan.advanced.stages;
+    if (!stages.length) {
+      const empty = document.createElement('div');
+      empty.className = 'settings-help';
+      empty.textContent = 'No agentic stages yet. Add a stage to start building the graph.';
+      gridEl.appendChild(empty);
+      return;
+    }
+
+    const surface = buildGraphSurface();
+    stages.forEach((stage, index) => {
+      clampStagePosition(stage);
+      cardsLayerEl.appendChild(createCard(stage, index));
+    });
+    gridEl.appendChild(surface);
+    drawLinks();
+  }
+
+  function applyPlanToUi() {
+    nameEl.value = advancedPlan.name;
+    descriptionEl.value = advancedPlan.description;
+    loopEl.checked = advancedPlan.loopUntilComplete;
+    maxLoopsEl.value = String(advancedPlan.maxLoops);
+    completionMarkerEl.value = advancedPlan.completionMarker;
+    entryStageEl.value = advancedPlan.advanced.entryStageId || '';
+    maxStageExecutionsEl.value = String(advancedPlan.advanced.maxStageExecutions || 100);
+    renderGrid();
+  }
+
+  function recordOutputLog(result, promptText) {
+    const timestamp = new Date().toLocaleString();
+    const steps = Array.isArray(result.steps) ? result.steps : [];
+    outputLogEntries.push({
+      timestamp,
+      name: advancedPlan.name,
+      promptText,
+      iterations: result.iterations || 1,
+      completion: result.completed,
+      completionMarker: result.completionMarker || '',
+      steps
+    });
+
+    const lines = [
+      `Run @ ${timestamp}`,
+      `Plan: ${advancedPlan.name}`,
+      `Prompt: ${promptText || '(empty prompt)'}`,
+      `Iterations: ${result.iterations || 1}`,
+      `Completed: ${result.completed ? 'yes' : 'no'}`,
+      ''
+    ];
+    for (const step of steps) {
+      lines.push(`Iteration ${step.iteration} | ${step.name} (${step.id})`);
+      lines.push(step.output || '(empty output)');
+      lines.push('');
+    }
+    if (outputLogEl.textContent) {
+      outputLogEl.textContent += '\n\n========================================\n\n';
+    }
+    outputLogEl.textContent += lines.join('\n').trimEnd();
+    outputLogEl.scrollTop = outputLogEl.scrollHeight;
+  }
+
+  function renderOutput(result) {
+    outputEl.innerHTML = '';
+    const lines = [];
+    const steps = Array.isArray(result.steps) ? result.steps : [];
+    lines.push(`Plan: ${advancedPlan.name}`);
+    lines.push(`Iterations: ${result.iterations || 1}`);
+    lines.push(`Completed: ${result.completed ? 'yes' : 'no'}`);
+    lines.push('');
+    for (const step of steps) {
+      lines.push(`Iteration ${step.iteration} | ${step.name} (${step.id})`);
+      lines.push(step.output || '(empty output)');
+      lines.push('');
+      lastStageMetrics.set(step.id, {
+        durationMs: Number(step.durationMs || 0),
+        attempts: Number(step.attempts || 1),
+        recalledPromptTokens: Number(step.recalledPromptTokens || 0),
+        promptTokens: Number(step.usage?.promptTokens || 0),
+        completionTokens: Number(step.usage?.completionTokens || 0),
+        totalTokens: Number(step.usage?.totalTokens || 0),
+        contextWindow: Number(step.contextWindowTokens || 0),
+        success: step.success !== false
+      });
+    }
+    const pre = document.createElement('pre');
+    pre.className = 'diag-raw';
+    pre.textContent = lines.join('\n').trim();
+    outputEl.appendChild(pre);
+    outputEl.scrollTop = outputEl.scrollHeight;
+    renderGrid();
+  }
+
+  function renderPopoutLog() {
+    markdownEl.innerHTML = '';
+    if (!outputLogEntries.length) {
+      const empty = document.createElement('div');
+      empty.className = 'settings-help';
+      empty.textContent = 'No orchestration output has been logged yet.';
+      markdownEl.appendChild(empty);
+    } else {
+      outputLogEntries.forEach((entry, entryIndex) => {
+        const section = document.createElement('details');
+        section.className = 'orchestration-log-section';
+        section.open = entryIndex === outputLogEntries.length - 1;
+
+        const summary = document.createElement('summary');
+        summary.textContent = `${entry.timestamp} | ${entry.name} | ${entry.iterations} iteration(s)`;
+        section.appendChild(summary);
+
+        const meta = document.createElement('div');
+        meta.className = 'orchestration-log-meta assistant-markdown orchestration-log-markdown-content';
+        meta.innerHTML = renderMarkdownToHtml([
+          `**Prompt:** ${entry.promptText || '(empty prompt)'}`,
+          `**Completed:** ${entry.completion ? 'yes' : 'no'}`,
+          `**Completion Marker:** ${entry.completionMarker || '(none)'}`
+        ].join('\n\n'));
+        section.appendChild(meta);
+
+        const steps = Array.isArray(entry.steps) ? entry.steps : [];
+        if (!steps.length) {
+          const emptyStep = document.createElement('div');
+          emptyStep.className = 'settings-help';
+          emptyStep.textContent = '(no stage output)';
+          section.appendChild(emptyStep);
+        } else {
+          steps.forEach((step, stepIndex) => {
+            const stepDetails = document.createElement('details');
+            stepDetails.className = 'orchestration-log-step';
+            stepDetails.open = entryIndex === outputLogEntries.length - 1 && stepIndex === steps.length - 1;
+
+            const stepSummary = document.createElement('summary');
+            const toolCalls = Array.isArray(step.toolCalls) ? step.toolCalls : [];
+            stepSummary.textContent = `Iteration ${step.iteration} | ${step.name} (${step.id})${toolCalls.length ? ` | ${toolCalls.length} tool call(s)` : ''}`;
+            stepDetails.appendChild(stepSummary);
+
+            const stepBody = document.createElement('div');
+            stepBody.className = 'assistant-markdown orchestration-log-markdown-content orchestration-log-step-body';
+            stepBody.innerHTML = renderMarkdownToHtml(step.output || '(empty output)');
+            stepDetails.appendChild(stepBody);
+
+            appendToolCallsDetails(stepDetails, toolCalls);
+            section.appendChild(stepDetails);
+          });
+        }
+
+        markdownEl.appendChild(section);
+      });
+    }
+    modalEl.classList.add('open');
+    modalEl.setAttribute('aria-hidden', 'false');
+  }
+
+  async function reload() {
+    const plan = await window.llmIde.loadPlan();
+    advancedPlan = normalizePlan(plan);
+    if (!advancedPlan.advanced.stages.length) {
+      advancedPlan.advanced.stages.push(stageTemplate(0));
+    }
+    applyPlanToUi();
+  }
+
+  const offEvent = window.llmIde.onOrchestrationEvent(event => {
+    if (!advancedRunning) {
+      return;
+    }
+    appendLog(eventsEl, event);
+  });
+
+  addStageButton.addEventListener('click', () => {
+    advancedPlan.advanced.stages.push(stageTemplate(advancedPlan.advanced.stages.length));
+    renderGrid();
+  });
+
+  addLinkButton.addEventListener('click', () => {
+    connectMode = !connectMode;
+    addLinkButton.textContent = connectMode ? 'Exit Connect Mode' : 'Add Link';
+    status.textContent = connectMode
+      ? 'Connect mode enabled: drag from a stage output handle to another stage input handle.'
+      : 'Connect mode disabled.';
+    renderGrid();
+  });
+
+  fullscreenToggleButton?.addEventListener('click', () => {
+    advancedFullscreenRequested = !advancedFullscreenRequested;
+    syncAdvancedFullscreenUi();
+    status.textContent = advancedFullscreenRequested
+      ? 'Advanced full screen enabled'
+      : 'Advanced full screen disabled';
+  });
+
+  loadButton.addEventListener('click', async () => {
+    try {
+      await reload();
+      status.textContent = 'Advanced plan loaded';
+    } catch (error) {
+      status.textContent = `Load failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  });
+
+  importButton.addEventListener('click', async () => {
+    try {
+      const imported = await window.llmIde.importPlan();
+      if (!imported) {
+        status.textContent = 'Import canceled';
+        return;
+      }
+
+      advancedPlan = normalizePlan(imported.plan);
+      if (!advancedPlan.advanced.stages.length) {
+        advancedPlan.advanced.stages.push(stageTemplate(0));
+      }
+      applyPlanToUi();
+
+      const fileName = imported.filePath.split(/[/\\]/).pop() || imported.filePath;
+      status.textContent = `Imported advanced plan: ${fileName}`;
+    } catch (error) {
+      status.textContent = `Import failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  });
+
+  exportButton.addEventListener('click', async () => {
+    try {
+      const plan = buildPlanFromUi();
+      const advancedOnlyPlan = {
+        ...plan,
+        steps: []
+      };
+      const exported = await window.llmIde.exportPlan(advancedOnlyPlan);
+      if (!exported) {
+        status.textContent = 'Export canceled';
+        return;
+      }
+
+      const fileName = exported.filePath.split(/[/\\]/).pop() || exported.filePath;
+      status.textContent = `Exported advanced plan: ${fileName}`;
+    } catch (error) {
+      status.textContent = `Export failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  });
+
+  validateButton.addEventListener('click', async () => {
+    try {
+      const plan = buildPlanFromUi();
+      const errors = await window.llmIde.validatePlan(JSON.stringify(plan));
+      status.textContent = errors.length ? `Invalid plan: ${errors.join(' | ')}` : 'Plan is valid';
+    } catch (error) {
+      status.textContent = `Validation failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  });
+
+  saveButton.addEventListener('click', async () => {
+    try {
+      const plan = buildPlanFromUi();
+      await window.llmIde.savePlan(plan);
+      status.textContent = 'Advanced plan saved';
+    } catch (error) {
+      status.textContent = `Save failed: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  });
+
+  runButton.addEventListener('click', async () => {
+    eventsEl.textContent = '';
+    outputEl.innerHTML = '';
+    status.textContent = 'Running advanced orchestration...';
+    setRunning(true);
+
+    try {
+      const plan = buildPlanFromUi();
+      const promptText = promptEl.value.trim();
+      const result = await window.llmIde.runOrchestration({
+        plan,
+        prompt: promptText,
+        requestTimeoutMs: settingsState.requestTimeoutMs
+      });
+      renderOutput(result);
+      recordOutputLog(result, promptText);
+      if (Array.isArray(result.usageByModel)) {
+        recordModelUsage(result.usageByModel);
+      }
+      status.textContent = 'Advanced run complete';
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      outputEl.textContent = `Run failed: ${message}`;
+      status.textContent = /stopped by user|canceled/i.test(message) ? 'Run stopped' : 'Run failed';
+    } finally {
+      setRunning(false);
+    }
+  });
+
+  stopButton.addEventListener('click', async () => {
+    if (!advancedRunning) {
+      return;
+    }
+    stopButton.disabled = true;
+    status.textContent = 'Stopping advanced orchestration...';
+    try {
+      await window.llmIde.stopOrchestration();
+    } catch (error) {
+      status.textContent = `Stop failed: ${error instanceof Error ? error.message : String(error)}`;
+      stopButton.disabled = false;
+    }
+  });
+
+  clearOutputLogButton.addEventListener('click', () => {
+    outputLogEntries.length = 0;
+    outputLogEl.textContent = '';
+    status.textContent = 'Output log cleared';
+  });
+
+  popoutOutputLogButton.addEventListener('click', () => {
+    renderPopoutLog();
+  });
+
+  nameEl.addEventListener('input', () => {
+    advancedPlan.name = nameEl.value.trim() || advancedPlan.name;
+  });
+  descriptionEl.addEventListener('input', () => {
+    advancedPlan.description = descriptionEl.value.trim() || advancedPlan.description;
+  });
+
+  await reload();
+  syncAdvancedFullscreenUi();
   window.addEventListener('beforeunload', () => {
     offEvent();
   });
@@ -3157,6 +4458,7 @@ async function main() {
   renderContextUsageGraph();
   document.getElementById('chatTab').addEventListener('click', () => setActiveTab('chat'));
   document.getElementById('orchTab').addEventListener('click', () => setActiveTab('orchestration'));
+  document.getElementById('orchAdvancedTab').addEventListener('click', () => setActiveTab('orchestration-advanced'));
   document.getElementById('diagTab').addEventListener('click', () => setActiveTab('diagnostics'));
   document.getElementById('openSample').addEventListener('click', () => {
     openScratchTab(
@@ -3179,6 +4481,7 @@ async function main() {
   await initWorkspaceTree();
   await initChat();
   await initOrchestration();
+  await initAdvancedOrchestration();
   await initDiagnostics();
 }
 

@@ -1,6 +1,17 @@
 import { chatWithTools } from './llmClient';
 import { executeTool, getAllowedToolDefinitions } from './toolRuntime';
-import { ChatMessage, LLMConfig, ModelUsage, OrchestrationPlan, OrchestrationRunResult, OrchestrationRunStep, TokenUsage } from '../shared/types';
+import {
+  AgenticLink,
+  AgenticStage,
+  ChatMessage,
+  LLMConfig,
+  ModelUsage,
+  OrchestrationPlan,
+  OrchestrationRunResult,
+  OrchestrationRunStep,
+  OrchestrationStep,
+  TokenUsage
+} from '../shared/types';
 import { RetrievedMemoryItem } from './turboVecMemory';
 
 export interface RuntimeContext {
@@ -125,46 +136,136 @@ function formatRecalledMemory(items: RetrievedMemoryItem[]): string {
   return lines.join('\n');
 }
 
-async function runSingleIteration(
-  plan: OrchestrationPlan,
+function matchesBranchPattern(matchPattern: string | undefined, value: string): boolean {
+  const pattern = String(matchPattern ?? '').trim();
+  if (!pattern) {
+    return true;
+  }
+
+  try {
+    return new RegExp(pattern, 'i').test(value);
+  } catch {
+    return value.toLowerCase().includes(pattern.toLowerCase());
+  }
+}
+
+function linkMatchesOutcome(link: AgenticLink, status: 'success' | 'error', detail: string): boolean {
+  const condition = String(link.condition ?? '').trim();
+  if (!condition || condition === 'always') {
+    return matchesBranchPattern(link.matchPattern, detail);
+  }
+
+  if (condition === 'success') {
+    return status === 'success' && matchesBranchPattern(link.matchPattern, detail);
+  }
+
+  if (condition === 'error') {
+    return status === 'error' && matchesBranchPattern(link.matchPattern, detail);
+  }
+
+  if (condition.startsWith('error:')) {
+    if (status !== 'error') {
+      return false;
+    }
+    const tag = condition.slice('error:'.length).trim().toLowerCase();
+    if (!tag) {
+      return matchesBranchPattern(link.matchPattern, detail);
+    }
+    return detail.toLowerCase().includes(tag) && matchesBranchPattern(link.matchPattern, detail);
+  }
+
+  return false;
+}
+
+function clampMaxRetries(value: unknown): number {
+  const parsed = Math.floor(Number(value) || 0);
+  return Math.max(0, Math.min(10, parsed));
+}
+
+function normalizeAdvancedStage(stage: AgenticStage): OrchestrationStep {
+  return {
+    id: stage.id,
+    name: stage.name,
+    provider: stage.provider,
+    endpoint: stage.endpoint,
+    model: stage.model,
+    contextWindowTokens: stage.contextWindowTokens,
+    apiKey: stage.apiKey,
+    systemPrompt: stage.systemPrompt,
+    temperature: stage.temperature,
+    maxTokens: stage.maxTokens,
+    maxToolTurns: stage.maxToolTurns,
+    maxRetries: stage.maxRetries,
+    tools: Array.isArray(stage.tools) ? stage.tools : [],
+    passOutputToNext: stage.passOutputToNext,
+    allowCompletionTool: stage.allowCompletionTool
+  };
+}
+
+interface StepExecutionResult {
+  stepRecords: OrchestrationRunStep[];
+  taskCompleted: boolean;
+  completionSummary: string;
+  handoffText: string;
+  status: 'success' | 'error';
+  errorDetail?: string;
+}
+
+async function runStepWithRetries(
+  step: OrchestrationStep,
   originalPrompt: string,
-  iterationPrompt: string,
+  stepInput: string,
   iteration: number,
+  loopMode: boolean,
   options?: OrchestrationRunOptions,
   onEvent?: (event: string) => void,
   runtimeContext?: RuntimeContext,
   memoryAdapter?: OrchestrationMemoryAdapter,
-  signal?: AbortSignal
-): Promise<{ steps: OrchestrationRunStep[]; taskCompleted: boolean; completionSummary: string }> {
-  let priorOutput = iterationPrompt;
+  signal?: AbortSignal,
+): Promise<StepExecutionResult> {
   const originalPromptForModel = truncateText(originalPrompt, 4000);
-  const iterationSteps: OrchestrationRunStep[] = [];
-  const isLooping = Boolean(plan.loopUntilComplete);
   const COMPLETION_TOOL = 'complete_orchestration_task';
+  const stepToolCalls: Array<{ name: string; intent: string; timestamp: string }> = [];
+  const stepMaxToolTurns = Math.max(1, Math.min(200, Math.floor(Number(step.maxToolTurns ?? 40) || 40)));
+  const maxRetries = clampMaxRetries(step.maxRetries);
+  const allowedToolNames = step.tools.filter(tool => tool.enabled).map(tool => tool.name);
+  const allowCompletionTool = Boolean(step.allowCompletionTool);
 
-  for (const step of plan.steps) {
-    onEvent?.(`step:start:${step.name}:iteration:${iteration}`);
-    let recalledPromptTokens = 0;
-    const allowCompletionTool = Boolean(step.allowCompletionTool);
+  const config: LLMConfig = {
+    endpoint: step.endpoint,
+    provider: step.provider,
+    model: step.model,
+    apiKey: step.apiKey,
+    temperature: step.temperature ?? 0.2,
+    maxTokens: step.maxTokens,
+    contextWindowTokens: Math.max(0, Number(step.contextWindowTokens ?? 0)) || undefined,
+    requestTimeoutMs: Number(options?.requestTimeoutMs || 0) || undefined
+  };
 
-    const config: LLMConfig = {
-      endpoint: step.endpoint,
-      provider: step.provider,
-      model: step.model,
-      apiKey: step.apiKey,
-      temperature: step.temperature ?? 0.2,
-      maxTokens: step.maxTokens,
-      contextWindowTokens: Math.max(0, Number(step.contextWindowTokens ?? 0)) || undefined,
-      requestTimeoutMs: Number(options?.requestTimeoutMs || 0) || undefined
-    };
+  let attempt = 0;
+  let lastErrorDetail = '';
+  let recalledPromptTokens = 0;
+  let completionSummary = '';
+  let taskCompleted = false;
 
+  while (attempt <= maxRetries) {
     const messages: ChatMessage[] = [];
     if (step.systemPrompt?.trim()) {
       messages.push({ role: 'system', content: step.systemPrompt });
     }
 
+    if (lastErrorDetail) {
+      messages.push({
+        role: 'system',
+        content:
+          `Previous attempt failed in this stage with: ${truncateText(lastErrorDetail, 1200)}\n` +
+          'Retry this stage by fixing the issue directly. Keep output concise and continue from the existing stage input.'
+      });
+    }
+
+    recalledPromptTokens = 0;
     if (memoryAdapter) {
-      const recalled = await memoryAdapter.retrieve(config, `${originalPrompt}\n\n${priorOutput}`, step.name);
+      const recalled = await memoryAdapter.retrieve(config, `${originalPrompt}\n\n${stepInput}`, step.name);
       if (recalled.length > 0) {
         const recalledBlock = formatRecalledMemory(recalled);
         messages.push({
@@ -179,27 +280,20 @@ async function runSingleIteration(
 
     messages.push({
       role: 'user',
-      content: `Original request:\n${originalPromptForModel}\n\nStep input:\n${truncateText(priorOutput, 12000)}`
+      content: `Original request:\n${originalPromptForModel}\n\nStep input:\n${truncateText(stepInput, 12000)}`
     });
 
-    const allowedToolNames = step.tools.filter(tool => tool.enabled).map(tool => tool.name);
     let toolDefs = getAllowedToolDefinitions(allowedToolNames);
-
-    // Auto-inject the completion tool on every step when running in loop mode.
-    if (isLooping && allowCompletionTool) {
+    if (loopMode && allowCompletionTool) {
       const completionDef = getAllowedToolDefinitions([COMPLETION_TOOL]);
       if (completionDef.length > 0 && !toolDefs.some(t => t.function.name === COMPLETION_TOOL)) {
         toolDefs = [...toolDefs, completionDef[0]];
       }
     }
 
-    let taskCompleted = false;
-    let completionSummary = '';
-    const stepToolCalls: Array<{ name: string; intent: string; timestamp: string }> = [];
-    const stepMaxToolTurns = Math.max(1, Math.min(200, Math.floor(Number(step.maxToolTurns ?? 40) || 40)));
+    onEvent?.(`step:attempt:${step.name}:iteration:${iteration}:${attempt + 1}/${maxRetries + 1}`);
+    const startedAt = Date.now();
 
-    let output = '';
-    let usage: TokenUsage | undefined;
     try {
       const result = await chatWithTools(
         config,
@@ -237,45 +331,254 @@ async function runSingleIteration(
         stepMaxToolTurns,
         signal
       );
-      output = result.text;
-      usage = result.usage;
+
+      const durationMs = Date.now() - startedAt;
+      const rawOutput = String(result.text ?? '');
+      const handoffSummary = String(result.continuationSummary ?? '').trim();
+      const budgetExhausted = Boolean(result.toolBudgetExhausted);
+
+      const handoffText = budgetExhausted
+        ? truncateText(
+            [
+              `Stage ${step.name} exhausted its tool-call budget (${stepMaxToolTurns}).`,
+              handoffSummary || rawOutput
+            ].join('\n\n'),
+            12000
+          )
+        : truncateText(rawOutput, 12000);
+
+      if (memoryAdapter) {
+        await memoryAdapter.store(config, rawOutput, step.name);
+      }
+
+      return {
+        stepRecords: [
+          {
+            id: step.id,
+            name: step.name,
+            output: rawOutput,
+            iteration,
+            model: step.model,
+            usage: result.usage,
+            recalledPromptTokens: Math.max(0, Number(recalledPromptTokens ?? 0)),
+            contextWindowTokens: Math.max(0, Number(step.contextWindowTokens ?? 0)),
+            toolCalls: stepToolCalls.length > 0 ? stepToolCalls : undefined,
+            durationMs,
+            attempts: attempt + 1,
+            success: true,
+            toolBudgetExhausted: budgetExhausted,
+            continuationSummary: handoffSummary || undefined
+          }
+        ],
+        taskCompleted,
+        completionSummary,
+        handoffText,
+        status: 'success'
+      };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
       if (/canceled$/i.test(detail) || /stopped by user/i.test(detail)) {
         throw new Error(`Orchestration stopped by user during step ${step.name} (iteration ${iteration}).`);
       }
-      throw new Error(
-        `Orchestration step failed: step=${step.name} id=${step.id} iteration=${iteration} endpoint=${step.endpoint} model=${step.model} | ${detail}`
-      );
-    }
 
-    if (memoryAdapter) {
-      await memoryAdapter.store(config, output, step.name);
-    }
+      lastErrorDetail = detail;
+      if (attempt < maxRetries) {
+        onEvent?.(`step:retry:${step.name}:iteration:${iteration}:${attempt + 1}/${maxRetries} | ${truncateText(detail, 400)}`);
+        attempt += 1;
+        continue;
+      }
 
-    iterationSteps.push({
-      id: step.id,
-      name: step.name,
-      output,
+      const durationMs = Date.now() - startedAt;
+      const errorText =
+        `Stage ${step.name} failed after ${maxRetries + 1} attempt(s). ` +
+        `Moving to next stage.\n\n${detail}`;
+
+      return {
+        stepRecords: [
+          {
+            id: step.id,
+            name: step.name,
+            output: errorText,
+            iteration,
+            model: step.model,
+            recalledPromptTokens: Math.max(0, Number(recalledPromptTokens ?? 0)),
+            contextWindowTokens: Math.max(0, Number(step.contextWindowTokens ?? 0)),
+            toolCalls: stepToolCalls.length > 0 ? stepToolCalls : undefined,
+            durationMs,
+            attempts: attempt + 1,
+            success: false,
+            error: detail
+          }
+        ],
+        taskCompleted: false,
+        completionSummary: '',
+        handoffText: truncateText(errorText, 12000),
+        status: 'error',
+        errorDetail: detail
+      };
+    }
+  }
+
+  return {
+    stepRecords: [],
+    taskCompleted: false,
+    completionSummary: '',
+    handoffText: truncateText(stepInput, 12000),
+    status: 'error',
+    errorDetail: 'Unexpected orchestration retry state.'
+  };
+}
+
+async function runSingleIteration(
+  plan: OrchestrationPlan,
+  originalPrompt: string,
+  iterationPrompt: string,
+  iteration: number,
+  options?: OrchestrationRunOptions,
+  onEvent?: (event: string) => void,
+  runtimeContext?: RuntimeContext,
+  memoryAdapter?: OrchestrationMemoryAdapter,
+  signal?: AbortSignal
+): Promise<{ steps: OrchestrationRunStep[]; taskCompleted: boolean; completionSummary: string }> {
+  let priorOutput = iterationPrompt;
+  const iterationSteps: OrchestrationRunStep[] = [];
+
+  for (const step of plan.steps) {
+    onEvent?.(`step:start:${step.name}:iteration:${iteration}`);
+    const outcome = await runStepWithRetries(
+      step,
+      originalPrompt,
+      priorOutput,
       iteration,
-      model: step.model,
-      usage,
-      recalledPromptTokens: Math.max(0, Number(recalledPromptTokens ?? 0)),
-      contextWindowTokens: Math.max(0, Number(step.contextWindowTokens ?? 0)),
-      toolCalls: stepToolCalls.length > 0 ? stepToolCalls : undefined
-    });
+      Boolean(plan.loopUntilComplete),
+      options,
+      onEvent,
+      runtimeContext,
+      memoryAdapter,
+      signal
+    );
+
+    iterationSteps.push(...outcome.stepRecords);
     onEvent?.(`step:end:${step.name}:iteration:${iteration}`);
 
-    if (taskCompleted) {
-      return { steps: iterationSteps, taskCompleted: true, completionSummary };
+    if (outcome.taskCompleted) {
+      return { steps: iterationSteps, taskCompleted: true, completionSummary: outcome.completionSummary };
     }
 
-    if (step.passOutputToNext) {
-      priorOutput = truncateText(output, 12000);
+    if (step.passOutputToNext || outcome.status === 'error' || outcome.stepRecords.some(s => s.toolBudgetExhausted)) {
+      priorOutput = truncateText(outcome.handoffText, 12000);
     }
   }
 
   return { steps: iterationSteps, taskCompleted: false, completionSummary: '' };
+}
+
+async function runAdvancedIteration(
+  plan: OrchestrationPlan,
+  originalPrompt: string,
+  iterationPrompt: string,
+  iteration: number,
+  options?: OrchestrationRunOptions,
+  onEvent?: (event: string) => void,
+  runtimeContext?: RuntimeContext,
+  memoryAdapter?: OrchestrationMemoryAdapter,
+  signal?: AbortSignal
+): Promise<{ steps: OrchestrationRunStep[]; taskCompleted: boolean; completionSummary: string }> {
+  const advanced = plan.advanced;
+  if (!advanced?.enabled || !Array.isArray(advanced.stages) || advanced.stages.length === 0) {
+    return runSingleIteration(
+      plan,
+      originalPrompt,
+      iterationPrompt,
+      iteration,
+      options,
+      onEvent,
+      runtimeContext,
+      memoryAdapter,
+      signal
+    );
+  }
+
+  const stages = advanced.stages.map(normalizeAdvancedStage);
+  const stageById = new Map(stages.map(stage => [stage.id, stage]));
+  const links = Array.isArray(advanced.links) ? advanced.links : [];
+  const entryStageId = (advanced.entryStageId && stageById.has(advanced.entryStageId)) ? advanced.entryStageId : stages[0].id;
+  const maxStageExecutions = Math.max(1, Math.min(300, Math.floor(Number(advanced.maxStageExecutions ?? 100) || 100)));
+
+  const queue: string[] = [entryStageId];
+  const queued = new Set<string>([entryStageId]);
+  const stageInputs = new Map<string, string[]>();
+  stageInputs.set(entryStageId, [iterationPrompt]);
+
+  const runSteps: OrchestrationRunStep[] = [];
+  let stageExecutions = 0;
+
+  while (queue.length > 0 && stageExecutions < maxStageExecutions) {
+    const stageId = String(queue.shift() ?? '');
+    queued.delete(stageId);
+    const stage = stageById.get(stageId);
+    if (!stage) {
+      continue;
+    }
+
+    const pendingInputs = stageInputs.get(stageId) ?? [iterationPrompt];
+    stageInputs.delete(stageId);
+    const mergedInput = truncateText(pendingInputs.join('\n\n---\n\n'), 12000);
+
+    onEvent?.(`graph:stage:start:${stage.name}:iteration:${iteration}`);
+    const outcome = await runStepWithRetries(
+      stage,
+      originalPrompt,
+      mergedInput,
+      iteration,
+      Boolean(plan.loopUntilComplete),
+      options,
+      onEvent,
+      runtimeContext,
+      memoryAdapter,
+      signal
+    );
+    runSteps.push(...outcome.stepRecords);
+    stageExecutions += 1;
+    onEvent?.(`graph:stage:end:${stage.name}:iteration:${iteration}:${outcome.status}`);
+
+    if (outcome.taskCompleted) {
+      return {
+        steps: runSteps,
+        taskCompleted: true,
+        completionSummary: outcome.completionSummary
+      };
+    }
+
+    const detailForBranching = `${outcome.handoffText}\n${outcome.errorDetail ?? ''}`;
+    const nextLinks = links.filter(link => link.fromStageId === stageId && linkMatchesOutcome(link, outcome.status, detailForBranching));
+    if (nextLinks.length === 0) {
+      continue;
+    }
+
+    for (const link of nextLinks) {
+      if (!stageById.has(link.toStageId)) {
+        continue;
+      }
+      const bucket = stageInputs.get(link.toStageId) ?? [];
+      bucket.push(`Input from ${stage.name} (${link.condition}):\n${outcome.handoffText}`);
+      stageInputs.set(link.toStageId, bucket);
+      if (!queued.has(link.toStageId)) {
+        queue.push(link.toStageId);
+        queued.add(link.toStageId);
+      }
+    }
+  }
+
+  if (stageExecutions >= maxStageExecutions) {
+    onEvent?.(`graph:limit-reached:${maxStageExecutions}`);
+  }
+
+  return {
+    steps: runSteps,
+    taskCompleted: false,
+    completionSummary: ''
+  };
 }
 
 export async function runOrchestration(
@@ -301,17 +604,30 @@ export async function runOrchestration(
   for (let iteration = 1; iteration <= loopLimit; iteration += 1) {
     onEvent?.(`loop:start:${iteration}`);
 
-    const { steps: iterationSteps, taskCompleted, completionSummary } = await runSingleIteration(
-      plan,
-      userPrompt,
-      iterationPrompt,
-      iteration,
-      options,
-      onEvent,
-      runtimeContext,
-      memoryAdapter,
-      signal
-    );
+    const useAdvancedGraph = Boolean(plan.advanced?.enabled && Array.isArray(plan.advanced?.stages) && plan.advanced.stages.length > 0);
+    const { steps: iterationSteps, taskCompleted, completionSummary } = useAdvancedGraph
+      ? await runAdvancedIteration(
+          plan,
+          userPrompt,
+          iterationPrompt,
+          iteration,
+          options,
+          onEvent,
+          runtimeContext,
+          memoryAdapter,
+          signal
+        )
+      : await runSingleIteration(
+          plan,
+          userPrompt,
+          iterationPrompt,
+          iteration,
+          options,
+          onEvent,
+          runtimeContext,
+          memoryAdapter,
+          signal
+        );
 
     allSteps.push(...iterationSteps);
     finalOutput = iterationSteps.length ? iterationSteps[iterationSteps.length - 1].output : '';

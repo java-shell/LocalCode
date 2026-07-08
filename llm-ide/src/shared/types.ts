@@ -35,6 +35,7 @@ export interface ChatStreamRequest {
   maxToolTurns?: number;
   memoryNamespace?: string;
   contextWindowTokens?: number;
+  chatDebugDumpsEnabled?: boolean;
 }
 
 export interface OrchestrationRunRequest {
@@ -102,9 +103,31 @@ export interface OrchestrationStep {
   temperature?: number;
   maxTokens?: number;
   maxToolTurns?: number;
+  maxRetries?: number;
   tools: ToolPermission[];
   passOutputToNext: boolean;
   allowCompletionTool?: boolean;
+}
+
+export interface AgenticLink {
+  id: string;
+  fromStageId: string;
+  toStageId: string;
+  condition: 'always' | 'success' | 'error' | `error:${string}`;
+  matchPattern?: string;
+}
+
+export interface AgenticStage extends OrchestrationStep {
+  positionX?: number;
+  positionY?: number;
+}
+
+export interface AdvancedOrchestrationConfig {
+  enabled: boolean;
+  entryStageId?: string;
+  maxStageExecutions?: number;
+  stages: AgenticStage[];
+  links: AgenticLink[];
 }
 
 export interface OrchestrationPlan {
@@ -115,6 +138,7 @@ export interface OrchestrationPlan {
   maxLoops?: number;
   completionMarker?: string;
   steps: OrchestrationStep[];
+  advanced?: AdvancedOrchestrationConfig;
 }
 
 export interface OrchestrationToolCallRecord {
@@ -131,6 +155,12 @@ export interface OrchestrationRunStep {
   model: string;
   recalledPromptTokens?: number;
   contextWindowTokens?: number;
+  durationMs?: number;
+  attempts?: number;
+  success?: boolean;
+  error?: string;
+  toolBudgetExhausted?: boolean;
+  continuationSummary?: string;
   usage?: TokenUsage;
   toolCalls?: OrchestrationToolCallRecord[];
 }

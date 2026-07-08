@@ -75,6 +75,7 @@
         <div class="tabs">
           <button id="chatTab" class="tab active">Chat</button>
           <button id="orchTab" class="tab">Orchestration</button>
+          <button id="orchAdvancedTab" class="tab">Advanced Orchestration</button>
           <button id="diagTab" class="tab">Diagnostics</button>
         </div>
 
@@ -194,6 +195,57 @@
           <label class="label">Raw Diagnostics</label>
           <pre id="diagRaw" class="diag-raw"></pre>
         </section>
+
+        <section id="orchAdvancedView" class="view">
+          <div id="orchAdvancedStatus" class="status">Advanced plan ready</div>
+          <label class="label" for="orchAdvancedPrompt">Advanced Orchestration Prompt</label>
+          <textarea id="orchAdvancedPrompt" placeholder="Describe the objective for this agentic graph..."></textarea>
+          <div class="actions">
+            <button id="orchAdvancedLoad">Load</button>
+            <button id="orchAdvancedImport">Import JSON</button>
+            <button id="orchAdvancedExport">Export JSON</button>
+            <button id="orchAdvancedValidate">Validate</button>
+            <button id="orchAdvancedSave">Save</button>
+            <button id="orchAdvancedRun">Run</button>
+            <button id="orchAdvancedStop" type="button" disabled>Stop</button>
+            <button id="orchAdvancedFullscreenToggle" type="button" aria-pressed="false">Full Screen</button>
+          </div>
+          <label class="label" for="orchAdvancedPlanName">Workflow Name</label>
+          <input id="orchAdvancedPlanName" placeholder="Agentic Workflow" />
+          <label class="label" for="orchAdvancedPlanDescription">Workflow Description</label>
+          <textarea id="orchAdvancedPlanDescription" placeholder="Describe what this graph does"></textarea>
+          <div class="row-inline">
+            <label class="orch-tool-item">
+              <input id="orchAdvancedLoopUntilComplete" type="checkbox" />
+              Loop Until Complete
+            </label>
+            <input id="orchAdvancedMaxLoops" type="number" min="1" max="20" step="1" value="3" placeholder="Max loops" />
+          </div>
+          <label class="label" for="orchAdvancedCompletionMarker">Completion Marker</label>
+          <input id="orchAdvancedCompletionMarker" placeholder="TASK_COMPLETE" />
+          <div class="row-inline">
+            <input id="orchAdvancedEntryStage" placeholder="Entry stage id (optional)" />
+            <input id="orchAdvancedMaxStageExecutions" type="number" min="1" max="300" step="1" value="100" placeholder="Max stage executions" />
+          </div>
+          <div class="orch-workflow-header">
+            <span class="label">Agentic Stages Grid</span>
+            <div class="orch-step-actions">
+              <button id="orchAdvancedAddStage" type="button">Add Agentic Stage</button>
+              <button id="orchAdvancedAddLink" type="button">Add Link</button>
+            </div>
+          </div>
+          <div id="orchAdvancedGrid" class="orch-advanced-grid"></div>
+          <label class="label">Run Events</label>
+          <div id="orchAdvancedEvents" class="log"></div>
+          <label class="label">Run Output</label>
+          <div id="orchAdvancedOutput" class="log"></div>
+          <div class="actions actions-two">
+            <button id="orchAdvancedClearOutputLog" type="button">Clear Output Log</button>
+            <button id="orchAdvancedPopoutOutputLog" type="button">Popout Markdown Log</button>
+          </div>
+          <label class="label">Orchestration Output Log</label>
+          <div id="orchAdvancedOutputLog" class="log"></div>
+        </section>
       </aside>
     </main>
   </div>
@@ -232,6 +284,10 @@
       <input id="settingModel" placeholder="llama3" />
       <label class="label" for="settingApiKey">Default API Key (optional)</label>
       <input id="settingApiKey" type="password" placeholder="sk-..." />
+      <label class="orch-tool-item" for="settingChatDebugDumpsEnabled">
+        <input id="settingChatDebugDumpsEnabled" type="checkbox" />
+        Enable chat debug dumps
+      </label>
       <div class="settings-help">Defaults: max tool turns 40, timeout 180000 ms (3 minutes).</div>
       <div class="settings-actions">
         <button id="settingsCancel" type="button">Cancel</button>

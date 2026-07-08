@@ -65,6 +65,8 @@ export interface ModelCatalog {
 export interface ChatWithToolsResult {
   text: string;
   usage: TokenUsage;
+  toolBudgetExhausted?: boolean;
+  continuationSummary?: string;
   debug?: {
     initialMessageCount: number;
     finalMessageCount: number;
@@ -691,6 +693,7 @@ export async function chatWithTools(
   const messages = [...initialMessages];
   const maxTurns = Math.max(1, Math.min(200, Math.floor(maxToolTurns || 40)));
   let activeTools = tools;
+  const isToolAllowed = (name: string): boolean => activeTools.some(tool => tool.function.name === name);
   let providerToolParseFailures = 0;
   const useOllamaNativeChat = shouldUseOllamaNativeChat(config);
   const ollamaNativeEndpoint = useOllamaNativeChat ? deriveOllamaNativeChatEndpoint(config.endpoint) : undefined;
@@ -958,6 +961,18 @@ export async function chatWithTools(
 
     for (const call of assistant.tool_calls) {
       const toolName = call.function.name;
+      if (!isToolAllowed(toolName)) {
+        onEvent?.(`tool-blocked:${toolName}`);
+        messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          content: clampToolResultForPrompt(safeJsonStringify({
+            ok: false,
+            error: `Tool ${toolName} is not allowed for this step.`
+          }))
+        });
+        continue;
+      }
       let parsedArgs: unknown = {};
       try {
         parsedArgs = call.function.arguments ? JSON.parse(call.function.arguments) : {};
@@ -1010,6 +1025,8 @@ export async function chatWithTools(
       return {
         text: `${exhaustedMessage}\n\n${summary}`,
         usage: usageTotals,
+        toolBudgetExhausted: true,
+        continuationSummary: summary,
         debug: buildDebug()
       };
     }
@@ -1020,6 +1037,7 @@ export async function chatWithTools(
   return {
     text: `${exhaustedMessage}\n\nSummary unavailable. Please continue from this state or raise the per-step tool-call budget.`,
     usage: usageTotals,
+    toolBudgetExhausted: true,
     debug: buildDebug()
   };
 }
