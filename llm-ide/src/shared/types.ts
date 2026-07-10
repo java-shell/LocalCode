@@ -183,6 +183,25 @@ export interface OrchestrationExportResult {
   filePath: string;
 }
 
+export interface MemoryNamespaceExportResult {
+  ok: boolean;
+  canceled?: boolean;
+  reason?: string;
+  filePath?: string;
+  namespace?: string;
+  recordCount?: number;
+}
+
+export interface MemoryNamespaceImportResult {
+  ok: boolean;
+  canceled?: boolean;
+  reason?: string;
+  filePath?: string;
+  namespace?: string;
+  replaced?: boolean;
+  recordCount?: number;
+}
+
 export interface ToolDefinition {
   type: 'function';
   function: {

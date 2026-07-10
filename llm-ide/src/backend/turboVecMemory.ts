@@ -117,6 +117,26 @@ export interface TurboVecDiagnostics {
   graphrag: GraphRagNamespaceDiagnostics;
 }
 
+export interface TurboVecNamespaceArchiveV1 {
+  format: 'localcode.turbovec.namespace.v1';
+  namespace: string;
+  exportedAt: string;
+  recordCount: number;
+  metadataJsonl: string;
+  indexBase64?: string;
+}
+
+export interface TurboVecImportNamespaceOptions {
+  targetNamespace?: string;
+  overwrite?: boolean;
+}
+
+export interface TurboVecImportNamespaceResult {
+  namespace: string;
+  replaced: boolean;
+  recordCount: number;
+}
+
 const ZERO_LINK_HITS: GraphRagLinkHitCounters = {
   sequential: 0,
   explicit: 0,
@@ -581,6 +601,66 @@ export class TurboVecMemory {
     return { namespace: sanitized, cleared: true };
   }
 
+  async exportNamespaceArchive(namespace: string): Promise<TurboVecNamespaceArchiveV1> {
+    const sanitized = sanitizeNamespace(namespace);
+    const paths = await this.memoryPaths(sanitized);
+    const metadataRaw = await fs.readFile(paths.metaPath, 'utf8').catch(() => '');
+    if (!metadataRaw.trim()) {
+      throw new Error(`Namespace ${sanitized} has no metadata to export.`);
+    }
+
+    const metadataJsonl = this.normalizeMetadataJsonl(metadataRaw);
+    const indexBuffer = await fs.readFile(paths.indexPath).catch(() => null as Buffer | null);
+
+    return {
+      format: 'localcode.turbovec.namespace.v1',
+      namespace: sanitized,
+      exportedAt: new Date().toISOString(),
+      recordCount: this.countMetadataLines(metadataJsonl),
+      metadataJsonl,
+      indexBase64: indexBuffer && indexBuffer.length > 0 ? indexBuffer.toString('base64') : undefined
+    };
+  }
+
+  async importNamespaceArchive(
+    archive: unknown,
+    options: TurboVecImportNamespaceOptions = {}
+  ): Promise<TurboVecImportNamespaceResult> {
+    const normalized = this.normalizeArchivePayload(archive);
+    const targetNamespace = sanitizeNamespace(options.targetNamespace || normalized.namespace);
+    const overwrite = Boolean(options.overwrite);
+    const targetDir = path.join(this.rootDir, targetNamespace);
+    const existed = await fs.stat(targetDir).then(() => true).catch(() => false);
+
+    if (existed && !overwrite) {
+      throw new Error(`Namespace ${targetNamespace} already exists. Enable overwrite to replace it.`);
+    }
+
+    if (existed) {
+      await fs.rm(targetDir, { recursive: true, force: true });
+    }
+    await fs.mkdir(targetDir, { recursive: true });
+
+    const indexPath = path.join(targetDir, 'memory.tvec');
+    const metaPath = path.join(targetDir, 'memory.jsonl');
+
+    await fs.writeFile(metaPath, normalized.metadataJsonl, 'utf8');
+    if (normalized.indexBase64) {
+      const decoded = Buffer.from(normalized.indexBase64, 'base64');
+      if (decoded.length > 0) {
+        await fs.writeFile(indexPath, decoded);
+      }
+    }
+
+    this.graphRagStatsByNamespace.delete(targetNamespace);
+
+    return {
+      namespace: targetNamespace,
+      replaced: existed,
+      recordCount: this.countMetadataLines(normalized.metadataJsonl)
+    };
+  }
+
   private recordGraphRagRetrieval(
     namespace: string,
     payload: {
@@ -851,6 +931,65 @@ export class TurboVecMemory {
     }
 
     return items;
+  }
+
+  private countMetadataLines(raw: string): number {
+    return raw
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean).length;
+  }
+
+  private normalizeMetadataJsonl(raw: string): string {
+    const lines = raw
+      .split(/\r?\n/)
+      .map(line => line.trim())
+      .filter(Boolean);
+
+    if (lines.length === 0) {
+      throw new Error('Archive metadata is empty.');
+    }
+
+    const normalizedLines = lines.map((line, index) => {
+      try {
+        const parsed = JSON.parse(line);
+        if (!parsed || typeof parsed !== 'object') {
+          throw new Error('metadata item must be a JSON object');
+        }
+        return JSON.stringify(parsed);
+      } catch (error) {
+        throw new Error(
+          `Invalid metadata JSONL line ${index + 1}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
+    });
+
+    return `${normalizedLines.join('\n')}\n`;
+  }
+
+  private normalizeArchivePayload(value: unknown): TurboVecNamespaceArchiveV1 {
+    if (!value || typeof value !== 'object') {
+      throw new Error('Namespace archive payload must be a JSON object.');
+    }
+
+    const archive = value as Record<string, unknown>;
+    const format = String(archive.format || '').trim();
+    if (format !== 'localcode.turbovec.namespace.v1') {
+      throw new Error(`Unsupported namespace archive format: ${format || 'unknown'}`);
+    }
+
+    const namespace = sanitizeNamespace(String(archive.namespace || '').trim());
+    const metadataJsonl = this.normalizeMetadataJsonl(String(archive.metadataJsonl || ''));
+    const indexBase64 = typeof archive.indexBase64 === 'string' ? archive.indexBase64.trim() : '';
+
+    return {
+      format: 'localcode.turbovec.namespace.v1',
+      namespace,
+      exportedAt: String(archive.exportedAt || new Date().toISOString()),
+      recordCount: this.countMetadataLines(metadataJsonl),
+      metadataJsonl,
+      indexBase64: indexBase64 || undefined
+    };
   }
 
   private async callBridge(paths: MemoryPathPair, payload: Record<string, unknown>): Promise<Record<string, unknown>> {

@@ -4288,6 +4288,8 @@ async function initDiagnostics() {
   const rawEl = document.getElementById('diagRaw');
   const refreshBtn = document.getElementById('diagRefresh');
   const copyBtn = document.getElementById('diagCopy');
+  const exportNamespaceBtn = document.getElementById('diagExportNamespace');
+  const importNamespaceBtn = document.getElementById('diagImportNamespace');
   const namespaceSelect = document.getElementById('diagNamespaceSelect');
   const clearNamespaceBtn = document.getElementById('diagClearNamespace');
   const modelEl = document.getElementById('chatModel');
@@ -4370,6 +4372,7 @@ async function initDiagnostics() {
       namespaceSelect.appendChild(emptyOpt);
       namespaceSelect.disabled = true;
       clearNamespaceBtn.disabled = true;
+      exportNamespaceBtn.disabled = true;
     } else {
       const chooseOpt = document.createElement('option');
       chooseOpt.value = '';
@@ -4384,6 +4387,7 @@ async function initDiagnostics() {
       }
       namespaceSelect.disabled = false;
       clearNamespaceBtn.disabled = false;
+      exportNamespaceBtn.disabled = false;
     }
 
     if (!ns.length) {
@@ -4423,6 +4427,63 @@ async function initDiagnostics() {
     }
     await navigator.clipboard.writeText(JSON.stringify(lastPayload, null, 2));
     status.textContent = 'Diagnostics JSON copied to clipboard.';
+  });
+
+  exportNamespaceBtn.addEventListener('click', async () => {
+    const namespace = String(namespaceSelect.value || '').trim();
+    if (!namespace) {
+      status.textContent = 'Select a namespace to export.';
+      return;
+    }
+
+    status.textContent = `Exporting namespace ${namespace}...`;
+    try {
+      const result = await window.llmIde.exportMemoryNamespace({ namespace });
+      if (!result?.ok) {
+        status.textContent = result?.canceled
+          ? 'Namespace export canceled.'
+          : `Namespace export failed: ${result?.reason || 'unknown error'}`;
+        return;
+      }
+
+      status.textContent = `Namespace ${result.namespace} exported (${result.recordCount || 0} record(s)).`;
+    } catch (error) {
+      status.textContent = `Failed to export namespace: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  });
+
+  importNamespaceBtn.addEventListener('click', async () => {
+    const suggested = window.prompt(
+      'Import as namespace (optional). Leave blank to use the archive namespace name.',
+      ''
+    );
+    if (suggested === null) {
+      status.textContent = 'Namespace import canceled.';
+      return;
+    }
+
+    const targetNamespace = suggested.trim();
+    const overwrite = window.confirm('Overwrite target namespace if it already exists?');
+
+    status.textContent = 'Importing namespace...';
+    try {
+      const result = await window.llmIde.importMemoryNamespace({
+        targetNamespace: targetNamespace || undefined,
+        overwrite
+      });
+
+      if (!result?.ok) {
+        status.textContent = result?.canceled
+          ? 'Namespace import canceled.'
+          : `Namespace import failed: ${result?.reason || 'unknown error'}`;
+        return;
+      }
+
+      status.textContent = `Namespace ${result.namespace} imported (${result.recordCount || 0} record(s)).`;
+      await refreshDiagnostics();
+    } catch (error) {
+      status.textContent = `Failed to import namespace: ${error instanceof Error ? error.message : String(error)}`;
+    }
   });
 
   clearNamespaceBtn.addEventListener('click', async () => {

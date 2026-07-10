@@ -7,6 +7,20 @@ It is not a VS Code extension.
 
 - Bottom Model Terminal panel that streams live stdout/stderr while model tools run shell commands.
 
+## TurboVec Namespace Archives
+
+The Diagnostics tab now supports moving and sharing TurboVec/GraphRAG namespaces.
+
+- Export Namespace: saves a namespace archive as JSON (`*.turbovec-namespace.json`) with metadata and index payload.
+- Import Namespace: loads an archive and restores it into a target namespace.
+- Overwrite option: allows replacing an existing namespace during import.
+
+This enables workflows like:
+
+- move a namespace between machines
+- share a namespace with another user
+- prepare pre-populated namespace packs for later import
+
 ## Run
 
 1. Install dependencies.

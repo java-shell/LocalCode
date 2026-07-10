@@ -374,6 +374,87 @@ async function exportPlanToDisk(plan: OrchestrationPlan): Promise<OrchestrationE
   return { filePath: result.filePath };
 }
 
+async function exportMemoryNamespaceToDisk(
+  namespace: string
+): Promise<{ filePath: string; namespace: string; recordCount: number } | null> {
+  if (!turboMemory) {
+    throw new Error('Memory subsystem is not initialized.');
+  }
+
+  const archive = await turboMemory.exportNamespaceArchive(namespace);
+  const dialogOptions: Electron.SaveDialogOptions = {
+    title: 'Export Memory Namespace',
+    defaultPath: `${archive.namespace}.turbovec-namespace.json`,
+    filters: [
+      { name: 'TurboVec Namespace Archive', extensions: ['json'] },
+      { name: 'All Files', extensions: ['*'] }
+    ]
+  };
+
+  const result = mainWindow
+    ? await dialog.showSaveDialog(mainWindow, dialogOptions)
+    : await dialog.showSaveDialog(dialogOptions);
+
+  if (result.canceled || !result.filePath) {
+    return null;
+  }
+
+  await fs.promises.writeFile(result.filePath, JSON.stringify(archive, null, 2), 'utf8');
+  return {
+    filePath: result.filePath,
+    namespace: archive.namespace,
+    recordCount: archive.recordCount
+  };
+}
+
+async function importMemoryNamespaceFromDisk(payload?: {
+  targetNamespace?: string;
+  overwrite?: boolean;
+}): Promise<{ filePath: string; namespace: string; replaced: boolean; recordCount: number } | null> {
+  if (!turboMemory) {
+    throw new Error('Memory subsystem is not initialized.');
+  }
+
+  const dialogOptions: Electron.OpenDialogOptions = {
+    title: 'Import Memory Namespace',
+    properties: ['openFile'],
+    filters: [
+      { name: 'TurboVec Namespace Archive', extensions: ['json'] },
+      { name: 'All Files', extensions: ['*'] }
+    ]
+  };
+
+  const selection = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, dialogOptions)
+    : await dialog.showOpenDialog(dialogOptions);
+
+  if (selection.canceled || selection.filePaths.length === 0) {
+    return null;
+  }
+
+  const filePath = selection.filePaths[0];
+  const raw = await fs.promises.readFile(filePath, 'utf8');
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (error) {
+    throw new Error(
+      `Invalid namespace archive JSON in ${path.basename(filePath)}: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+
+  const imported = await turboMemory.importNamespaceArchive(parsed, {
+    targetNamespace: String(payload?.targetNamespace ?? '').trim() || undefined,
+    overwrite: Boolean(payload?.overwrite)
+  });
+
+  return {
+    filePath,
+    ...imported
+  };
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1500,
@@ -640,6 +721,44 @@ ipcMain.handle('memory:clear-namespace', async (_event, payload?: { namespace?: 
   }
 
   const result = await turboMemory.clearNamespace(namespace);
+  return {
+    ok: true,
+    ...result
+  };
+});
+
+ipcMain.handle('memory:export-namespace', async (_event, payload?: { namespace?: string }) => {
+  const namespace = String(payload?.namespace ?? '').trim();
+  if (!namespace) {
+    return {
+      ok: false,
+      reason: 'namespace_required'
+    };
+  }
+
+  const result = await exportMemoryNamespaceToDisk(namespace);
+  if (!result) {
+    return {
+      ok: false,
+      canceled: true
+    };
+  }
+
+  return {
+    ok: true,
+    ...result
+  };
+});
+
+ipcMain.handle('memory:import-namespace', async (_event, payload?: { targetNamespace?: string; overwrite?: boolean }) => {
+  const result = await importMemoryNamespaceFromDisk(payload);
+  if (!result) {
+    return {
+      ok: false,
+      canceled: true
+    };
+  }
+
   return {
     ok: true,
     ...result

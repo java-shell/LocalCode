@@ -4,6 +4,8 @@ import {
   ChatSessionSummary,
   ChatStreamResult,
   ChatStreamRequest,
+  MemoryNamespaceExportResult,
+  MemoryNamespaceImportResult,
   OrchestrationRunRequest,
   OrchestrationExportResult,
   LLMConfig,
@@ -36,6 +38,12 @@ const api = {
   },
   clearMemoryNamespace: async (payload: { namespace: string }): Promise<unknown> => {
     return ipcRenderer.invoke('memory:clear-namespace', payload);
+  },
+  exportMemoryNamespace: async (payload: { namespace: string }): Promise<MemoryNamespaceExportResult> => {
+    return ipcRenderer.invoke('memory:export-namespace', payload);
+  },
+  importMemoryNamespace: async (payload?: { targetNamespace?: string; overwrite?: boolean }): Promise<MemoryNamespaceImportResult> => {
+    return ipcRenderer.invoke('memory:import-namespace', payload);
   },
   chatStream: async (payload: ChatStreamRequest): Promise<ChatStreamResult> => {
     return ipcRenderer.invoke('chat:stream', payload);
