@@ -22,9 +22,12 @@ const settingsState = {
   apiKey: '',
   modelContextWindows: {},
   chatMemoryNamespace: '',
+  chatMemoryGlobalNamespace: '',
   orchestrationMemoryNamespace: '',
+  orchestrationMemoryGlobalNamespace: '',
   chatDebugDumpsEnabled: true,
-  chatSettingsCollapsed: true
+  chatSettingsCollapsed: true,
+  lockedNamespaces: []
 };
 
 const usageByModel = new Map();
@@ -292,10 +295,14 @@ function loadSettings() {
           )
         : {};
     settingsState.chatMemoryNamespace = String(parsed.chatMemoryNamespace ?? settingsState.chatMemoryNamespace).trim();
+    settingsState.chatMemoryGlobalNamespace = String(parsed.chatMemoryGlobalNamespace ?? settingsState.chatMemoryGlobalNamespace).trim();
     settingsState.orchestrationMemoryNamespace =
       String(parsed.orchestrationMemoryNamespace ?? settingsState.orchestrationMemoryNamespace).trim();
+    settingsState.orchestrationMemoryGlobalNamespace =
+      String(parsed.orchestrationMemoryGlobalNamespace ?? settingsState.orchestrationMemoryGlobalNamespace).trim();
     settingsState.chatDebugDumpsEnabled = Boolean(parsed.chatDebugDumpsEnabled ?? true);
     settingsState.chatSettingsCollapsed = Boolean(parsed.chatSettingsCollapsed ?? settingsState.chatSettingsCollapsed);
+    settingsState.lockedNamespaces = Array.isArray(parsed.lockedNamespaces) ? parsed.lockedNamespaces : [];
   } catch {
     settingsState.maxToolTurns = 40;
     settingsState.requestTimeoutMs = 180000;
@@ -305,9 +312,12 @@ function loadSettings() {
     settingsState.apiKey = '';
     settingsState.modelContextWindows = {};
     settingsState.chatMemoryNamespace = '';
+    settingsState.chatMemoryGlobalNamespace = '';
     settingsState.orchestrationMemoryNamespace = '';
+    settingsState.orchestrationMemoryGlobalNamespace = '';
     settingsState.chatDebugDumpsEnabled = true;
     settingsState.chatSettingsCollapsed = true;
+    settingsState.lockedNamespaces = [];
   }
 }
 
@@ -1207,6 +1217,7 @@ async function initChat() {
   const refreshModels = document.getElementById('chatRefreshModels');
   const chatContextWindowTokens = document.getElementById('chatContextWindowTokens');
   const apiKey = document.getElementById('chatApiKey');
+  const chatMemoryGlobalNamespace = document.getElementById('chatMemoryGlobalNamespace');
   const chatMemoryNamespace = document.getElementById('chatMemoryNamespace');
   const chatNewMemoryNamespace = document.getElementById('chatNewMemoryNamespace');
   const prompt = document.getElementById('chatPrompt');
@@ -1297,6 +1308,10 @@ async function initChat() {
       return chatNewMemoryNamespace.value.trim();
     }
     return chatMemoryNamespace.value.trim();
+  }
+
+  function selectedChatMemoryGlobalNamespace() {
+    return chatMemoryGlobalNamespace.value.trim();
   }
 
   function resolveSelectedContextWindowTokens() {
@@ -1676,62 +1691,131 @@ async function initChat() {
     chatNewMemoryNamespace.disabled = !usingNew;
   }
 
-  function setChatNamespaceOptions(namespaces) {
-    const preferred = settingsState.chatMemoryNamespace;
+  function setChatNamespaceOptions(globalNamespaces, workspaceNamespaces) {
+    const preferredGlobal = settingsState.chatMemoryGlobalNamespace;
+    const preferredWorkspace = settingsState.chatMemoryNamespace;
+    
+    // Populate global namespace dropdown
+    chatMemoryGlobalNamespace.innerHTML = '';
+    
+    const globalDefaultOption = document.createElement('option');
+    globalDefaultOption.value = '';
+    globalDefaultOption.textContent = 'None (global)';
+    chatMemoryGlobalNamespace.appendChild(globalDefaultOption);
+    
+    const globalKnownNames = new Set();
+    const globalList = Array.isArray(globalNamespaces) ? globalNamespaces : [];
+    
+    for (const ns of globalList) {
+      let name, locked;
+      if (typeof ns === 'object' && ns !== null) {
+        name = String(ns.name ?? '');
+        locked = Boolean(ns.locked);
+      } else {
+        name = String(ns);
+        locked = false;
+      }
+      
+      if (!name || globalKnownNames.has(name)) continue;
+      globalKnownNames.add(name);
+      
+      const option = document.createElement('option');
+      option.value = name;
+      let label = `🌐 ${name}`;
+      if (locked) {
+        label = `🔒 ${label}`;
+      }
+      option.textContent = label;
+      chatMemoryGlobalNamespace.appendChild(option);
+    }
+    
+    if (!preferredGlobal) {
+      chatMemoryGlobalNamespace.value = '';
+    } else if (globalKnownNames.has(preferredGlobal)) {
+      chatMemoryGlobalNamespace.value = preferredGlobal;
+    }
+    
+    // Populate workspace namespace dropdown
     chatMemoryNamespace.innerHTML = '';
-
+    
     const defaultOption = document.createElement('option');
     defaultOption.value = '';
     defaultOption.textContent = `Default: model-specific (${model.value || settingsState.model})`;
     chatMemoryNamespace.appendChild(defaultOption);
-
-    const known = Array.from(new Set(namespaces.filter(Boolean))).sort((a, b) => a.localeCompare(b));
-    for (const namespace of known) {
+    
+    const knownNames = new Set();
+    const wsList = Array.isArray(workspaceNamespaces) ? workspaceNamespaces : [];
+    
+    for (const ns of wsList) {
+      let name, locked;
+      if (typeof ns === 'object' && ns !== null) {
+        name = String(ns.name ?? '');
+        locked = Boolean(ns.locked);
+      } else {
+        name = String(ns);
+        locked = false;
+      }
+      
+      if (!name || knownNames.has(name)) continue;
+      knownNames.add(name);
+      
       const option = document.createElement('option');
-      option.value = namespace;
-      option.textContent = namespace;
+      option.value = name;
+      let label = name;
+      if (locked) {
+        label = `🔒 ${label}`;
+      }
+      option.textContent = label;
       chatMemoryNamespace.appendChild(option);
     }
-
+    
     const newOption = document.createElement('option');
     newOption.value = '__new__';
     newOption.textContent = 'New namespace...';
     chatMemoryNamespace.appendChild(newOption);
-
-    if (!preferred) {
+    
+    if (!preferredWorkspace) {
       chatMemoryNamespace.value = '';
       chatNewMemoryNamespace.value = '';
-    } else if (known.includes(preferred)) {
-      chatMemoryNamespace.value = preferred;
+    } else if (knownNames.has(preferredWorkspace)) {
+      chatMemoryNamespace.value = preferredWorkspace;
       chatNewMemoryNamespace.value = '';
     } else {
       chatMemoryNamespace.value = '__new__';
-      chatNewMemoryNamespace.value = preferred;
+      chatNewMemoryNamespace.value = preferredWorkspace;
     }
-
+    
     syncNewNamespaceVisibility();
   }
-
+  
   function syncChatContextWindowInput() {
     const selectedModel = model.value || settingsState.model;
     const configured = getConfiguredContextWindow(selectedModel);
     chatContextWindowTokens.value = configured > 0 ? String(configured) : String(estimateContextWindow(selectedModel));
   }
-
+  
   async function refreshChatNamespaceOptions() {
     try {
       const state = await window.llmIde.getWorkspaceState();
       const diagnostics = await window.llmIde.getMemoryDiagnostics();
       const entries = Array.isArray(diagnostics?.namespaces) ? diagnostics.namespaces : [];
       const prefix = `${sanitizeMemoryNamespacePart('chat')}_${sanitizeMemoryNamespacePart(state.workspaceDir)}_`;
-      const namespaces = entries
+      
+      // Separate global and workspace-scoped namespaces, preserving locked status
+      const globalNamespaces = entries
+        .filter(item => item.scope === 'global')
+        .map(item => ({ name: String(item?.namespace ?? ''), scope: 'global', locked: Boolean(item?.locked) }));
+      
+      const workspaceNamespaces = entries
+        .filter(item => item.scope !== 'global')
         .map(item => String(item?.namespace ?? ''))
         .filter(namespace => namespace.startsWith(prefix))
-        .map(namespace => namespace.slice(prefix.length))
-        .filter(Boolean);
-      setChatNamespaceOptions(namespaces);
+        .map(namespace => ({ name: namespace.slice(prefix.length), scope: 'workspace', locked: false }))
+        .filter(item => item.name);
+      
+      setChatNamespaceOptions(globalNamespaces, workspaceNamespaces);
     } catch {
-      setChatNamespaceOptions([]);
+      setChatNamespaceOptions([], []);
     }
   }
 
@@ -1825,6 +1909,10 @@ async function initChat() {
   });
   chatContextWindowTokens.addEventListener('input', () => {
     persistSelectedContextWindow({ syncInput: false, save: true });
+  });
+  chatMemoryGlobalNamespace.addEventListener('change', () => {
+    settingsState.chatMemoryGlobalNamespace = selectedChatMemoryGlobalNamespace();
+    saveSettings();
   });
   chatMemoryNamespace.addEventListener('change', () => {
     syncNewNamespaceVisibility();
@@ -1927,6 +2015,7 @@ async function initChat() {
         historyMessages: priorMessages,
         contextWindowTokens: resolveSelectedContextWindowTokens(),
         memoryNamespace: selectedChatMemoryNamespace() || undefined,
+        memoryGlobalNamespace: selectedChatMemoryGlobalNamespace() || undefined,
         chatDebugDumpsEnabled: settingsState.chatDebugDumpsEnabled,
         maxToolTurns: settingsState.maxToolTurns,
         toolNames: [
@@ -2011,6 +2100,7 @@ async function initChat() {
 
 async function initOrchestration() {
   const status = document.getElementById('orchStatus');
+  const orchMemoryGlobalNamespace = document.getElementById('orchMemoryGlobalNamespace');
   const orchMemoryNamespace = document.getElementById('orchMemoryNamespace');
   const orchNewMemoryNamespace = document.getElementById('orchNewMemoryNamespace');
   const prompt = document.getElementById('orchPrompt');
@@ -2077,45 +2167,110 @@ async function initOrchestration() {
     return orchMemoryNamespace.value.trim();
   }
 
+  function selectedOrchestrationMemoryGlobalNamespace() {
+    return orchMemoryGlobalNamespace.value.trim();
+  }
+
   function syncOrchestrationNewNamespaceVisibility() {
     const usingNew = orchMemoryNamespace.value === '__new__';
     orchNewMemoryNamespace.classList.toggle('visible', usingNew);
     orchNewMemoryNamespace.disabled = !usingNew;
   }
 
-  function setOrchestrationNamespaceOptions(namespaces) {
-    const preferred = settingsState.orchestrationMemoryNamespace;
+  function setOrchestrationNamespaceOptions(globalNamespaces, workspaceNamespaces) {
+    const preferredGlobal = settingsState.orchestrationMemoryGlobalNamespace;
+    const preferredWorkspace = settingsState.orchestrationMemoryNamespace;
+    
+    // Populate global namespace dropdown
+    orchMemoryGlobalNamespace.innerHTML = '';
+    
+    const globalDefaultOption = document.createElement('option');
+    globalDefaultOption.value = '';
+    globalDefaultOption.textContent = 'None (global)';
+    orchMemoryGlobalNamespace.appendChild(globalDefaultOption);
+    
+    const globalKnownNames = new Set();
+    const globalList = Array.isArray(globalNamespaces) ? globalNamespaces : [];
+    
+    for (const ns of globalList) {
+      let name, locked;
+      if (typeof ns === 'object' && ns !== null) {
+        name = String(ns.name ?? '');
+        locked = Boolean(ns.locked);
+      } else {
+        name = String(ns);
+        locked = false;
+      }
+      
+      if (!name || globalKnownNames.has(name)) continue;
+      globalKnownNames.add(name);
+      
+      const option = document.createElement('option');
+      option.value = name;
+      let label = `🌐 ${name}`;
+      if (locked) {
+        label = `🔒 ${label}`;
+      }
+      option.textContent = label;
+      orchMemoryGlobalNamespace.appendChild(option);
+    }
+    
+    if (!preferredGlobal) {
+      orchMemoryGlobalNamespace.value = '';
+    } else if (globalKnownNames.has(preferredGlobal)) {
+      orchMemoryGlobalNamespace.value = preferredGlobal;
+    }
+    
+    // Populate workspace namespace dropdown
     orchMemoryNamespace.innerHTML = '';
-
+    
     const defaultOption = document.createElement('option');
     defaultOption.value = '';
     defaultOption.textContent = 'Default: workspace orchestration namespace';
     orchMemoryNamespace.appendChild(defaultOption);
-
-    const known = Array.from(new Set(namespaces.filter(Boolean))).sort((a, b) => a.localeCompare(b));
-    for (const namespace of known) {
+    
+    const knownNames = new Set();
+    const wsList = Array.isArray(workspaceNamespaces) ? workspaceNamespaces : [];
+    
+    for (const ns of wsList) {
+      let name, locked;
+      if (typeof ns === 'object' && ns !== null) {
+        name = String(ns.name ?? '');
+        locked = Boolean(ns.locked);
+      } else {
+        name = String(ns);
+        locked = false;
+      }
+      
+      if (!name || knownNames.has(name)) continue;
+      knownNames.add(name);
+      
       const option = document.createElement('option');
-      option.value = namespace;
-      option.textContent = namespace;
+      option.value = name;
+      let label = name;
+      if (locked) {
+        label = `🔒 ${label}`;
+      }
+      option.textContent = label;
       orchMemoryNamespace.appendChild(option);
     }
-
+    
     const newOption = document.createElement('option');
     newOption.value = '__new__';
     newOption.textContent = 'New namespace...';
     orchMemoryNamespace.appendChild(newOption);
-
-    if (!preferred) {
+    
+    if (!preferredWorkspace) {
       orchMemoryNamespace.value = '';
       orchNewMemoryNamespace.value = '';
-    } else if (known.includes(preferred)) {
-      orchMemoryNamespace.value = preferred;
+    } else if (knownNames.has(preferredWorkspace)) {
+      orchMemoryNamespace.value = preferredWorkspace;
       orchNewMemoryNamespace.value = '';
     } else {
       orchMemoryNamespace.value = '__new__';
-      orchNewMemoryNamespace.value = preferred;
+      orchNewMemoryNamespace.value = preferredWorkspace;
     }
-
+    
     syncOrchestrationNewNamespaceVisibility();
   }
 
@@ -2125,14 +2280,22 @@ async function initOrchestration() {
       const diagnostics = await window.llmIde.getMemoryDiagnostics();
       const entries = Array.isArray(diagnostics?.namespaces) ? diagnostics.namespaces : [];
       const prefix = `${sanitizeMemoryNamespacePart('orchestration')}_${sanitizeMemoryNamespacePart(state.workspaceDir)}_`;
-      const namespaces = entries
+      
+      // Separate global and workspace-scoped namespaces, preserving locked status
+      const globalNamespaces = entries
+        .filter(item => item.scope === 'global')
+        .map(item => ({ name: String(item?.namespace ?? ''), scope: 'global', locked: Boolean(item?.locked) }));
+      
+      const workspaceNamespaces = entries
+        .filter(item => item.scope !== 'global')
         .map(item => String(item?.namespace ?? ''))
         .filter(namespace => namespace.startsWith(prefix))
-        .map(namespace => namespace.slice(prefix.length))
-        .filter(Boolean);
-      setOrchestrationNamespaceOptions(namespaces);
+        .map(namespace => ({ name: namespace.slice(prefix.length), scope: 'workspace', locked: false }))
+        .filter(item => item.name);
+      
+      setOrchestrationNamespaceOptions(globalNamespaces, workspaceNamespaces);
     } catch {
-      setOrchestrationNamespaceOptions([]);
+      setOrchestrationNamespaceOptions([], []);
     }
   }
 
@@ -2737,6 +2900,10 @@ async function initOrchestration() {
   loopUntilCompleteEl.addEventListener('change', syncPlanJson);
   maxLoopsEl.addEventListener('input', syncPlanJson);
   completionMarkerEl.addEventListener('input', syncPlanJson);
+  orchMemoryGlobalNamespace.addEventListener('change', () => {
+    settingsState.orchestrationMemoryGlobalNamespace = selectedOrchestrationMemoryGlobalNamespace();
+    saveSettings();
+  });
   orchMemoryNamespace.addEventListener('change', () => {
     syncOrchestrationNewNamespaceVisibility();
     settingsState.orchestrationMemoryNamespace = selectedOrchestrationMemoryNamespace();
@@ -2859,6 +3026,7 @@ async function initOrchestration() {
         plan: parsed,
         prompt: promptText,
         memoryNamespace: selectedOrchestrationMemoryNamespace() || undefined,
+        memoryGlobalNamespace: selectedOrchestrationMemoryGlobalNamespace() || undefined,
         requestTimeoutMs: settingsState.requestTimeoutMs
       });
       renderOrchestrationOutput(result, promptText, parsed);
@@ -4292,6 +4460,7 @@ async function initDiagnostics() {
   const importNamespaceBtn = document.getElementById('diagImportNamespace');
   const namespaceSelect = document.getElementById('diagNamespaceSelect');
   const clearNamespaceBtn = document.getElementById('diagClearNamespace');
+  const lockNamespaceBtn = document.getElementById('diagLockNamespace');
   const modelEl = document.getElementById('chatModel');
 
   let lastPayload = null;
@@ -4332,6 +4501,7 @@ async function initDiagnostics() {
       `Python: ${payload?.pythonExecutable || 'unknown'}`,
       `Bridge: ${payload?.bridgeScriptPath || 'unknown'}`,
       `Memory Root: ${payload?.memoryRoot || 'unknown'}`,
+      `Global Memory Root: ${payload?.globalMemoryRoot || 'n/a'}`,
       `Namespaces: ${totals.namespaces || 0}`,
       `Records: ${totals.records || 0}`,
       `Index Bytes: ${bytesToHuman(totals.indexBytes || 0)}`,
@@ -4373,6 +4543,7 @@ async function initDiagnostics() {
       namespaceSelect.disabled = true;
       clearNamespaceBtn.disabled = true;
       exportNamespaceBtn.disabled = true;
+      lockNamespaceBtn.disabled = true;
     } else {
       const chooseOpt = document.createElement('option');
       chooseOpt.value = '';
@@ -4382,12 +4553,15 @@ async function initDiagnostics() {
       for (const item of ns) {
         const option = document.createElement('option');
         option.value = item.namespace;
-        option.textContent = item.namespace;
+        const scopeLabel = item.scope === 'global' ? '🌐 [GLOBAL] ' : '';
+        const lockLabel = item.locked ? '🔒 ' : '';
+        option.textContent = `${lockLabel}${scopeLabel}${item.namespace}`;
         namespaceSelect.appendChild(option);
       }
       namespaceSelect.disabled = false;
       clearNamespaceBtn.disabled = false;
       exportNamespaceBtn.disabled = false;
+      lockNamespaceBtn.disabled = false;
     }
 
     if (!ns.length) {
@@ -4395,8 +4569,10 @@ async function initDiagnostics() {
     } else {
       namespaces.textContent = ns.map(item => {
         const updated = item.updatedAt ? new Date(item.updatedAt).toLocaleString() : 'never';
+        const scopeLabel = item.scope === 'global' ? ' [GLOBAL]' : '';
+        const lockLabel = item.locked ? ' 🔒 LOCKED (immutable)' : '';
         return [
-          `${item.namespace}`,
+          `${item.namespace}${scopeLabel}${lockLabel}`,
           `  records=${item.records}`,
           `  index=${bytesToHuman(item.indexBytes)}`,
           `  metadata=${bytesToHuman(item.metadataBytes)}`,
@@ -4493,6 +4669,15 @@ async function initDiagnostics() {
       return;
     }
 
+    // Check if namespace is locked
+    const diagnostics = await window.llmIde.getMemoryDiagnostics();
+    const nsItems = Array.isArray(diagnostics?.namespaces) ? diagnostics.namespaces : [];
+    const nsItem = nsItems.find(item => item.namespace === namespace);
+    if (nsItem?.locked) {
+      status.textContent = `Cannot clear locked namespace ${namespace}. Unlock it first.`;
+      return;
+    }
+
     const confirmed = window.confirm(`Clear namespace ${namespace}? This action cannot be undone.`);
     if (!confirmed) {
       return;
@@ -4510,6 +4695,55 @@ async function initDiagnostics() {
       status.textContent = `Failed to clear namespace: ${error instanceof Error ? error.message : String(error)}`;
     }
   });
+
+  lockNamespaceBtn.addEventListener('click', async () => {
+    const namespace = namespaceSelect.value;
+    if (!namespace) {
+      status.textContent = 'Select a namespace to lock/unlock.';
+      return;
+    }
+
+    // Only global namespaces can be locked
+    const diagnostics = await window.llmIde.getMemoryDiagnostics();
+    const nsItems = Array.isArray(diagnostics?.namespaces) ? diagnostics.namespaces : [];
+    const nsItem = nsItems.find(item => item.namespace === namespace);
+    if (nsItem?.scope !== 'global') {
+      status.textContent = `Only global namespaces can be locked.`;
+      return;
+    }
+
+    // Toggle lock status
+    const isLocked = Boolean(nsItem?.locked);
+    let newLockedList = [...settingsState.lockedNamespaces];
+
+    if (isLocked) {
+      newLockedList = newLockedList.filter(n => n !== namespace);
+      status.textContent = `Namespace ${namespace} unlocked.`;
+    } else {
+      if (!newLockedList.includes(namespace)) {
+        newLockedList.push(namespace);
+      }
+      status.textContent = `Namespace ${namespace} locked (immutable).`;
+    }
+
+    // Save to settings and sync with backend
+    settingsState.lockedNamespaces = newLockedList;
+    saveSettings();
+
+    try {
+      await window.llmIde.setLockedNamespaces({ namespaces: newLockedList });
+      await refreshDiagnostics();
+    } catch (error) {
+      status.textContent = `Failed to update lock status: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  });
+
+  // Sync locked namespaces with backend on load
+  try {
+    await window.llmIde.setLockedNamespaces({ namespaces: settingsState.lockedNamespaces });
+  } catch (error) {
+    // Ignore errors during initial sync
+  }
 
   await refreshDiagnostics();
 }

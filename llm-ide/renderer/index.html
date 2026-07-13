@@ -117,7 +117,9 @@
             <input id="chatContextWindowTokens" type="number" min="1" step="1" placeholder="Auto-detect by model" />
             <label class="label">API Key (optional)</label>
             <input id="chatApiKey" type="password" placeholder="sk-..." />
-            <label class="label">Memory Namespace (optional)</label>
+            <label class="label">Global Memory Namespace (optional)</label>
+            <select id="chatMemoryGlobalNamespace"></select>
+            <label class="label">Workspace Memory Namespace (optional)</label>
             <select id="chatMemoryNamespace"></select>
             <input id="chatNewMemoryNamespace" class="chat-new-namespace" placeholder="New namespace for this session" />
           </div>
@@ -131,7 +133,9 @@
 
         <section id="orchView" class="view">
           <div id="orchStatus" class="status">Plan ready</div>
-          <label class="label" for="orchMemoryNamespace">Memory Namespace (optional)</label>
+          <label class="label" for="orchMemoryGlobalNamespace">Global Memory Namespace (optional)</label>
+          <select id="orchMemoryGlobalNamespace"></select>
+          <label class="label" for="orchMemoryNamespace">Workspace Memory Namespace (optional)</label>
           <select id="orchMemoryNamespace"></select>
           <input id="orchNewMemoryNamespace" class="chat-new-namespace" placeholder="New namespace for this workflow" />
           <label class="label">Orchestration Prompt</label>
@@ -184,10 +188,11 @@
             <button id="diagExportNamespace" type="button">Export Namespace</button>
             <button id="diagImportNamespace" type="button">Import Namespace</button>
           </div>
-          <label class="label" for="diagNamespaceSelect">Clear Namespace</label>
+          <label class="label" for="diagNamespaceSelect">Namespace Actions</label>
           <div class="row-inline">
             <select id="diagNamespaceSelect"></select>
             <button id="diagClearNamespace" type="button">Clear</button>
+            <button id="diagLockNamespace" type="button">Lock/Unlock</button>
           </div>
           <div id="diagSummary" class="diag-summary"></div>
           <label class="label">GraphRAG Retrieval Diagnostics</label>

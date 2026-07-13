@@ -15,7 +15,9 @@
     "dev": "npm run build && electron .",
     "dist:linux": "npm run build && electron-builder --linux AppImage",
     "dist:win": "npm run build && electron-builder --win nsis",
-    "dist:win-zip": "npm run build && electron-builder --win zip"
+    "dist:win-zip": "npm run build && electron-builder --win zip",
+    "namespace-creator": "node ../namespace_creator/ingest.js",
+    "test:namespace-creator": "node --test ../namespace_creator/__tests__/ingest.test.js"
   },
   "build": {
     "appId": "dev.localcode.llmide",
