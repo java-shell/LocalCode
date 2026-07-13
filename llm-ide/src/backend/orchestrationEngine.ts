@@ -17,6 +17,8 @@ import { RetrievedMemoryItem } from './turboVecMemory';
 export interface RuntimeContext {
   workspaceDir: string;
   rootDir: string;
+  turboMemory?: any; // TurboVecMemory instance for memory tools
+  activeNamespaces?: string[]; // Namespaces to search by default
 }
 
 export interface OrchestrationMemoryAdapter {

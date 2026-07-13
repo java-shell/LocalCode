@@ -3,7 +3,8 @@ import * as path from 'path';
 import simpleGit from 'simple-git';
 import axios from 'axios';
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
-import { ToolDefinition } from '../shared/types';
+import { ToolDefinition, LLMConfig } from '../shared/types';
+import type { TurboVecMemory, TurboVecNamespaceDiagnostics } from './turboVecMemory';
 
 interface RuntimeContext {
   workspaceDir: string;
@@ -16,6 +17,9 @@ interface RuntimeContext {
     summary: string;
     targets: string[];
   }) => Promise<boolean>;
+  turboMemory?: TurboVecMemory;
+  llmConfig?: LLMConfig;
+  activeNamespaces?: string[];
 }
 
 type ToolScope = 'workspace' | 'root';
@@ -440,6 +444,67 @@ export const toolDefinitions: ToolDefinition[] = [
           }
         },
         required: []
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_namespaces',
+      description:
+        'List all available memory namespaces in the TurboVec store. ' +
+        'Use this to discover which namespaces exist before querying memory. ' +
+        'Returns namespace names, scope (global/workspace), record counts, and whether they are locked.',
+      parameters: {
+        type: 'object',
+        properties: {
+          filter: {
+            type: 'string',
+            description: 'Optional substring filter to narrow results to namespaces containing this text.'
+          },
+          scope: {
+            type: 'string',
+            enum: ['all', 'global', 'workspace'],
+            description: 'Filter by namespace scope. Default is "all".'
+          }
+        },
+        required: []
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'query_memory',
+      description:
+        'Search the TurboVec memory store for relevant past information, decisions, or knowledge. ' +
+        'Use this to retrieve previously stored memories that may help with the current task. ' +
+        'If namespace is omitted, searches all active namespaces. ' +
+        'Use list_namespaces first if you are unsure which namespaces exist.',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Natural language search query to find relevant memories.'
+          },
+          namespace: {
+            type: 'string',
+            description:
+              'Optional specific namespace to search. If omitted, searches all active namespaces.'
+          },
+          limit: {
+            type: 'number',
+            description: 'Maximum number of results to return. Default is 5, max is 20.',
+            minimum: 1,
+            maximum: 20
+          },
+          includeMetadata: {
+            type: 'boolean',
+            description: 'Whether to include metadata (source, timestamp) in results. Default is true.'
+          }
+        },
+        required: ['query']
       }
     }
   }
@@ -1291,6 +1356,163 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
   });
 }
 
+/* ------------------------------------------------------------------ */
+/* Memory tools                                                       */
+/* ------------------------------------------------------------------ */
+
+interface NamespaceSummary {
+  name: string;
+  scope: 'global' | 'workspace';
+  records: number;
+  locked: boolean;
+}
+
+interface ListNamespacesResult {
+  namespaces: NamespaceSummary[];
+  error?: string;
+}
+
+async function listNamespaces(
+  args: Record<string, unknown>,
+  context?: RuntimeContext
+): Promise<ListNamespacesResult> {
+  const memory = context?.turboMemory;
+  if (!memory) {
+    return { namespaces: [] };
+  }
+
+  const filter = typeof args.filter === 'string' ? args.filter : undefined;
+  const scopeFilter = String(args.scope ?? 'all').toLowerCase();
+
+  try {
+    const diagnostics = await memory.diagnostics(filter);
+    const results: NamespaceSummary[] = [];
+
+    for (const ns of diagnostics.namespaces) {
+      if (scopeFilter === 'global' && ns.scope !== 'global') continue;
+      if (scopeFilter === 'workspace' && ns.scope !== 'workspace') continue;
+
+      results.push({
+        name: ns.namespace,
+        scope: ns.scope ?? 'workspace',
+        records: ns.records,
+        locked: Boolean(ns.locked)
+      });
+    }
+
+    return { namespaces: results };
+  } catch (error) {
+    return {
+      namespaces: [],
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+interface MemoryHit {
+  id: number;
+  text: string;
+  source: string;
+  score?: number;
+  createdAt?: string;
+}
+
+interface QueryMemoryResult {
+  results: MemoryHit[];
+  error?: string;
+}
+
+async function queryMemory(
+  args: Record<string, unknown>,
+  context?: RuntimeContext
+): Promise<QueryMemoryResult> {
+  const memory = context?.turboMemory;
+  if (!memory) {
+    return { results: [] };
+  }
+
+  const config = context?.llmConfig;
+  if (!config) {
+    return { results: [], error: 'LLM configuration not available for embedding generation.' };
+  }
+
+  const query = String(args.query ?? '').trim();
+  if (!query) {
+    return { results: [], error: 'query is required.' };
+  }
+
+  const limit = Math.max(1, Math.min(20, Number(args.limit ?? 5)));
+  const includeMetadata = args.includeMetadata !== false; // default true
+
+  try {
+    // If a specific namespace is provided, search only that one
+    if (args.namespace) {
+      const namespace = String(args.namespace);
+      const results = await memory.retrieve(config, query, {
+        namespace,
+        k: limit
+      });
+
+      return {
+        results: results.map(item => ({
+          id: item.id,
+          text: item.text,
+          source: item.source,
+          score: item.score,
+          createdAt: includeMetadata && item.metadata ? String(item.metadata.createdAt ?? '') : undefined
+        }))
+      };
+    }
+
+    // Otherwise search all active namespaces
+    const namespaces = context?.activeNamespaces;
+    if (!namespaces || namespaces.length === 0) {
+      // Fallback: try to get diagnostics and search all namespaces
+      const diagnostics = await memory.diagnostics();
+      const allNs = diagnostics.namespaces.map(ns => ns.namespace);
+
+      if (allNs.length === 0) {
+        return { results: [] };
+      }
+
+      const results = await memory.retrieveMulti(config, query, {
+        namespaces: allNs,
+        k: limit
+      });
+
+      return {
+        results: results.map(item => ({
+          id: item.id,
+          text: item.text,
+          source: item.source,
+          score: item.score,
+          createdAt: includeMetadata && item.metadata ? String(item.metadata.createdAt ?? '') : undefined
+        }))
+      };
+    }
+
+    const results = await memory.retrieveMulti(config, query, {
+      namespaces,
+      k: limit
+    });
+
+    return {
+      results: results.map(item => ({
+        id: item.id,
+        text: item.text,
+        source: item.source,
+        score: item.score,
+        createdAt: includeMetadata && item.metadata ? String(item.metadata.createdAt ?? '') : undefined
+      }))
+    };
+  } catch (error) {
+    return {
+      results: [],
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
 export async function executeTool(name: string, args: unknown, context?: RuntimeContext): Promise<unknown> {
   const rawArgs = (args && typeof args === 'object' ? args : {}) as Record<string, unknown>;
   const safeArgs = await enforceWorkspaceMutationApproval(name, rawArgs, context);
@@ -1337,6 +1559,10 @@ export async function executeTool(name: string, args: unknown, context?: Runtime
     case 'complete_orchestration_task':
       // Intercepted by the orchestration engine; this fallback handles unexpected direct calls.
       return { ok: true, message: 'Task completion acknowledged.' };
+    case 'list_namespaces':
+      return listNamespaces(safeArgs, context);
+    case 'query_memory':
+      return queryMemory(safeArgs, context);
     default:
       throw new Error(`Unsupported tool: ${name}`);
   }

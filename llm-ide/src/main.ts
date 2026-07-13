@@ -576,6 +576,14 @@ ipcMain.handle(
 
       const toolDefs = getAllowedToolDefinitions(requestedToolNames);
 
+      // Build runtime context with memory access for this request
+      const chatRuntimeContext = {
+        ...runtimeContext(event.sender, 'chat:event'),
+        turboMemory: turboMemory ?? undefined,
+        llmConfig: config,
+        activeNamespaces: chatNamespaces.length > 0 ? chatNamespaces : undefined
+      };
+
       const result = await chatWithTools(
         config,
         messages,
@@ -584,7 +592,7 @@ ipcMain.handle(
           if (!requestedToolNames.includes(name)) {
             throw new Error(`Tool ${name} is not enabled for chat.`);
           }
-          return executeTool(name, args, runtimeContext(event.sender, 'chat:event'));
+          return executeTool(name, args, chatRuntimeContext);
         },
         message => {
           event.sender.send('chat:event', message);
@@ -993,12 +1001,19 @@ ipcMain.handle(
       orchestrationNamespaces.push(workspaceOrchestrationNamespace);
     }
 
+    // Build runtime context with memory access for orchestration
+    const orchRuntimeContext = {
+      ...runtimeContext(event.sender, 'orch:event'),
+      turboMemory: turboMemory ?? undefined,
+      activeNamespaces: orchestrationNamespaces.length > 0 ? orchestrationNamespaces : undefined
+    };
+
     try {
       const run = await runOrchestration(normalizedPlan, payload.prompt, {
         requestTimeoutMs: Number(payload.requestTimeoutMs ?? 0) || undefined
       }, message => {
         event.sender.send('orch:event', message);
-      }, runtimeContext(event.sender, 'orch:event'), {
+      }, orchRuntimeContext as any, {
         retrieve: async (config, query, stepName) => {
           if (!turboMemory || orchestrationNamespaces.length === 0) {
             return [];
