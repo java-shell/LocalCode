@@ -34,6 +34,7 @@ export interface ChatStreamRequest {
   toolNames?: string[];
   maxToolTurns?: number;
   memoryNamespace?: string;
+  memoryGlobalNamespace?: string;
   contextWindowTokens?: number;
   chatDebugDumpsEnabled?: boolean;
 }
@@ -42,6 +43,7 @@ export interface OrchestrationRunRequest {
   plan: OrchestrationPlan;
   prompt: string;
   memoryNamespace?: string;
+  memoryGlobalNamespace?: string;
   requestTimeoutMs?: number;
 }
 

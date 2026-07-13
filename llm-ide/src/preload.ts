@@ -45,6 +45,12 @@ const api = {
   importMemoryNamespace: async (payload?: { targetNamespace?: string; overwrite?: boolean }): Promise<MemoryNamespaceImportResult> => {
     return ipcRenderer.invoke('memory:import-namespace', payload);
   },
+  setLockedNamespaces: async (payload: { namespaces: string[] }): Promise<{ ok: boolean; lockedNamespaces?: string[]; reason?: string }> => {
+    return ipcRenderer.invoke('memory:set-locked-namespaces', payload);
+  },
+  getLockedNamespaces: async (): Promise<{ ok: boolean; lockedNamespaces?: string[]; reason?: string }> => {
+    return ipcRenderer.invoke('memory:get-locked-namespaces');
+  },
   chatStream: async (payload: ChatStreamRequest): Promise<ChatStreamResult> => {
     return ipcRenderer.invoke('chat:stream', payload);
   },

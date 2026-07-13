@@ -25,6 +25,13 @@ interface RetrieveOptions {
   maxHops?: number;
 }
 
+interface MultiRetrieveOptions {
+  namespaces: string[];
+  k?: number;
+  vectorK?: number;
+  maxHops?: number;
+}
+
 interface StoreOptions {
   namespace: string;
   replaceSources?: string[];
@@ -94,6 +101,8 @@ export interface TurboVecNamespaceDiagnostics {
   metadataBytes: number;
   updatedAt: string | null;
   graphrag: GraphRagNamespaceDiagnostics;
+  scope?: 'global' | 'workspace';
+  locked?: boolean;
 }
 
 export interface TurboVecDiagnostics {
@@ -101,6 +110,7 @@ export interface TurboVecDiagnostics {
   pythonExecutable: string;
   bridgeScriptPath: string;
   memoryRoot: string;
+  globalMemoryRoot?: string;
   health: {
     ok: boolean;
     numpyVersion?: string;
@@ -229,6 +239,7 @@ function normalizeEmbeddingDimension(embedding: number[], targetDim = TARGET_EMB
 
 export class TurboVecMemory {
   private readonly rootDir: string;
+  private readonly globalMemoryRoot: string;
   private readonly bridgeScriptPath: string;
   private readonly onEvent?: (event: string) => void;
   private readonly pythonExecutableCandidates: string[];
@@ -238,9 +249,11 @@ export class TurboVecMemory {
   private bootstrapAttempted = false;
   private bootstrapInFlight: Promise<void> | null = null;
   private readonly graphRagStatsByNamespace = new Map<string, GraphRagMutableNamespaceStats>();
+  private readonly lockedNamespaces = new Set<string>();
 
-  constructor(rootDir: string, bridgeScriptPath: string, onEvent?: (event: string) => void, projectVenvDir?: string) {
+  constructor(rootDir: string, bridgeScriptPath: string, onEvent?: (event: string) => void, projectVenvDir?: string, globalMemoryRoot?: string) {
     this.rootDir = rootDir;
+    this.globalMemoryRoot = globalMemoryRoot || path.join(rootDir, '..', 'turbovec-global-memory');
     this.bridgeScriptPath = bridgeScriptPath;
     this.onEvent = onEvent;
 
@@ -269,6 +282,33 @@ export class TurboVecMemory {
     ].filter((value): value is string => Boolean(value));
 
     this.pythonExecutableCandidates = Array.from(new Set(candidates));
+  }
+
+  /**
+   * Set which global namespaces are locked (immutable).
+   */
+  setLockedNamespaces(namespaces: string[]): void {
+    this.lockedNamespaces.clear();
+    for (const ns of namespaces) {
+      const sanitized = sanitizeNamespace(ns);
+      if (sanitized) {
+        this.lockedNamespaces.add(sanitized);
+      }
+    }
+  }
+
+  /**
+   * Get the list of locked namespace names.
+   */
+  getLockedNamespaces(): string[] {
+    return Array.from(this.lockedNamespaces);
+  }
+
+  /**
+   * Check if a namespace is locked.
+   */
+  isNamespaceLocked(namespace: string): boolean {
+    return this.lockedNamespaces.has(sanitizeNamespace(namespace));
   }
 
   async retrieve(config: LLMConfig, query: string, options: RetrieveOptions): Promise<RetrievedMemoryItem[]> {
@@ -313,6 +353,77 @@ export class TurboVecMemory {
       this.onEvent?.(`[memory] retrieval skipped: ${error instanceof Error ? error.message : String(error)}`);
       return [];
     }
+  }
+
+  /**
+   * Retrieve from multiple namespaces and merge results.
+   * Each namespace gets an equal share of the total k results.
+   */
+  async retrieveMulti(config: LLMConfig, query: string, options: MultiRetrieveOptions): Promise<RetrievedMemoryItem[]> {
+    const trimmedQuery = query.trim();
+    if (!trimmedQuery) {
+      return [];
+    }
+
+    const namespaces = options.namespaces
+      .map(ns => ns.trim())
+      .filter(Boolean);
+
+    if (namespaces.length === 0) {
+      return [];
+    }
+
+    // If only one namespace, delegate to single retrieve
+    if (namespaces.length === 1) {
+      return this.retrieve(config, query, {
+        namespace: namespaces[0],
+        k: options.k,
+        vectorK: options.vectorK,
+        maxHops: options.maxHops
+      });
+    }
+
+    // Retrieve from each namespace in parallel
+    const targetK = Math.max(1, Math.min(20, Number(options.k ?? 6)));
+    const perNamespaceK = Math.max(1, Math.ceil(targetK / namespaces.length));
+
+    const results = await Promise.all(
+      namespaces.map(async (ns) => {
+        try {
+          return await this.retrieve(config, query, {
+            namespace: ns,
+            k: perNamespaceK,
+            vectorK: options.vectorK,
+            maxHops: options.maxHops
+          });
+        } catch (error) {
+          this.onEvent?.(`[memory] retrieval from namespace '${ns}' skipped: ${error instanceof Error ? error.message : String(error)}`);
+          return [];
+        }
+      })
+    );
+
+    // Merge all results, removing duplicates by id, and re-rank by score
+    const seenIds = new Set<number>();
+    const merged: RetrievedMemoryItem[] = [];
+
+    for (const items of results) {
+      for (const item of items) {
+        if (!seenIds.has(item.id)) {
+          seenIds.add(item.id);
+          merged.push(item);
+        }
+      }
+    }
+
+    // Sort by score (lower distance = better) and take top k
+    merged.sort((a, b) => {
+      const scoreA = Number(a.score ?? 1);
+      const scoreB = Number(b.score ?? 1);
+      return scoreA - scoreB;
+    });
+
+    return merged.slice(0, targetK);
   }
 
   private hybridExpand(
@@ -518,6 +629,11 @@ export class TurboVecMemory {
     );
 
     if (replaceSources.size > 0) {
+      // Check if namespace is locked - mutations not allowed on locked namespaces
+      if (this.isNamespaceLocked(options.namespace)) {
+        this.onEvent?.(`[memory] cannot modify locked namespace: ${options.namespace}`);
+        return;
+      }
       await this.replaceNamespaceSources(config, paths, docs, replaceSources);
       return;
     }
@@ -534,40 +650,66 @@ export class TurboVecMemory {
     await this.appendItems(config, paths, payloadItems);
   }
 
+  /**
+   * Scan a root directory for namespaces and build diagnostics entries.
+   */
+  private async scanNamespacesInRoot(root: string, scope: 'global' | 'workspace', namespaceFilter?: string): Promise<TurboVecNamespaceDiagnostics[]> {
+    const namespaces: TurboVecNamespaceDiagnostics[] = [];
+    
+    try {
+      await fs.mkdir(root, { recursive: true });
+      const entries = await fs.readdir(root, { withFileTypes: true });
+      const filtered = entries
+        .filter(entry => entry.isDirectory())
+        .map(entry => entry.name)
+        .filter(name => !namespaceFilter || name.includes(sanitizeNamespace(namespaceFilter)));
+
+      for (const namespace of filtered) {
+        const dir = path.join(root, namespace);
+        const indexPath = path.join(dir, 'memory.tvec');
+        const metaPath = path.join(dir, 'memory.jsonl');
+        const indexStat = await fs.stat(indexPath).catch(() => null);
+        const metaStat = await fs.stat(metaPath).catch(() => null);
+        const metadataRaw = await fs.readFile(metaPath, 'utf8').catch(() => '');
+        const records = metadataRaw
+          .split(/\r?\n/)
+          .map(line => line.trim())
+          .filter(Boolean).length;
+        const updatedMs = Math.max(indexStat?.mtimeMs ?? 0, metaStat?.mtimeMs ?? 0);
+
+        namespaces.push({
+          namespace,
+          records,
+          indexBytes: indexStat?.size ?? 0,
+          metadataBytes: metaStat?.size ?? 0,
+          updatedAt: updatedMs > 0 ? new Date(updatedMs).toISOString() : null,
+          graphrag: this.getGraphRagStats(namespace),
+          scope,
+          locked: this.isNamespaceLocked(namespace)
+        });
+      }
+    } catch {
+      // Root directory may not exist yet, which is fine
+    }
+    
+    return namespaces;
+  }
+
   async diagnostics(namespaceFilter?: string): Promise<TurboVecDiagnostics> {
     await fs.mkdir(this.rootDir, { recursive: true });
-    const entries = await fs.readdir(this.rootDir, { withFileTypes: true }).catch(() => []);
-    const filtered = entries
-      .filter(entry => entry.isDirectory())
-      .map(entry => entry.name)
-      .filter(name => !namespaceFilter || name.includes(sanitizeNamespace(namespaceFilter)));
-
-    const namespaces: TurboVecNamespaceDiagnostics[] = [];
-
-    for (const namespace of filtered) {
-      const dir = path.join(this.rootDir, namespace);
-      const indexPath = path.join(dir, 'memory.tvec');
-      const metaPath = path.join(dir, 'memory.jsonl');
-      const indexStat = await fs.stat(indexPath).catch(() => null);
-      const metaStat = await fs.stat(metaPath).catch(() => null);
-      const metadataRaw = await fs.readFile(metaPath, 'utf8').catch(() => '');
-      const records = metadataRaw
-        .split(/\r?\n/)
-        .map(line => line.trim())
-        .filter(Boolean).length;
-      const updatedMs = Math.max(indexStat?.mtimeMs ?? 0, metaStat?.mtimeMs ?? 0);
-
-      namespaces.push({
-        namespace,
-        records,
-        indexBytes: indexStat?.size ?? 0,
-        metadataBytes: metaStat?.size ?? 0,
-        updatedAt: updatedMs > 0 ? new Date(updatedMs).toISOString() : null,
-        graphrag: this.getGraphRagStats(namespace)
-      });
-    }
-
-    namespaces.sort((a, b) => a.namespace.localeCompare(b.namespace));
+    
+    // Scan both workspace and global roots
+    const workspaceNamespaces = await this.scanNamespacesInRoot(this.rootDir, 'workspace', namespaceFilter);
+    const globalNamespaces = await this.scanNamespacesInRoot(this.globalMemoryRoot, 'global');
+    
+    // Merge all namespaces (global ones always shown regardless of filter)
+    const allNamespaces = [...globalNamespaces, ...workspaceNamespaces];
+    allNamespaces.sort((a, b) => {
+      // Global namespaces first, then alphabetically
+      if (a.scope === 'global' && b.scope !== 'global') return -1;
+      if (a.scope !== 'global' && b.scope === 'global') return 1;
+      return a.namespace.localeCompare(b.namespace);
+    });
 
     const health = await this.bridgeHealth();
 
@@ -576,29 +718,40 @@ export class TurboVecMemory {
       pythonExecutable: this.resolvedPythonExecutable || this.pythonExecutableCandidates[0] || 'python3',
       bridgeScriptPath: this.bridgeScriptPath,
       memoryRoot: this.rootDir,
+      globalMemoryRoot: this.globalMemoryRoot,
       health,
-      namespaces,
+      namespaces: allNamespaces,
       totals: {
-        namespaces: namespaces.length,
-        records: namespaces.reduce((sum, item) => sum + item.records, 0),
-        indexBytes: namespaces.reduce((sum, item) => sum + item.indexBytes, 0),
-        metadataBytes: namespaces.reduce((sum, item) => sum + item.metadataBytes, 0)
+        namespaces: allNamespaces.length,
+        records: allNamespaces.reduce((sum, item) => sum + item.records, 0),
+        indexBytes: allNamespaces.reduce((sum, item) => sum + item.indexBytes, 0),
+        metadataBytes: allNamespaces.reduce((sum, item) => sum + item.metadataBytes, 0)
       },
-      graphrag: this.aggregateGraphRagStats(namespaces.map(item => item.namespace))
+      graphrag: this.aggregateGraphRagStats(allNamespaces.map(item => item.namespace))
     };
   }
 
   async clearNamespace(namespace: string): Promise<{ namespace: string; cleared: boolean }> {
     const sanitized = sanitizeNamespace(namespace);
-    const dir = path.join(this.rootDir, sanitized);
-    const exists = await fs.stat(dir).then(() => true).catch(() => false);
-    if (!exists) {
+    
+    // Check if namespace is locked - only global namespaces can be locked
+    if (this.isNamespaceLocked(sanitized)) {
+      this.onEvent?.(`[memory] cannot clear locked namespace: ${sanitized}`);
       return { namespace: sanitized, cleared: false };
     }
-
-    await fs.rm(dir, { recursive: true, force: true });
-    this.graphRagStatsByNamespace.delete(sanitized);
-    return { namespace: sanitized, cleared: true };
+    
+    // Check both roots and clear from whichever has it
+    for (const root of [this.globalMemoryRoot, this.rootDir]) {
+      const dir = path.join(root, sanitized);
+      const exists = await fs.stat(dir).then(() => true).catch(() => false);
+      if (exists) {
+        await fs.rm(dir, { recursive: true, force: true });
+        this.graphRagStatsByNamespace.delete(sanitized);
+        return { namespace: sanitized, cleared: true };
+      }
+    }
+    
+    return { namespace: sanitized, cleared: false };
   }
 
   async exportNamespaceArchive(namespace: string): Promise<TurboVecNamespaceArchiveV1> {
@@ -745,14 +898,59 @@ export class TurboVecMemory {
     };
   }
 
+  /**
+   * Check if a namespace exists in the given root directory.
+   */
+  private async namespaceExistsInRoot(namespace: string, root: string): Promise<boolean> {
+    const name = sanitizeNamespace(namespace);
+    const dir = path.join(root, name);
+    const indexPath = path.join(dir, 'memory.tvec');
+    const metaPath = path.join(dir, 'memory.jsonl');
+    
+    try {
+      await fs.stat(indexPath);
+      await fs.stat(metaPath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Resolve memory paths for a namespace, checking both global and workspace roots.
+   * Global namespaces (without workspace path prefix) are stored in globalMemoryRoot.
+   * Workspace-scoped namespaces are stored in rootDir.
+   */
   private async memoryPaths(namespace: string): Promise<MemoryPathPair> {
     const name = sanitizeNamespace(namespace);
+    
+    // Check if namespace exists in global root first
+    if (await this.namespaceExistsInRoot(name, this.globalMemoryRoot)) {
+      const dir = path.join(this.globalMemoryRoot, name);
+      return {
+        indexPath: path.join(dir, 'memory.tvec'),
+        metaPath: path.join(dir, 'memory.jsonl')
+      };
+    }
+    
+    // Otherwise use workspace root
     const dir = path.join(this.rootDir, name);
     await fs.mkdir(dir, { recursive: true });
     return {
       indexPath: path.join(dir, 'memory.tvec'),
       metaPath: path.join(dir, 'memory.jsonl')
     };
+  }
+
+  /**
+   * Get the root directory for a namespace (for diagnostics and management).
+   */
+  private async getNamespaceRoot(namespace: string): Promise<string> {
+    const name = sanitizeNamespace(namespace);
+    if (await this.namespaceExistsInRoot(name, this.globalMemoryRoot)) {
+      return this.globalMemoryRoot;
+    }
+    return this.rootDir;
   }
 
   private async embeddingFor(config: LLMConfig, text: string): Promise<number[]> {

@@ -475,9 +475,10 @@ app.whenReady().then(() => {
   restoreLastWorkspaceSelection();
 
   const memoryRoot = path.join(app.getPath('userData'), 'turbovec-memory');
+  const globalMemoryRoot = path.join(app.getPath('userData'), 'turbovec-global-memory');
   const turboVecVenvDir = path.join(app.getPath('userData'), '.turbovec-venv');
   const bridgeScript = unpackedAppResourcePath('src', 'backend', 'turbovec_bridge.py');
-  turboMemory = new TurboVecMemory(memoryRoot, bridgeScript, undefined, turboVecVenvDir);
+  turboMemory = new TurboVecMemory(memoryRoot, bridgeScript, undefined, turboVecVenvDir, globalMemoryRoot);
   createWindow();
 
   app.on('activate', () => {
@@ -503,18 +504,35 @@ ipcMain.handle(
     const abortController = new AbortController();
     activeChatAbortController = abortController;
     const requestedChatNamespace = String(payload.memoryNamespace ?? '').trim();
-    const chatNamespace = requestedChatNamespace
-      ? memoryNamespace('chat', selectedWorkspaceDir, requestedChatNamespace)
+    const requestedGlobalNamespace = String(payload.memoryGlobalNamespace ?? '').trim();
+    
+    // Build list of namespaces to retrieve from (global + workspace)
+    const chatNamespaces: string[] = [];
+    if (requestedGlobalNamespace) {
+      chatNamespaces.push(requestedGlobalNamespace);
+    }
+    const workspaceChatNamespace = requestedChatNamespace
+      ? requestedChatNamespace
       : memoryNamespace('chat', selectedWorkspaceDir, config.model);
+    if (workspaceChatNamespace && !chatNamespaces.includes(workspaceChatNamespace)) {
+      chatNamespaces.push(workspaceChatNamespace);
+    }
+    
     const messages: ChatMessage[] = [];
     let recalledPromptTokens = 0;
 
     try {
-      if (turboMemory) {
-        const recalled = await turboMemory.retrieve(config, payload.prompt, {
-          namespace: chatNamespace,
-          k: 6
-        });
+      if (turboMemory && chatNamespaces.length > 0) {
+        // Use multi-namespace retrieval when both global and workspace namespaces are set
+        const recalled = chatNamespaces.length > 1
+          ? await turboMemory.retrieveMulti(config, payload.prompt, {
+              namespaces: chatNamespaces,
+              k: 6
+            })
+          : await turboMemory.retrieve(config, payload.prompt, {
+              namespace: chatNamespaces[0],
+              k: 6
+            });
 
         if (recalled.length > 0) {
           const memoryLines = formatMemoryInjection(recalled, {
@@ -580,7 +598,7 @@ ipcMain.handle(
       const debugDumpPath = debugDumpEnabled
         ? await writeChatContextDebugDump({
             workspaceDir: selectedWorkspaceDir,
-            namespace: chatNamespace,
+            namespace: chatNamespaces.length > 0 ? chatNamespaces.join(',') : '',
             model: config.model,
             contextWindowTokens: payload.contextWindowTokens,
             recalledPromptTokens,
@@ -614,7 +632,7 @@ ipcMain.handle(
               }
             ],
             {
-              namespace: chatNamespace
+              namespace: workspaceChatNamespace
             }
           );
           event.sender.send('chat:event', '[memory] stored latest conversation turn in TurboVec memory.');
@@ -699,6 +717,8 @@ ipcMain.handle('memory:diagnostics', async (_event, payload?: { model?: string }
     };
   }
 
+  // Only filter workspace-scoped namespaces by workspace path
+  // Global namespaces are always shown regardless of filter
   const model = String(payload?.model ?? '').trim();
   const filter = model ? `${selectedWorkspaceDir}:${model}` : selectedWorkspaceDir;
   return turboMemory.diagnostics(filter);
@@ -762,6 +782,36 @@ ipcMain.handle('memory:import-namespace', async (_event, payload?: { targetNames
   return {
     ok: true,
     ...result
+  };
+});
+
+ipcMain.handle('memory:set-locked-namespaces', async (_event, payload?: { namespaces?: string[] }) => {
+  if (!turboMemory) {
+    return {
+      ok: false,
+      reason: 'memory_not_initialized'
+    };
+  }
+
+  const namespaces = Array.isArray(payload?.namespaces) ? payload.namespaces : [];
+  turboMemory.setLockedNamespaces(namespaces);
+  return {
+    ok: true,
+    lockedNamespaces: turboMemory.getLockedNamespaces()
+  };
+});
+
+ipcMain.handle('memory:get-locked-namespaces', async () => {
+  if (!turboMemory) {
+    return {
+      ok: false,
+      reason: 'memory_not_initialized'
+    };
+  }
+
+  return {
+    ok: true,
+    lockedNamespaces: turboMemory.getLockedNamespaces()
   };
 });
 
@@ -929,9 +979,19 @@ ipcMain.handle(
     activeOrchestrationAbortController = abortController;
 
     const requestedNamespace = String(payload.memoryNamespace ?? '').trim();
-    const orchestrationNamespace = requestedNamespace
-      ? memoryNamespace('orchestration', selectedWorkspaceDir, requestedNamespace)
+    const requestedGlobalNamespace = String(payload.memoryGlobalNamespace ?? '').trim();
+    
+    // Build list of namespaces to retrieve from (global + workspace)
+    const orchestrationNamespaces: string[] = [];
+    if (requestedGlobalNamespace) {
+      orchestrationNamespaces.push(requestedGlobalNamespace);
+    }
+    const workspaceOrchestrationNamespace = requestedNamespace
+      ? requestedNamespace
       : memoryNamespace('orchestration', selectedWorkspaceDir);
+    if (workspaceOrchestrationNamespace && !orchestrationNamespaces.includes(workspaceOrchestrationNamespace)) {
+      orchestrationNamespaces.push(workspaceOrchestrationNamespace);
+    }
 
     try {
       const run = await runOrchestration(normalizedPlan, payload.prompt, {
@@ -940,13 +1000,18 @@ ipcMain.handle(
         event.sender.send('orch:event', message);
       }, runtimeContext(event.sender, 'orch:event'), {
         retrieve: async (config, query, stepName) => {
-          if (!turboMemory) {
+          if (!turboMemory || orchestrationNamespaces.length === 0) {
             return [];
           }
-          const items = await turboMemory.retrieve(config, query, {
-            namespace: orchestrationNamespace,
-            k: 8
-          });
+          const items = orchestrationNamespaces.length > 1
+            ? await turboMemory.retrieveMulti(config, query, {
+                namespaces: orchestrationNamespaces,
+                k: 8
+              })
+            : await turboMemory.retrieve(config, query, {
+                namespace: orchestrationNamespaces[0],
+                k: 8
+              });
           event.sender.send('orch:event', `[memory] ${stepName} retrieved ${items.length} memory item(s).`);
           return items;
         },
@@ -965,7 +1030,7 @@ ipcMain.handle(
                 }
               ],
               {
-                namespace: orchestrationNamespace,
+                namespace: workspaceOrchestrationNamespace,
                 replaceSources: [`orchestration:${stepName}`]
               }
             );
