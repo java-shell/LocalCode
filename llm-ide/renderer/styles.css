@@ -1350,3 +1350,186 @@ button {
     border-bottom: 1px solid var(--border);
   }
 }
+
+/* ------------------------------------------------------------------ */
+/* Query User Card                                                    */
+/* ------------------------------------------------------------------ */
+
+.query-user-card {
+  margin: 8px 0;
+  padding: 16px;
+  background: linear-gradient(135deg, rgba(42, 195, 255, 0.08), rgba(0, 224, 164, 0.06));
+  border: 1px solid rgba(42, 195, 255, 0.25);
+  border-radius: 10px;
+  box-shadow: 0 2px 12px rgba(42, 195, 255, 0.1);
+}
+
+.query-user-card.query-user-answered {
+  opacity: 0.7;
+  border-color: rgba(0, 224, 164, 0.3);
+}
+
+.query-user-question {
+  margin-bottom: 12px;
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.query-user-question p {
+  margin: 0 0 8px 0;
+}
+
+.query-user-question strong,
+.query-user-question b {
+  color: var(--accent);
+}
+
+.query-user-question code {
+  background: rgba(255, 255, 255, 0.08);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: 'Fira Code', monospace;
+  font-size: 13px;
+}
+
+.query-user-question pre {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 8px 12px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 13px;
+}
+
+.query-user-question ul,
+.query-user-question ol {
+  margin: 4px 0;
+  padding-left: 20px;
+}
+
+.query-user-response {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* Text input */
+.query-user-textarea {
+  width: 100%;
+  min-height: 60px;
+  padding: 10px 12px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 14px;
+  resize: vertical;
+  transition: border-color 0.2s;
+}
+
+.query-user-textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(42, 195, 255, 0.15);
+}
+
+.query-user-textarea::placeholder {
+  color: var(--muted);
+}
+
+/* Button row */
+.query-user-button-row {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* Submit button (Yes/Submit) */
+.query-user-submit-btn,
+.query-user-yes-btn {
+  padding: 8px 18px;
+  background: linear-gradient(135deg, var(--accent-strong), #00b88a);
+  color: #0b1320;
+  border: none;
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.query-user-submit-btn:hover,
+.query-user-yes-btn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 224, 164, 0.3);
+}
+
+/* Cancel button (No/Cancel) */
+.query-user-cancel-btn,
+.query-user-no-btn {
+  padding: 8px 18px;
+  background: transparent;
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s, transform 0.15s;
+}
+
+.query-user-cancel-btn:hover,
+.query-user-no-btn:hover {
+  background: rgba(255, 110, 124, 0.1);
+  transform: translateY(-1px);
+}
+
+/* Checkboxes */
+.query-user-checkboxes {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.query-user-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s;
+  font-size: 14px;
+}
+
+.query-user-checkbox-label:hover {
+  background: rgba(255, 255, 255, 0.07);
+}
+
+.query-user-checkbox {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent-strong);
+  cursor: pointer;
+}
+
+/* Answer display after submission */
+.query-user-answer-display {
+  padding: 8px 12px;
+  background: rgba(0, 224, 164, 0.08);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--accent-strong);
+}
+
+/* Error state */
+.query-user-error {
+  padding: 8px 12px;
+  background: rgba(255, 110, 124, 0.1);
+  border-radius: 6px;
+  font-size: 13px;
+  color: var(--danger);
+}
+

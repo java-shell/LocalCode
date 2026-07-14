@@ -1,5 +1,18 @@
 export type ChatRole = 'system' | 'user' | 'assistant' | 'tool';
 
+export interface QueryUserResponse {
+  answer?: string;
+  selectedOptions?: string[];
+  cancelled?: boolean;
+}
+
+export interface QueryUserRequest {
+  question: string;
+  responseType: 'text' | 'yesno' | 'checkbox';
+  options?: string[];
+  allowMultiple?: boolean;
+}
+
 export interface ToolCall {
   id: string;
   type: 'function';

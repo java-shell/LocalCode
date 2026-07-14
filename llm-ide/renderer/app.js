@@ -1685,6 +1685,187 @@ async function initChat() {
     conversation.scrollTop = conversation.scrollHeight;
   });
 
+  // Handle query_user events from the model
+  const offQueryUser = window.llmIde.onQueryUser(async (request) => {
+    await renderQueryUserQuestion(conversation, request);
+  });
+
+  /**
+   * Render a query_user question in the chat conversation with appropriate UI controls.
+   * Supports text input, yes/no buttons, and checkbox selection.
+   */
+  async function renderQueryUserQuestion(container, request) {
+    const { question, responseType, options = [], allowMultiple = true } = request;
+
+    // Create the query card container
+    const queryCard = document.createElement('div');
+    queryCard.className = 'query-user-card';
+
+    // Render markdown question
+    const questionEl = document.createElement('div');
+    questionEl.className = 'query-user-question';
+    questionEl.innerHTML = renderMarkdownToHtml(question);
+    queryCard.appendChild(questionEl);
+
+    // Create response area
+    const responseArea = document.createElement('div');
+    responseArea.className = 'query-user-response';
+
+    if (responseType === 'text') {
+      // Text input mode
+      const textarea = document.createElement('textarea');
+      textarea.className = 'query-user-textarea';
+      textarea.placeholder = options[0] || 'Type your response...';
+      textarea.rows = 3;
+      responseArea.appendChild(textarea);
+
+      const buttonRow = document.createElement('div');
+      buttonRow.className = 'query-user-button-row';
+
+      const submitBtn = document.createElement('button');
+      submitBtn.className = 'query-user-submit-btn';
+      submitBtn.textContent = 'Submit';
+      submitBtn.addEventListener('click', async () => {
+        const answer = textarea.value.trim();
+        queryCard.classList.add('query-user-answered');
+        responseArea.innerHTML = `<div class="query-user-answer-display"><strong>Your response:</strong> ${escapeHtml(answer || '(empty)')}</div>`;
+        await window.llmIde.sendQueryUserResponse({ answer: answer || undefined });
+      });
+      buttonRow.appendChild(submitBtn);
+
+      const cancelBtn = document.createElement('button');
+      cancelBtn.className = 'query-user-cancel-btn';
+      cancelBtn.textContent = 'Cancel';
+      cancelBtn.addEventListener('click', async () => {
+        queryCard.classList.add('query-user-answered');
+        responseArea.innerHTML = '<div class="query-user-answer-display"><em>Response cancelled.</em></div>';
+        await window.llmIde.sendQueryUserResponse({ cancelled: true });
+      });
+      buttonRow.appendChild(cancelBtn);
+
+      responseArea.appendChild(buttonRow);
+
+    } else if (responseType === 'yesno') {
+      // Yes/No buttons mode
+      const buttonRow = document.createElement('div');
+      buttonRow.className = 'query-user-button-row';
+
+      const yesBtn = document.createElement('button');
+      yesBtn.className = 'query-user-yes-btn query-user-submit-btn';
+      yesBtn.textContent = '✅ Yes';
+      yesBtn.addEventListener('click', async () => {
+        queryCard.classList.add('query-user-answered');
+        responseArea.innerHTML = '<div class="query-user-answer-display"><strong>Your response:</strong> Yes</div>';
+        await window.llmIde.sendQueryUserResponse({ answer: 'yes' });
+      });
+      buttonRow.appendChild(yesBtn);
+
+      const noBtn = document.createElement('button');
+      noBtn.className = 'query-user-no-btn query-user-cancel-btn';
+      noBtn.textContent = '❌ No';
+      noBtn.addEventListener('click', async () => {
+        queryCard.classList.add('query-user-answered');
+        responseArea.innerHTML = '<div class="query-user-answer-display"><strong>Your response:</strong> No</div>';
+        await window.llmIde.sendQueryUserResponse({ answer: 'no' });
+      });
+      buttonRow.appendChild(noBtn);
+
+      responseArea.appendChild(buttonRow);
+
+    } else if (responseType === 'checkbox') {
+      // Checkbox selection mode
+      if (options.length === 0) {
+        responseArea.innerHTML = '<div class="query-user-error">No options provided for checkbox selection.</div>';
+      } else {
+        const checkboxContainer = document.createElement('div');
+        checkboxContainer.className = 'query-user-checkboxes';
+
+        for (const option of options) {
+          const label = document.createElement('label');
+          label.className = 'query-user-checkbox-label';
+
+          const checkbox = document.createElement('input');
+          checkbox.type = allowMultiple ? 'checkbox' : 'checkbox';
+          checkbox.className = 'query-user-checkbox';
+          checkbox.value = option;
+          if (!allowMultiple) {
+            checkbox.dataset.singleSelect = 'true';
+          }
+
+          label.appendChild(checkbox);
+          label.appendChild(document.createTextNode(' ' + escapeHtml(option)));
+          checkboxContainer.appendChild(label);
+        }
+
+        // Enforce single-select behavior when allowMultiple is false
+        if (!allowMultiple) {
+          const checkboxes = checkboxContainer.querySelectorAll('.query-user-checkbox');
+          checkboxes.forEach(cb => {
+            cb.addEventListener('change', () => {
+              checkboxes.forEach(other => {
+                if (other !== cb) other.checked = false;
+              });
+            });
+          });
+        }
+
+        responseArea.appendChild(checkboxContainer);
+
+        const buttonRow = document.createElement('div');
+        buttonRow.className = 'query-user-button-row';
+
+        const submitBtn = document.createElement('button');
+        submitBtn.className = 'query-user-submit-btn';
+        submitBtn.textContent = 'Submit Selection';
+        submitBtn.addEventListener('click', async () => {
+          const selected = Array.from(checkboxContainer.querySelectorAll('.query-user-checkbox:checked'))
+            .map(cb => cb.value);
+          queryCard.classList.add('query-user-answered');
+          responseArea.innerHTML = `<div class="query-user-answer-display"><strong>Your selection:</strong> ${escapeHtml(selected.join(', ') || '(none)')}</div>`;
+          await window.llmIde.sendQueryUserResponse({ selectedOptions: selected });
+        });
+        buttonRow.appendChild(submitBtn);
+
+        const cancelBtn = document.createElement('button');
+        cancelBtn.className = 'query-user-cancel-btn';
+        cancelBtn.textContent = 'Cancel';
+        cancelBtn.addEventListener('click', async () => {
+          queryCard.classList.add('query-user-answered');
+          responseArea.innerHTML = '<div class="query-user-answer-display"><em>Response cancelled.</em></div>';
+          await window.llmIde.sendQueryUserResponse({ cancelled: true });
+        });
+        buttonRow.appendChild(cancelBtn);
+
+        responseArea.appendChild(buttonRow);
+      }
+    }
+
+    queryCard.appendChild(responseArea);
+
+    // Insert before the assistant message if it exists
+    if (assistantRowEl && assistantRowEl.parentElement === container) {
+      container.insertBefore(queryCard, assistantRowEl);
+    } else {
+      container.appendChild(queryCard);
+    }
+    container.scrollTop = container.scrollHeight;
+
+    // Focus the first interactive element
+    const firstInput = queryCard.querySelector('textarea, input[type="checkbox"]');
+    const firstButton = queryCard.querySelector('button');
+    if (firstInput) {
+      firstInput.focus();
+    } else if (firstButton) {
+      firstButton.focus();
+    }
+  }
+
+  function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+  }
+
   function syncNewNamespaceVisibility() {
     const usingNew = chatMemoryNamespace.value === '__new__';
     chatNewMemoryNamespace.classList.toggle('visible', usingNew);
@@ -2021,6 +2202,9 @@ async function initChat() {
         toolNames: [
           'browser_fetch',
           'web_search',
+          'query_memory',
+          'list_namespaces',
+          'query_user',
           'list_repo_tree',
           'list_dir',
           'file_search',
@@ -2077,6 +2261,7 @@ async function initChat() {
   window.addEventListener('beforeunload', () => {
     offToken();
     offChatEvent();
+    offQueryUser();
   });
 
   try {
@@ -2129,6 +2314,9 @@ async function initOrchestration() {
   const availableTools = [
     'browser_fetch',
     'web_search',
+    'query_memory',
+    'list_namespaces',
+    'query_user',
     'list_repo_tree',
     'list_dir',
     'file_search',
@@ -3086,6 +3274,9 @@ async function initAdvancedOrchestration() {
   const availableTools = [
     'browser_fetch',
     'web_search',
+    'query_memory',
+    'list_namespaces',
+    'query_user',
     'list_repo_tree',
     'list_dir',
     'file_search',

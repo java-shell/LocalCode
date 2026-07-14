@@ -6,6 +6,21 @@ import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import { ToolDefinition, LLMConfig } from '../shared/types';
 import type { TurboVecMemory, TurboVecNamespaceDiagnostics } from './turboVecMemory';
 
+export interface QueryUserRequest {
+  question: string;
+  responseType: 'text' | 'yesno' | 'checkbox';
+  options?: string[];
+  allowMultiple?: boolean;
+}
+
+export interface QueryUserResponse {
+  answer?: string;
+  selectedOptions?: string[];
+  cancelled?: boolean;
+}
+
+type QueryUserCallback = (request: QueryUserRequest) => Promise<QueryUserResponse>;
+
 interface RuntimeContext {
   workspaceDir: string;
   rootDir: string;
@@ -20,6 +35,7 @@ interface RuntimeContext {
   turboMemory?: TurboVecMemory;
   llmConfig?: LLMConfig;
   activeNamespaces?: string[];
+  onQueryUser?: QueryUserCallback;
 }
 
 type ToolScope = 'workspace' | 'root';
@@ -508,6 +524,51 @@ export const toolDefinitions: ToolDefinition[] = [
       }
     }
   }
+  ,
+  {
+    type: 'function',
+    function: {
+      name: 'query_user',
+      description:
+        'Ask the user a question and wait for their response. ' +
+        'The question is rendered as markdown in the UI with appropriate input controls. ' +
+        'Use this when you need clarification, confirmation, or input from the user before proceeding.',
+      parameters: {
+        type: 'object',
+        properties: {
+          question: {
+            type: 'string',
+            description:
+              'The question to ask the user. Supports markdown formatting for rich presentation.'
+          },
+          responseType: {
+            type: 'string',
+            enum: ['text', 'yesno', 'checkbox'],
+            description:
+              'Type of response expected from the user. ' +
+              '"text" provides a free-form text input. ' +
+              '"yesno" provides Yes/No buttons. ' +
+              '"checkbox" provides checkboxes for selecting multiple options.'
+          },
+          options: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'For "checkbox" responseType: list of options the user can select. ' +
+              'For "text" responseType: optional placeholder text as a single-item array. ' +
+              'For "yesno" responseType: ignored.'
+          },
+          allowMultiple: {
+            type: 'boolean',
+            description:
+              'For "checkbox" responseType: whether the user can select multiple options. Default is true.'
+          }
+        },
+        required: ['question', 'responseType']
+      }
+    }
+  }
+
 ];
 
 export function getAllowedToolDefinitions(names: string[]): ToolDefinition[] {
@@ -1512,6 +1573,50 @@ async function queryMemory(
     };
   }
 }
+/* ------------------------------------------------------------------ */
+/* User query tool                                                    */
+/* ------------------------------------------------------------------ */
+
+async function queryUser(
+  args: Record<string, unknown>,
+  context?: RuntimeContext
+): Promise<QueryUserResponse> {
+  const question = String(args.question ?? '').trim();
+  if (!question) {
+    return { cancelled: true };
+  }
+
+  const responseType = ['text', 'yesno', 'checkbox'].includes(String(args.responseType))
+    ? String(args.responseType) as 'text' | 'yesno' | 'checkbox'
+    : 'text';
+
+  const options = Array.isArray(args.options)
+    ? args.options.map((o: unknown) => String(o))
+    : undefined;
+
+  const allowMultiple = args.allowMultiple !== false; // default true
+
+  if (!context?.onQueryUser) {
+    return {
+      cancelled: true
+    };
+  }
+
+  try {
+    return await context.onQueryUser({
+      question,
+      responseType,
+      options,
+      allowMultiple
+    });
+  } catch (error) {
+    return {
+      cancelled: true
+    };
+  }
+}
+
+
 
 export async function executeTool(name: string, args: unknown, context?: RuntimeContext): Promise<unknown> {
   const rawArgs = (args && typeof args === 'object' ? args : {}) as Record<string, unknown>;
@@ -1563,6 +1668,8 @@ export async function executeTool(name: string, args: unknown, context?: Runtime
       return listNamespaces(safeArgs, context);
     case 'query_memory':
       return queryMemory(safeArgs, context);
+    case 'query_user':
+      return queryUser(safeArgs, context);
     default:
       throw new Error(`Unsupported tool: ${name}`);
   }

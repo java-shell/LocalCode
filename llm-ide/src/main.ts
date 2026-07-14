@@ -34,6 +34,9 @@ const fileWatchRefs = new Map<string, { count: number; listener: (curr: fs.Stats
 let turboMemory: TurboVecMemory | null = null;
 const MAIN_STATE_FILE = 'localcode-main-state.json';
 
+// Pending query_user promise for awaiting user response
+let pendingQueryUserResolve: ((response: import('./backend/toolRuntime').QueryUserResponse) => void) | null = null;
+
 function appResourcePath(...segments: string[]): string {
   return path.join(app.getAppPath(), ...segments);
 }
@@ -581,7 +584,14 @@ ipcMain.handle(
         ...runtimeContext(event.sender, 'chat:event'),
         turboMemory: turboMemory ?? undefined,
         llmConfig: config,
-        activeNamespaces: chatNamespaces.length > 0 ? chatNamespaces : undefined
+        activeNamespaces: chatNamespaces.length > 0 ? chatNamespaces : undefined,
+        onQueryUser: async (request: import('./backend/toolRuntime').QueryUserRequest) => {
+          // Send query to renderer and wait for user response
+          event.sender.send('chat:query-user', request);
+          return new Promise<import('./backend/toolRuntime').QueryUserResponse>(resolve => {
+            pendingQueryUserResolve = resolve;
+          });
+        }
       };
 
       const result = await chatWithTools(
@@ -679,6 +689,16 @@ ipcMain.handle('chat:stop', async () => {
   activeChatAbortController.abort();
   activeChatAbortController = null;
   return { stopped: true };
+});
+
+// Handle user response to query_user tool
+ipcMain.handle('chat:query-user-response', async (_event, payload: import('./backend/toolRuntime').QueryUserResponse) => {
+  if (pendingQueryUserResolve) {
+    const resolve = pendingQueryUserResolve;
+    pendingQueryUserResolve = null;
+    resolve(payload);
+  }
+  return { accepted: true };
 });
 
 ipcMain.handle('chat:list-sessions', async () => {

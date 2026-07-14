@@ -842,6 +842,8 @@ export async function chatWithTools(
         return `run command ${String(args.command ?? '')}`;
       case 'complete_orchestration_task':
         return args.summary ? `signal completion: ${String(args.summary).slice(0, 120)}` : 'signal task completion';
+      case 'query_user':
+        return `ask user: ${String(args.question ?? '').slice(0, 80)}`;
       default:
         return 'execute requested operation';
     }

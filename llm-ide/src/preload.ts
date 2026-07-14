@@ -13,11 +13,14 @@ import {
   OrchestrationPlan,
   OrchestrationRunResult,
   WorkspaceState,
-  WorkspaceTreeNode
+  WorkspaceTreeNode,
+  QueryUserRequest,
+  QueryUserResponse
 } from './shared/types';
 
 type ChatTokenListener = (token: string) => void;
 type ChatEventListener = (event: string) => void;
+type QueryUserListener = (payload: QueryUserRequest) => void;
 type OrchEventListener = (event: string) => void;
 type WorkspaceFileChangeListener = (relativePath: string) => void;
 type TerminalOutputListener = (payload: { source: 'stdout' | 'stderr'; text: string }) => void;
@@ -69,6 +72,9 @@ const api = {
   stopChat: async (): Promise<{ stopped: boolean; reason?: string }> => {
     return ipcRenderer.invoke('chat:stop');
   },
+  sendQueryUserResponse: async (payload: QueryUserResponse): Promise<{ accepted: boolean }> => {
+    return ipcRenderer.invoke('chat:query-user-response', payload);
+  },
   onChatToken: (listener: ChatTokenListener) => {
     const wrapped = (_event: Electron.IpcRendererEvent, token: string) => listener(token);
     ipcRenderer.on('chat:token', wrapped);
@@ -78,6 +84,11 @@ const api = {
     const wrapped = (_event: Electron.IpcRendererEvent, message: string) => listener(message);
     ipcRenderer.on('chat:event', wrapped);
     return () => ipcRenderer.removeListener('chat:event', wrapped);
+  },
+  onQueryUser: (listener: QueryUserListener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: QueryUserRequest) => listener(payload);
+    ipcRenderer.on('chat:query-user', wrapped);
+    return () => ipcRenderer.removeListener('chat:query-user', wrapped);
   },
   onTerminalOutput: (listener: TerminalOutputListener) => {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: { source: 'stdout' | 'stderr'; text: string }) =>
