@@ -500,6 +500,11 @@ app.on('window-all-closed', () => {
 ipcMain.handle(
   'chat:stream',
   async (event, payload: ChatStreamRequest): Promise<ChatStreamResult> => {
+    const promptText = String(payload.prompt ?? '').trim();
+    if (!promptText) {
+      throw new Error('Prompt is required.');
+    }
+
     const config: LLMConfig = {
       ...payload.config,
       contextWindowTokens: Math.max(0, Number(payload.contextWindowTokens ?? 0)) || undefined
@@ -528,11 +533,11 @@ ipcMain.handle(
       if (turboMemory && chatNamespaces.length > 0) {
         // Use multi-namespace retrieval when both global and workspace namespaces are set
         const recalled = chatNamespaces.length > 1
-          ? await turboMemory.retrieveMulti(config, payload.prompt, {
+          ? await turboMemory.retrieveMulti(config, promptText, {
               namespaces: chatNamespaces,
               k: 6
             })
-          : await turboMemory.retrieve(config, payload.prompt, {
+          : await turboMemory.retrieve(config, promptText, {
               namespace: chatNamespaces[0],
               k: 6
             });
@@ -570,7 +575,7 @@ ipcMain.handle(
         messages.push(...priorMessages);
       }
 
-      messages.push({ role: 'user', content: payload.prompt });
+      messages.push({ role: 'user', content: promptText });
 
       const availableToolNames = toolDefinitions.map(def => def.function.name);
       const requestedToolNames = Array.isArray(payload.toolNames) && payload.toolNames.length > 0
@@ -639,7 +644,7 @@ ipcMain.handle(
             config,
             [
               {
-                text: payload.prompt.slice(0, 4000),
+                text: promptText.slice(0, 4000),
                 source: 'chat:user',
                 metadata: { workspaceDir: selectedWorkspaceDir }
               },
