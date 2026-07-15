@@ -502,40 +502,6 @@ function toOllamaMessages(messages: ChatMessage[]): Array<Record<string, unknown
   });
 }
 
-/**
- * Purpose: Ensure Ollama receives at least one non-empty user message for model templates that require a user query.
- * Inputs: Native Ollama-formatted message list.
- * Outputs: Original list or a list with one synthetic user prompt appended.
- * Side Effects: None.
- * Errors: Never throws.
- * Performance: O(n) scan over messages.
- * Security/Privacy: Adds generic fallback text only; does not expose new data.
- * Concurrency: Pure function, safe for concurrent use.
- * Rationale: Some chat templates fail with "No user query found in messages" when user content is absent/empty.
- */
-function ensureOllamaUserQuery(messages: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
-  const hasNonEmptyUser = messages.some(message => {
-    const role = String(message.role ?? '').trim().toLowerCase();
-    if (role !== 'user') {
-      return false;
-    }
-    const content = String(message.content ?? '').trim();
-    return content.length > 0;
-  });
-
-  if (hasNonEmptyUser) {
-    return messages;
-  }
-
-  return [
-    ...messages,
-    {
-      role: 'user',
-      content: 'Please continue based on the conversation context and provide the best possible answer.'
-    }
-  ];
-}
-
 function ollamaResponseToAssistant(response: OllamaNativeChatResponse): ChatMessage | undefined {
   const message = response.message;
   if (!message) {
@@ -587,11 +553,9 @@ function buildOllamaNativePayload(config: LLMConfig, messages: ChatMessage[], to
     options.num_ctx = numCtx;
   }
 
-  const nativeMessages = ensureOllamaUserQuery(toOllamaMessages(messages));
-
   const payload: Record<string, unknown> = {
     model: config.model,
-    messages: nativeMessages,
+    messages: toOllamaMessages(messages),
     stream: false,
     think: false,
     options
