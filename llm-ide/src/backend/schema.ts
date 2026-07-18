@@ -255,6 +255,29 @@ export function validatePlan(value: unknown): string[] {
           }
           seenIds.add(stageId);
         }
+
+        if (Array.isArray(advanced.links)) {
+          const stageIndexById = new Map<string, number>();
+          for (const [index, stage] of advanced.stages.entries()) {
+            const stageId = String(stage?.id ?? '').trim();
+            if (stageId) {
+              stageIndexById.set(stageId, index);
+            }
+          }
+
+          for (const [linkIndex, link] of advanced.links.entries()) {
+            const fromStageId = String(link?.fromStageId ?? '').trim();
+            const toStageId = String(link?.toStageId ?? '').trim();
+            const fromIndex = stageIndexById.get(fromStageId);
+            const toIndex = stageIndexById.get(toStageId);
+            if (fromIndex === undefined || toIndex === undefined) {
+              continue;
+            }
+            if (toIndex <= fromIndex) {
+              errors.push(`advanced.links[${linkIndex}] must target a downstream stage appearing later in advanced.stages.`);
+            }
+          }
+        }
       }
     }
   }

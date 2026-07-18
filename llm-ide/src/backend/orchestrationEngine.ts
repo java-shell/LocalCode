@@ -211,6 +211,54 @@ interface StepExecutionResult {
   handoffText: string;
   status: 'success' | 'error';
   errorDetail?: string;
+  selectedDownstreamStageId?: string;
+}
+
+interface DownstreamStageOption {
+  id: string;
+  title: string;
+  description: string;
+  model: string;
+}
+
+function buildDownstreamRoutingToolDefinition(options: DownstreamStageOption[]) {
+  const choices = options
+    .map(option => {
+      const safeDescription = truncateText(option.description || 'No description provided.', 220);
+      return `- ${option.id}: ${option.title} (${option.model}) - ${safeDescription}`;
+    })
+    .join('\n');
+
+  return {
+    type: 'function' as const,
+    function: {
+      name: 'call_downstream_stage',
+      description:
+        'Route execution to one directly linked downstream stage. ' +
+        'Choose a stageId from the available downstream options below.\n\n' +
+        'Available downstream stages:\n' +
+        choices,
+      parameters: {
+        type: 'object' as const,
+        properties: {
+          stageId: {
+            type: 'string',
+            enum: options.map(option => option.id),
+            description: 'Direct downstream stage ID to invoke next.'
+          },
+          handoff: {
+            type: 'string',
+            description: 'Optional custom handoff content for the selected stage. If omitted, the current stage output is used.'
+          },
+          reason: {
+            type: 'string',
+            description: 'Brief reason for choosing this downstream stage.'
+          }
+        },
+        required: ['stageId']
+      }
+    }
+  };
 }
 
 async function runStepWithRetries(
@@ -219,6 +267,7 @@ async function runStepWithRetries(
   stepInput: string,
   iteration: number,
   loopMode: boolean,
+  downstreamStageOptions: DownstreamStageOption[],
   options?: OrchestrationRunOptions,
   onEvent?: (event: string) => void,
   runtimeContext?: RuntimeContext,
@@ -227,11 +276,14 @@ async function runStepWithRetries(
 ): Promise<StepExecutionResult> {
   const originalPromptForModel = truncateText(originalPrompt, 4000);
   const COMPLETION_TOOL = 'complete_orchestration_task';
+  const DOWNSTREAM_STAGE_TOOL = 'call_downstream_stage';
   const stepToolCalls: Array<{ name: string; intent: string; timestamp: string }> = [];
   const stepMaxToolTurns = Math.max(1, Math.min(200, Math.floor(Number(step.maxToolTurns ?? 40) || 40)));
   const maxRetries = clampMaxRetries(step.maxRetries);
   const allowedToolNames = step.tools.filter(tool => tool.enabled).map(tool => tool.name);
   const allowCompletionTool = Boolean(step.allowCompletionTool);
+  let selectedDownstreamStageId = '';
+  let selectedDownstreamHandoff = '';
 
   const config: LLMConfig = {
     endpoint: step.endpoint,
@@ -285,7 +337,13 @@ async function runStepWithRetries(
       content: `Original request:\n${originalPromptForModel}\n\nStep input:\n${truncateText(stepInput, 12000)}`
     });
 
+    selectedDownstreamStageId = '';
+    selectedDownstreamHandoff = '';
+
     let toolDefs = getAllowedToolDefinitions(allowedToolNames);
+    if (downstreamStageOptions.length > 0) {
+      toolDefs = [...toolDefs, buildDownstreamRoutingToolDefinition(downstreamStageOptions)];
+    }
     if (loopMode && allowCompletionTool) {
       const completionDef = getAllowedToolDefinitions([COMPLETION_TOOL]);
       if (completionDef.length > 0 && !toolDefs.some(t => t.function.name === COMPLETION_TOOL)) {
@@ -306,6 +364,24 @@ async function runStepWithRetries(
             taskCompleted = true;
             completionSummary = String((args as Record<string, unknown>)?.summary ?? '');
             return { ok: true, message: 'Task completion acknowledged. Orchestration will stop after this step.' };
+          }
+          if (name === DOWNSTREAM_STAGE_TOOL) {
+            const input = (args && typeof args === 'object') ? (args as Record<string, unknown>) : {};
+            const requestedStageId = String(input.stageId ?? '').trim();
+            const option = downstreamStageOptions.find(candidate => candidate.id === requestedStageId);
+            if (!option) {
+              const allowed = downstreamStageOptions.map(candidate => candidate.id).join(', ') || '(none)';
+              throw new Error(`Stage ${step.name} can only route to direct downstream stages: ${allowed}.`);
+            }
+            selectedDownstreamStageId = option.id;
+            selectedDownstreamHandoff = String(input.handoff ?? '').trim();
+            return {
+              ok: true,
+              selectedStageId: option.id,
+              selectedStageTitle: option.title,
+              selectedStageModel: option.model,
+              message: `Downstream stage ${option.title} selected.`
+            };
           }
           if (!allowedToolNames.includes(name)) {
             throw new Error(`Tool ${name} is not enabled in step ${step.name}.`);
@@ -353,6 +429,8 @@ async function runStepWithRetries(
         await memoryAdapter.store(config, rawOutput, step.name);
       }
 
+      const effectiveHandoffText = selectedDownstreamHandoff || handoffText;
+
       return {
         stepRecords: [
           {
@@ -374,8 +452,9 @@ async function runStepWithRetries(
         ],
         taskCompleted,
         completionSummary,
-        handoffText,
-        status: 'success'
+        handoffText: effectiveHandoffText,
+        status: 'success',
+        selectedDownstreamStageId: selectedDownstreamStageId || undefined
       };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -453,6 +532,7 @@ async function runSingleIteration(
       priorOutput,
       iteration,
       Boolean(plan.loopUntilComplete),
+      [],
       options,
       onEvent,
       runtimeContext,
@@ -503,6 +583,7 @@ async function runAdvancedIteration(
 
   const stages = advanced.stages.map(normalizeAdvancedStage);
   const stageById = new Map(stages.map(stage => [stage.id, stage]));
+  const stageIndexById = new Map(stages.map((stage, index) => [stage.id, index]));
   const links = Array.isArray(advanced.links) ? advanced.links : [];
   const entryStageId = (advanced.entryStageId && stageById.has(advanced.entryStageId)) ? advanced.entryStageId : stages[0].id;
   const maxStageExecutions = Math.max(1, Math.min(300, Math.floor(Number(advanced.maxStageExecutions ?? 100) || 100)));
@@ -527,6 +608,37 @@ async function runAdvancedIteration(
     stageInputs.delete(stageId);
     const mergedInput = truncateText(pendingInputs.join('\n\n---\n\n'), 12000);
 
+    const currentStageIndex = Number(stageIndexById.get(stageId));
+    const directDownstreamLinks = links.filter(link => {
+      if (link.fromStageId !== stageId) {
+        return false;
+      }
+      if (!stageById.has(link.toStageId)) {
+        return false;
+      }
+      const targetIndex = Number(stageIndexById.get(link.toStageId));
+      return Number.isFinite(targetIndex) && targetIndex > currentStageIndex;
+    });
+
+    const directDownstreamStageOptions: DownstreamStageOption[] = [];
+    const seenDownstreamStageIds = new Set<string>();
+    for (const link of directDownstreamLinks) {
+      if (seenDownstreamStageIds.has(link.toStageId)) {
+        continue;
+      }
+      const downstream = stageById.get(link.toStageId);
+      if (!downstream) {
+        continue;
+      }
+      seenDownstreamStageIds.add(link.toStageId);
+      directDownstreamStageOptions.push({
+        id: downstream.id,
+        title: downstream.name,
+        description: String(downstream.systemPrompt ?? '').trim() || 'No description provided.',
+        model: downstream.model
+      });
+    }
+
     onEvent?.(`graph:stage:start:${stage.name}:iteration:${iteration}`);
     const outcome = await runStepWithRetries(
       stage,
@@ -534,6 +646,7 @@ async function runAdvancedIteration(
       mergedInput,
       iteration,
       Boolean(plan.loopUntilComplete),
+      directDownstreamStageOptions,
       options,
       onEvent,
       runtimeContext,
@@ -552,8 +665,22 @@ async function runAdvancedIteration(
       };
     }
 
+    if (outcome.selectedDownstreamStageId) {
+      const selectedStage = stageById.get(outcome.selectedDownstreamStageId);
+      if (selectedStage) {
+        const bucket = stageInputs.get(selectedStage.id) ?? [];
+        bucket.push(`Input from ${stage.name} (toolcall: call_downstream_stage):\n${outcome.handoffText}`);
+        stageInputs.set(selectedStage.id, bucket);
+        if (!queued.has(selectedStage.id)) {
+          queue.push(selectedStage.id);
+          queued.add(selectedStage.id);
+        }
+        continue;
+      }
+    }
+
     const detailForBranching = `${outcome.handoffText}\n${outcome.errorDetail ?? ''}`;
-    const nextLinks = links.filter(link => link.fromStageId === stageId && linkMatchesOutcome(link, outcome.status, detailForBranching));
+    const nextLinks = directDownstreamLinks.filter(link => linkMatchesOutcome(link, outcome.status, detailForBranching));
     if (nextLinks.length === 0) {
       continue;
     }

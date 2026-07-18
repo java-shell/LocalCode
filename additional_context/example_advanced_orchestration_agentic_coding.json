@@ -1,0 +1,248 @@
+{
+  "version": 1,
+  "name": "Advanced Agentic Coding: Plan-Research-Implement-Review",
+  "description": "General coding orchestration with controlled branchbacks implemented in a downstream-only stage graph.",
+  "loopUntilComplete": false,
+  "maxLoops": 1,
+  "completionMarker": "TASK_COMPLETE",
+  "steps": [],
+  "advanced": {
+    "enabled": true,
+    "entryStageId": "planning_primary",
+    "maxStageExecutions": 20,
+    "stages": [
+      {
+        "id": "planning_primary",
+        "name": "Planning",
+        "provider": "openai-compatible",
+        "endpoint": "http://localhost:11434/v1/chat/completions",
+        "model": "gpt-oss:latest",
+        "contextWindowTokens": 32768,
+        "systemPrompt": "You are the planning stage. Produce a concise implementation plan with target files, assumptions, and validation strategy. Use call_downstream_stage to route to Research when the plan is ready.",
+        "temperature": 0.1,
+        "maxTokens": 2200,
+        "maxToolTurns": 40,
+        "maxRetries": 1,
+        "tools": [
+          { "name": "list_repo_tree", "enabled": true },
+          { "name": "list_dir", "enabled": true },
+          { "name": "read_file", "enabled": true },
+          { "name": "grep_search", "enabled": true },
+          { "name": "git_status", "enabled": true }
+        ],
+        "passOutputToNext": true,
+        "allowCompletionTool": false,
+        "positionX": 120,
+        "positionY": 120
+      },
+      {
+        "id": "research_primary",
+        "name": "Research",
+        "provider": "openai-compatible",
+        "endpoint": "http://localhost:11434/v1/chat/completions",
+        "model": "gpt-oss:latest",
+        "contextWindowTokens": 32768,
+        "systemPrompt": "You are the research stage. Verify APIs, architecture, and repo facts. If requirements are unclear or risky, route to Planning (Replan). Otherwise route to Implementation.",
+        "temperature": 0.15,
+        "maxTokens": 2600,
+        "maxToolTurns": 40,
+        "maxRetries": 1,
+        "tools": [
+          { "name": "browser_fetch", "enabled": true },
+          { "name": "list_repo_tree", "enabled": true },
+          { "name": "list_dir", "enabled": true },
+          { "name": "read_file", "enabled": true },
+          { "name": "grep_search", "enabled": true },
+          { "name": "git_status", "enabled": true }
+        ],
+        "passOutputToNext": true,
+        "allowCompletionTool": false,
+        "positionX": 420,
+        "positionY": 120
+      },
+      {
+        "id": "planning_replan",
+        "name": "Planning (Replan)",
+        "provider": "openai-compatible",
+        "endpoint": "http://localhost:11434/v1/chat/completions",
+        "model": "gpt-oss:latest",
+        "contextWindowTokens": 32768,
+        "systemPrompt": "You are the re-planning stage. Resolve research gaps and produce a corrected, minimal, executable plan. Route next to Implementation.",
+        "temperature": 0.1,
+        "maxTokens": 2200,
+        "maxToolTurns": 40,
+        "maxRetries": 1,
+        "tools": [
+          { "name": "list_repo_tree", "enabled": true },
+          { "name": "list_dir", "enabled": true },
+          { "name": "read_file", "enabled": true },
+          { "name": "grep_search", "enabled": true },
+          { "name": "git_status", "enabled": true }
+        ],
+        "passOutputToNext": true,
+        "allowCompletionTool": false,
+        "positionX": 720,
+        "positionY": 40
+      },
+      {
+        "id": "implementation_primary",
+        "name": "Implementation",
+        "provider": "openai-compatible",
+        "endpoint": "http://localhost:11434/v1/chat/completions",
+        "model": "gpt-oss:latest",
+        "contextWindowTokens": 32768,
+        "systemPrompt": "You are the implementation stage. Apply the approved plan with safe, focused edits. If blocked by missing details, route to Research (Follow-up). If done, route to Review.",
+        "temperature": 0.1,
+        "maxTokens": 4200,
+        "maxToolTurns": 60,
+        "maxRetries": 1,
+        "tools": [
+          { "name": "list_repo_tree", "enabled": true },
+          { "name": "list_dir", "enabled": true },
+          { "name": "read_file", "enabled": true },
+          { "name": "grep_search", "enabled": true },
+          { "name": "create_file", "enabled": true },
+          { "name": "replace_in_file", "enabled": true },
+          { "name": "insert_in_file", "enabled": true },
+          { "name": "create_directory", "enabled": true },
+          { "name": "git_diff", "enabled": true },
+          { "name": "git_status", "enabled": true },
+          { "name": "run_terminal_command", "enabled": true }
+        ],
+        "passOutputToNext": true,
+        "allowCompletionTool": false,
+        "positionX": 1020,
+        "positionY": 120
+      },
+      {
+        "id": "research_followup",
+        "name": "Research (Follow-up)",
+        "provider": "openai-compatible",
+        "endpoint": "http://localhost:11434/v1/chat/completions",
+        "model": "gpt-oss:latest",
+        "contextWindowTokens": 32768,
+        "systemPrompt": "You are follow-up research for implementation blockers. Resolve unresolved questions with precise findings and route to Implementation (Rework).",
+        "temperature": 0.15,
+        "maxTokens": 2600,
+        "maxToolTurns": 40,
+        "maxRetries": 1,
+        "tools": [
+          { "name": "browser_fetch", "enabled": true },
+          { "name": "list_repo_tree", "enabled": true },
+          { "name": "list_dir", "enabled": true },
+          { "name": "read_file", "enabled": true },
+          { "name": "grep_search", "enabled": true },
+          { "name": "git_status", "enabled": true }
+        ],
+        "passOutputToNext": true,
+        "allowCompletionTool": false,
+        "positionX": 1320,
+        "positionY": 40
+      },
+      {
+        "id": "implementation_rework",
+        "name": "Implementation (Rework)",
+        "provider": "openai-compatible",
+        "endpoint": "http://localhost:11434/v1/chat/completions",
+        "model": "gpt-oss:latest",
+        "contextWindowTokens": 32768,
+        "systemPrompt": "You are the rework implementation stage. Apply changes based on follow-up research and route to Review when complete.",
+        "temperature": 0.1,
+        "maxTokens": 4200,
+        "maxToolTurns": 60,
+        "maxRetries": 1,
+        "tools": [
+          { "name": "list_repo_tree", "enabled": true },
+          { "name": "list_dir", "enabled": true },
+          { "name": "read_file", "enabled": true },
+          { "name": "grep_search", "enabled": true },
+          { "name": "create_file", "enabled": true },
+          { "name": "replace_in_file", "enabled": true },
+          { "name": "insert_in_file", "enabled": true },
+          { "name": "create_directory", "enabled": true },
+          { "name": "git_diff", "enabled": true },
+          { "name": "git_status", "enabled": true },
+          { "name": "run_terminal_command", "enabled": true }
+        ],
+        "passOutputToNext": true,
+        "allowCompletionTool": false,
+        "positionX": 1620,
+        "positionY": 40
+      },
+      {
+        "id": "review_final",
+        "name": "Review",
+        "provider": "openai-compatible",
+        "endpoint": "http://localhost:11434/v1/chat/completions",
+        "model": "gpt-oss:latest",
+        "contextWindowTokens": 32768,
+        "systemPrompt": "You are the review stage. Audit risks, regressions, tests, and diff quality. Provide final findings first, then concise summary.",
+        "temperature": 0.1,
+        "maxTokens": 2800,
+        "maxToolTurns": 40,
+        "maxRetries": 1,
+        "tools": [
+          { "name": "read_file", "enabled": true },
+          { "name": "grep_search", "enabled": true },
+          { "name": "git_diff", "enabled": true },
+          { "name": "git_status", "enabled": true },
+          { "name": "run_terminal_command", "enabled": true }
+        ],
+        "passOutputToNext": false,
+        "allowCompletionTool": false,
+        "positionX": 1920,
+        "positionY": 120
+      }
+    ],
+    "links": [
+      {
+        "id": "planning-to-research",
+        "fromStageId": "planning_primary",
+        "toStageId": "research_primary",
+        "condition": "always"
+      },
+      {
+        "id": "research-to-implementation",
+        "fromStageId": "research_primary",
+        "toStageId": "implementation_primary",
+        "condition": "success"
+      },
+      {
+        "id": "research-to-replan",
+        "fromStageId": "research_primary",
+        "toStageId": "planning_replan",
+        "condition": "error"
+      },
+      {
+        "id": "replan-to-implementation",
+        "fromStageId": "planning_replan",
+        "toStageId": "implementation_primary",
+        "condition": "always"
+      },
+      {
+        "id": "implementation-to-review",
+        "fromStageId": "implementation_primary",
+        "toStageId": "review_final",
+        "condition": "success"
+      },
+      {
+        "id": "implementation-to-research-followup",
+        "fromStageId": "implementation_primary",
+        "toStageId": "research_followup",
+        "condition": "error"
+      },
+      {
+        "id": "research-followup-to-rework",
+        "fromStageId": "research_followup",
+        "toStageId": "implementation_rework",
+        "condition": "always"
+      },
+      {
+        "id": "rework-to-review",
+        "fromStageId": "implementation_rework",
+        "toStageId": "review_final",
+        "condition": "always"
+      }
+    ]
+  }
+}
