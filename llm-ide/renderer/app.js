@@ -59,6 +59,197 @@ function normalizeProvider(value) {
   return String(value || '').trim().toLowerCase() === 'ollama' ? 'ollama' : 'openai-compatible';
 }
 
+/* ========================================
+   Toast Notification System
+   ======================================== */
+
+const TOAST_DURATION_MS = 5000; // 5 seconds default
+
+/**
+ * Play a "ding" sound using Web Audio API.
+ * No external assets required — generates a pleasant chime programmatically.
+ */
+function playDingSound() {
+  try {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    // First tone: higher pitch, shorter
+    const osc1 = audioCtx.createOscillator();
+    const gain1 = audioCtx.createGain();
+    osc1.type = 'sine';
+    osc1.frequency.setValueAtTime(880, audioCtx.currentTime); // A5
+    gain1.gain.setValueAtTime(0.25, audioCtx.currentTime);
+    gain1.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+    osc1.connect(gain1);
+    gain1.connect(audioCtx.destination);
+    osc1.start(audioCtx.currentTime);
+    osc1.stop(audioCtx.currentTime + 0.3);
+
+    // Second tone: slightly lower, creates a pleasant "ding-dong" effect
+    const osc2 = audioCtx.createOscillator();
+    const gain2 = audioCtx.createGain();
+    osc2.type = 'sine';
+    osc2.frequency.setValueAtTime(1108.73, audioCtx.currentTime + 0.12); // C#6
+    gain2.gain.setValueAtTime(0, audioCtx.currentTime);
+    gain2.gain.linearRampToValueAtTime(0.2, audioCtx.currentTime + 0.12);
+    gain2.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.5);
+    osc2.connect(gain2);
+    gain2.connect(audioCtx.destination);
+    osc2.start(audioCtx.currentTime + 0.12);
+    osc2.stop(audioCtx.currentTime + 0.5);
+
+    // Schedule cleanup
+    setTimeout(() => audioCtx.close(), 1500);
+  } catch (e) {
+    // Silently fail if Web Audio is unavailable
+  }
+}
+
+/**
+ * Play a subtle error "buzz" sound using Web Audio API.
+ */
+function playErrorSound() {
+  try {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(180, audioCtx.currentTime);
+    osc.frequency.linearRampToValueAtTime(120, audioCtx.currentTime + 0.25);
+    gain.gain.setValueAtTime(0.12, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start(audioCtx.currentTime);
+    osc.stop(audioCtx.currentTime + 0.3);
+
+    setTimeout(() => audioCtx.close(), 1000);
+  } catch (e) {
+    // Silently fail if Web Audio is unavailable
+  }
+}
+
+/**
+ * Play a subtle info "blip" sound using Web Audio API.
+ */
+function playInfoSound() {
+  try {
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(660, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start(audioCtx.currentTime);
+    osc.stop(audioCtx.currentTime + 0.2);
+
+    setTimeout(() => audioCtx.close(), 800);
+  } catch (e) {
+    // Silently fail if Web Audio is unavailable
+  }
+}
+
+/**
+ * Show a toast notification.
+ * @param {object} options
+ * @param {'success' | 'error' | 'info'} options.type - Toast type
+ * @param {string} options.title - Bold title text
+ * @param {string} [options.message] - Optional subtitle/description
+ * @param {number} [options.durationMs] - Override duration (default 5000ms)
+ */
+function showToast(options) {
+  const { type = 'info', title, message = '', durationMs = TOAST_DURATION_MS } = options;
+
+  const container = document.getElementById('toastContainer');
+  if (!container) return;
+
+  // Icon mapping
+  const icons = { success: '✅', error: '❌', info: 'ℹ️' };
+
+  // Create toast element
+  const toast = document.createElement('div');
+  toast.className = 'toast-item';
+  toast.style.position = 'relative';
+  toast.style.overflow = 'hidden';
+
+  // Icon
+  const iconEl = document.createElement('span');
+  iconEl.className = `toast-icon toast-${type}`;
+  iconEl.textContent = icons[type] || icons.info;
+
+  // Body
+  const bodyEl = document.createElement('div');
+  bodyEl.className = 'toast-body';
+
+  const titleEl = document.createElement('div');
+  titleEl.className = 'toast-title';
+  titleEl.textContent = title;
+  bodyEl.appendChild(titleEl);
+
+  if (message) {
+    const msgEl = document.createElement('div');
+    msgEl.className = 'toast-message';
+    msgEl.textContent = message;
+    bodyEl.appendChild(msgEl);
+  }
+
+  // Close button
+  const closeBtn = document.createElement('button');
+  closeBtn.className = 'toast-close-btn';
+  closeBtn.textContent = '✕';
+  closeBtn.type = 'button';
+  closeBtn.addEventListener('click', () => dismissToast(toast));
+
+  // Progress bar
+  const progressEl = document.createElement('div');
+  progressEl.className = `toast-progress toast-${type}`;
+  progressEl.style.animationDuration = `${durationMs}ms`;
+
+  toast.appendChild(iconEl);
+  toast.appendChild(bodyEl);
+  toast.appendChild(closeBtn);
+  toast.appendChild(progressEl);
+  container.appendChild(toast);
+
+  // Auto-dismiss after duration
+  const timerId = setTimeout(() => dismissToast(toast), durationMs);
+  toast.dataset.timerId = String(timerId);
+}
+
+/**
+ * Dismiss a toast with exit animation.
+ */
+function dismissToast(toastEl) {
+  if (!toastEl || !toastEl.parentElement) return;
+
+  // Clear auto-dismiss timer
+  const timerId = toastEl.dataset.timerId;
+  if (timerId) {
+    clearTimeout(Number(timerId));
+    delete toastEl.dataset.timerId;
+  }
+
+  // Play exit animation then remove
+  toastEl.classList.add('toast-exit');
+  toastEl.addEventListener('animationend', () => {
+    if (toastEl.parentElement) {
+      toastEl.parentElement.removeChild(toastEl);
+    }
+  }, { once: true });
+
+  // Fallback removal in case animationend doesn't fire
+  setTimeout(() => {
+    if (toastEl.parentElement) {
+      toastEl.parentElement.removeChild(toastEl);
+    }
+  }, 500);
+}
+
 function modelKey(model) {
   return String(model || '').trim();
 }
@@ -1687,6 +1878,8 @@ async function initChat() {
 
   // Handle query_user events from the model
   const offQueryUser = window.llmIde.onQueryUser(async (request) => {
+    showToast({ type: 'info', title: 'Model Needs Input', message: 'Please respond to the question below.' });
+    playInfoSound();
     await renderQueryUserQuestion(conversation, request);
   });
 
@@ -2168,8 +2361,11 @@ async function initChat() {
       await persistActiveChatSession();
       // Intentionally avoid refreshing the session list here to keep the live assistant DOM row attached.
     } catch (error) {
-      appendLog(conversation, `[error] ${error instanceof Error ? error.message : String(error)}`);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      appendLog(conversation, `[error] ${errorMsg}`);
       status.textContent = 'Error';
+      showToast({ type: 'error', title: 'Chat Failed', message: errorMsg });
+      playErrorSound();
       return;
     }
 
@@ -2243,11 +2439,19 @@ async function initChat() {
       }
 
       status.textContent = 'Done';
+      showToast({ type: 'success', title: 'Prompt Complete', message: 'Response finished successfully.' });
+      playDingSound();
     } catch (error) {
-      appendLog(conversation, `[error] ${error instanceof Error ? error.message : String(error)}`);
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      appendLog(conversation, `[error] ${errorMsg}`);
       await persistActiveChatSession();
       await refreshChatSessions();
-      status.textContent = /canceled/i.test(error instanceof Error ? error.message : String(error)) ? 'Chat stopped' : 'Error';
+      const isCanceled = /canceled/i.test(errorMsg);
+      status.textContent = isCanceled ? 'Chat stopped' : 'Error';
+      if (!isCanceled) {
+        showToast({ type: 'error', title: 'Prompt Failed', message: errorMsg });
+        playErrorSound();
+      }
     } finally {
       setChatRunning(false);
       assistantRowEl = null;
@@ -3223,9 +3427,17 @@ async function initOrchestration() {
         recordModelUsage(result.usageByModel);
       }
       status.textContent = 'Run complete';
+      showToast({ type: 'success', title: 'Orchestration Complete', message: 'Workflow finished successfully.' });
+      playDingSound();
     } catch (error) {
       renderOrchestrationError(error instanceof Error ? error.message : String(error));
-      status.textContent = /stopped by user|canceled/i.test(error instanceof Error ? error.message : String(error)) ? 'Run stopped' : 'Run failed';
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      const isCanceled = /stopped by user|canceled/i.test(errorMsg);
+      status.textContent = isCanceled ? 'Run stopped' : 'Run failed';
+      if (!isCanceled) {
+        showToast({ type: 'error', title: 'Orchestration Failed', message: errorMsg });
+        playErrorSound();
+      }
     }
     finally {
       setOrchestrationRunning(false);
@@ -4472,10 +4684,17 @@ async function initAdvancedOrchestration() {
         recordModelUsage(result.usageByModel);
       }
       status.textContent = 'Advanced run complete';
+      showToast({ type: 'success', title: 'Advanced Orchestration Complete', message: 'Agentic workflow finished successfully.' });
+      playDingSound();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       outputEl.textContent = `Run failed: ${message}`;
-      status.textContent = /stopped by user|canceled/i.test(message) ? 'Run stopped' : 'Run failed';
+      const isCanceled = /stopped by user|canceled/i.test(message);
+      status.textContent = isCanceled ? 'Run stopped' : 'Run failed';
+      if (!isCanceled) {
+        showToast({ type: 'error', title: 'Advanced Orchestration Failed', message });
+        playErrorSound();
+      }
     } finally {
       setRunning(false);
     }
