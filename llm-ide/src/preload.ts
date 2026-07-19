@@ -125,6 +125,10 @@ const api = {
     ipcRenderer.invoke('orch:export-plan', plan),
   savePlan: async (plan: OrchestrationPlan): Promise<void> => ipcRenderer.invoke('orch:save-plan', plan),
   validatePlan: async (raw: string): Promise<string[]> => ipcRenderer.invoke('orch:validate-plan', raw),
+  getPlanPresets: async (): Promise<Record<string, { name: string; description: string }>> =>
+    ipcRenderer.invoke('orch:list-plan-presets'),
+  getPlanPreset: async (key: string): Promise<OrchestrationPlan> =>
+    ipcRenderer.invoke('orch:get-plan-preset', key),
   runOrchestration: async (payload: OrchestrationRunRequest): Promise<OrchestrationRunResult> => {
     return ipcRenderer.invoke('orch:run', payload);
   },

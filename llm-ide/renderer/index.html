@@ -122,6 +122,12 @@
             <label class="label">Workspace Memory Namespace (optional)</label>
             <select id="chatMemoryNamespace"></select>
             <input id="chatNewMemoryNamespace" class="chat-new-namespace" placeholder="New namespace for this session" />
+            <div class="preset-selector-row">
+              <label class="label" for="chatPresetSelect">Quick Preset</label>
+              <select id="chatPresetSelect">
+                <option value="">— Select a preset —</option>
+              </select>
+            </div>
           </div>
           <label class="label">Prompt</label>
           <textarea id="chatPrompt" placeholder="Ask for code, analysis, or generation..."></textarea>
@@ -143,6 +149,7 @@
           <div class="actions">
             <button id="orchLoad">Load</button>
             <button id="orchImport">Import JSON</button>
+            <button id="orchImportPreset">Import Preset</button>
             <button id="orchExport">Export JSON</button>
             <button id="orchValidate">Validate</button>
             <button id="orchSave">Save</button>

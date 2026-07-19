@@ -6,20 +6,104 @@ It is not a VS Code extension.
 ## What You Get
 
 - Bottom Model Terminal panel that streams live stdout/stderr while model tools run shell commands.
+- Monaco-based code editor with tab management and dirty-state tracking.
+- Chat panel with streaming responses, tool calling, and TurboVec memory integration.
+- Simple and Advanced orchestration for multi-step AI workflows.
+- Toast notifications with audio alerts for completion and errors.
 
-## TurboVec Namespace Archives
+## Feature Reference
 
-The Diagnostics tab now supports moving and sharing TurboVec/GraphRAG namespaces.
+### Chat Panel
 
-- Export Namespace: saves a namespace archive as JSON (`*.turbovec-namespace.json`) with metadata and index payload.
-- Import Namespace: loads an archive and restores it into a target namespace.
-- Overwrite option: allows replacing an existing namespace during import.
+| Feature | Description |
+| --- | --- |
+| **Streaming Responses** | Token-by-token display of model output in markdown |
+| **Tool Calling** | 21+ tools available (filesystem, git, web, memory, interaction) |
+| **Session Management** | Create, switch, and delete chat sessions with full history |
+| **TurboVec Memory** | Inject recalled memories from workspace or global namespaces |
+| **Context Windows** | Per-model context window configuration with auto-detection hints |
+| **Model Discovery** | Auto-discover available models via `/v1/models` endpoint |
+| **Presets** | Quick-apply common configurations (Ollama, OpenAI-compatible, etc.) |
 
-This enables workflows like:
+### Orchestration Panel (Simple)
 
-- move a namespace between machines
-- share a namespace with another user
-- prepare pre-populated namespace packs for later import
+| Feature | Description |
+| --- | --- |
+| **Linear Workflows** | Sequential multi-step plans with independent model settings per step |
+| **Per-Step Tools** | Configure tool allowlists for each step independently |
+| **Pass-Through Output** | Chain step outputs as context for subsequent steps |
+| **Loop Mode** | Repeat execution until a completion marker is detected |
+| **Presets** | Import pre-built workflow templates (Full Pipeline, Quick Fix, Code Review) |
+
+### Advanced Orchestration
+
+| Feature | Description |
+| --- | --- |
+| **Graph Editor** | Visual stage editor with drag-and-drop positioning |
+| **Conditional Links** | Route between stages based on `always`, `success`, `error`, or `error:<pattern>` |
+| **Downstream Routing** | Stages can call `route_to_stage` to jump to specific downstream stages |
+| **Stage Execution Limits** | Cap total stage executions to prevent infinite loops |
+| **Completion Markers** | Auto-terminate when output contains the configured marker string |
+
+### Editor
+
+| Feature | Description |
+| --- | --- |
+| **Monaco Editor** | Full VS Code editor experience with syntax highlighting |
+| **Tab Management** | Multiple open files with dirty-state tracking |
+| **File Tree Explorer** | Browse workspace files with expandable directory tree |
+| **Disk Change Detection** | Detect and prompt on external file modifications |
+| **Markdown Preview** | Toggle rendered markdown view for `.md` files |
+
+### Model Terminal
+
+| Feature | Description |
+| --- | --- |
+| **Live Output** | Real-time stdout/stderr streaming from tool-invoked commands |
+| **Interactive Input** | Send stdin to running processes |
+| **Process Interrupt** | Kill active processes with `(ctrl+c)` |
+| **Clear Output** | Reset terminal buffer |
+
+### Toast Notifications
+
+| Event | Notification | Sound |
+| --- | --- | --- |
+| Chat complete | ✅ Success toast + "Ding" | Pleasant chime |
+| Orchestration complete | ✅ Success toast + "Ding" | Pleasant chime |
+| Error (non-cancelled) | ❌ Error toast + "Buzz" | Subtle buzz |
+| Model asks question | ℹ️ Info toast + "Blip" | Soft blip |
+
+### TurboVec Memory
+
+The Diagnostics tab supports managing vector memory namespaces:
+
+- **Export Namespace**: Save as `*.turbovec-namespace.json`
+- **Import Namespace**: Restore from archive with optional overwrite
+- **Clear Namespace**: Remove all records
+- **Lock/Unlock**: Prevent accidental modifications
+
+## Presets
+
+### Chat Presets
+
+Access from the **Chat Settings** panel → **Quick Preset** dropdown:
+
+| Preset | Provider | Endpoint | Model | Context |
+| --- | --- | --- | --- | --- |
+| 🏠 Local Ollama (Coding) | ollama | `localhost:11434` | llama3 | 8K |
+| 🏠 Local Ollama (32K) | ollama | `localhost:11434` | llama3.1 | 32K |
+| 🌐 OpenAI-Compatible | openai-compatible | `localhost:1234` | (custom) | Auto |
+| 📖 Read-Only Assistant | ollama | `localhost:11434` | llama3 | 8K |
+
+### Orchestration Plan Presets
+
+Access from the **Orchestration** tab → **Import Preset** button:
+
+| Preset | Stages | Description |
+| --- | --- | --- |
+| Full Coding Pipeline | 5 | Context Scan → Planner → Implementer → Validator → Reviewer |
+| Quick Fix | 2 | Analyze → Implement (minimal steps) |
+| Code Review | 3 | Scan → Review → Suggestions |
 
 ## Run
 
@@ -29,13 +113,13 @@ This enables workflows like:
 
 Commands:
 
-- npm install
-- npm run build
-- npm start
+- `npm install`
+- `npm run build`
+- `npm start`
 
 For a one-shot dev run:
 
-- npm run dev
+- `npm run dev`
 
 You can also launch from VS Code debugger with [launch.json](.vscode/launch.json).
 
@@ -43,9 +127,11 @@ You can also launch from VS Code debugger with [launch.json](.vscode/launch.json
 
 In the Chat tab, set:
 
-- Endpoint, for example: http://localhost:11434/v1/chat/completions
-- Model, for example: llama3
+- Endpoint, for example: `http://localhost:11434/v1/chat/completions`
+- Model, for example: `llama3`
 - API key only when required by your endpoint
+
+Or use a **Quick Preset** from the Chat Settings panel to auto-configure.
 
 ## Orchestration Plan
 
@@ -55,25 +141,16 @@ The orchestration tab stores a JSON plan in Electron user data and supports:
 - Validate
 - Save
 - Run
+- Import (from file or preset)
+- Export (to JSON file)
 
 Each step can enable these tools:
 
-- list_dir
-- file_search
-- read_file
-- create_file
-- write_file
-- replace_in_file
-- insert_in_file
-- create_directory
-- move_path
-- delete_path
-- grep_search
-- git_status
-- git_diff
-- git_add
-- git_commit
-- run_terminal_command
+- `list_dir`, `file_search`, `read_file`, `create_file`, `write_file`
+- `replace_in_file`, `insert_in_file`, `create_directory`, `move_path`, `delete_path`
+- `grep_search`, `git_status`, `git_diff`, `git_add`, `git_commit`
+- `run_terminal_command`, `browser_fetch`, `web_search`
+- `list_namespaces`, `query_memory`, `query_user`
 
 Tool execution is restricted to workspace paths and only to tools enabled on that step.
 
@@ -81,7 +158,6 @@ Tool calls also support `scope`:
 
 - `workspace` (default): selected top-level workspace directory
 - `root`: LocalCode app root directory
-
 
 Line-oriented file tools use 1-based numbering consistently:
 
@@ -96,6 +172,7 @@ Line-oriented file tools use 1-based numbering consistently:
 - [src/backend/llmClient.ts](src/backend/llmClient.ts) Streaming + tool-call chat client
 - [src/backend/orchestrationEngine.ts](src/backend/orchestrationEngine.ts) Step runner
 - [src/backend/toolRuntime.ts](src/backend/toolRuntime.ts) Local tool implementations
+- [src/backend/schema.ts](src/backend/schema.ts) Plan schema, validation, and presets
 - [renderer/index.html](renderer/index.html) Desktop UI shell
 - [renderer/app.js](renderer/app.js) UI logic + Monaco wiring
 

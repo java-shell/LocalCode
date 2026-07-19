@@ -60,6 +60,92 @@ function normalizeProvider(value) {
 }
 
 /* ========================================
+   Preset Definitions
+   ======================================== */
+
+const PRESETS = {
+  ollama_local: {
+    label: '🏠 Local Ollama (Coding)',
+    description: 'Local Llama 3 via Ollama with full tool access',
+    provider: 'ollama',
+    endpoint: 'http://localhost:11434/v1/chat/completions',
+    model: 'llama3',
+    apiKey: '',
+    maxToolTurns: 40,
+    requestTimeoutMs: 180000,
+    contextWindowTokens: 8192
+  },
+  ollama_local_32k: {
+    label: '🏠 Local Ollama (32K Context)',
+    description: 'Local model with extended context window for larger codebases',
+    provider: 'ollama',
+    endpoint: 'http://localhost:11434/v1/chat/completions',
+    model: 'llama3.1',
+    apiKey: '',
+    maxToolTurns: 60,
+    requestTimeoutMs: 300000,
+    contextWindowTokens: 32768
+  },
+  openai_compatible: {
+    label: '🌐 OpenAI-Compatible Endpoint',
+    description: 'Custom OpenAI-compatible API (LM Studio, vLLM, etc.)',
+    provider: 'openai-compatible',
+    endpoint: 'http://localhost:1234/v1/chat/completions',
+    model: '',
+    apiKey: '',
+    maxToolTurns: 40,
+    requestTimeoutMs: 180000,
+    contextWindowTokens: 0
+  },
+  lite_read_only: {
+    label: '📖 Read-Only Assistant',
+    description: 'Lightweight setup with read-only tools and low timeout',
+    provider: 'ollama',
+    endpoint: 'http://localhost:11434/v1/chat/completions',
+    model: 'llama3',
+    apiKey: '',
+    maxToolTurns: 10,
+    requestTimeoutMs: 60000,
+    contextWindowTokens: 8192
+  }
+};
+
+/**
+ * Apply a preset configuration to settings and UI.
+ */
+async function applyPreset(presetKey) {
+  const preset = PRESETS[presetKey];
+  if (!preset) return;
+
+  // Update settings state
+  settingsState.provider = preset.provider;
+  settingsState.endpoint = preset.endpoint;
+  settingsState.model = preset.model;
+  settingsState.apiKey = preset.apiKey || '';
+  settingsState.maxToolTurns = clampMaxToolTurns(preset.maxToolTurns);
+  settingsState.requestTimeoutMs = clampRequestTimeoutMs(preset.requestTimeoutMs);
+
+  if (preset.contextWindowTokens && preset.model) {
+    setConfiguredContextWindow(preset.model, preset.contextWindowTokens);
+  }
+
+  saveSettings();
+
+  // Sync UI elements (use global refs from initChat)
+  if (typeof provider !== 'undefined' && provider) provider.value = preset.provider;
+  if (typeof endpoint !== 'undefined' && endpoint) endpoint.value = preset.endpoint;
+  if (typeof model !== 'undefined' && model) model.value = preset.model;
+  if (typeof apiKey !== 'undefined' && apiKey) apiKey.value = preset.apiKey || '';
+
+  // Refresh model list and sync context window input
+  if (typeof refreshModelOptions === 'function') await refreshModelOptions();
+  if (typeof syncChatContextWindowInput === 'function') syncChatContextWindowInput();
+
+  showToast({ type: 'success', title: `Preset applied: ${preset.label}`, message: preset.description, durationMs: 3000 });
+}
+
+
+/* ========================================
    Toast Notification System
    ======================================== */
 
@@ -2298,6 +2384,26 @@ async function initChat() {
     settingsState.chatMemoryNamespace = chatNewMemoryNamespace.value.trim();
     saveSettings();
   });
+
+  // Preset selector wiring
+  const chatPresetSelect = document.getElementById('chatPresetSelect');
+  if (chatPresetSelect) {
+    for (const [key, preset] of Object.entries(PRESETS)) {
+      const option = document.createElement('option');
+      option.value = key;
+      option.textContent = preset.label;
+      option.title = preset.description;
+      chatPresetSelect.appendChild(option);
+    }
+    chatPresetSelect.addEventListener('change', async () => {
+      const selected = chatPresetSelect.value;
+      if (selected) {
+        await applyPreset(selected);
+        chatPresetSelect.value = ''; // Reset after applying
+      }
+    });
+  }
+
   chatSessionList.addEventListener('change', async () => {
     if (sessionListMutating) return;
     if (chatRunning) return;
@@ -3389,6 +3495,49 @@ async function initOrchestration() {
       status.textContent = `Export failed: ${error instanceof Error ? error.message : String(error)}`;
     }
   });
+
+  // Import Preset button handler
+  const importPresetButton = document.getElementById('orchImportPreset');
+  if (importPresetButton) {
+    importPresetButton.addEventListener('click', async () => {
+      try {
+        const presets = await window.llmIde.getPlanPresets();
+        const presetKeys = Object.keys(presets);
+        if (presetKeys.length === 0) {
+          status.textContent = 'No presets available';
+          return;
+        }
+
+        // Build a prompt listing available presets
+        let presetList = 'Available orchestration plan presets:\n\n';
+        for (const key of presetKeys) {
+          const p = presets[key];
+          presetList += `  [${key}] ${p.name} — ${p.description}\n`;
+        }
+        presetList += '\nEnter the preset key to import: ';
+
+        // Use query_user-style dialog via a simple prompt
+        const selectedKey = window.prompt(presetList);
+        if (!selectedKey || !presets[selectedKey]) {
+          status.textContent = selectedKey ? `Unknown preset: ${selectedKey}` : 'Import canceled';
+          return;
+        }
+
+        const plan = await window.llmIde.getPlanPreset(selectedKey);
+        currentPlan = normalizePlan(plan);
+        planNameEl.value = currentPlan.name;
+        planDescriptionEl.value = currentPlan.description;
+        loopUntilCompleteEl.checked = currentPlan.loopUntilComplete;
+        maxLoopsEl.value = String(currentPlan.maxLoops);
+        completionMarkerEl.value = currentPlan.completionMarker;
+        renderWorkflow();
+
+        showToast({ type: 'success', title: `Preset imported: ${presets[selectedKey].name}`, message: presets[selectedKey].description, durationMs: 3000 });
+      } catch (error) {
+        status.textContent = `Preset import failed: ${error instanceof Error ? error.message : String(error)}`;
+      }
+    });
+  }
 
   document.getElementById('orchValidate').addEventListener('click', async () => {
     const errors = await window.llmIde.validatePlan(JSON.stringify(readPlanFromUi()));

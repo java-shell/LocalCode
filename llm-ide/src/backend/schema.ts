@@ -284,3 +284,262 @@ export function validatePlan(value: unknown): string[] {
 
   return errors;
 }
+
+/* ========================================
+   Orchestration Plan Presets
+   ======================================== */
+
+export const planPresets: Record<string, OrchestrationPlan> = {
+  full_coding_pipeline: {
+    version: 1,
+    name: 'Full Coding Pipeline',
+    description: '5-stage pipeline: Context Scan → Planner → Implementer → Validator → Reviewer. Comprehensive workflow for safe code changes.',
+    loopUntilComplete: false,
+    maxLoops: 3,
+    completionMarker: 'TASK_COMPLETE',
+    steps: [
+      {
+        id: 'context-scan',
+        name: 'Context Scan',
+        provider: 'openai-compatible',
+        endpoint: 'http://localhost:11434/v1/chat/completions',
+        model: 'llama3',
+        contextWindowTokens: 32768,
+        systemPrompt: 'You are a context scanner. Inspect the repository structure and relevant files. Use list_repo_tree, list_dir, read_file, and grep_search to understand the codebase. Produce a concise brief with: objective, relevant files, current behavior, likely change points, risks, and validation commands. Do not edit files.',
+        temperature: 0.1,
+        maxTokens: 3000,
+        maxToolTurns: 20,
+        maxRetries: 1,
+        tools: [
+          { name: 'list_repo_tree', enabled: true },
+          { name: 'list_dir', enabled: true },
+          { name: 'read_file', enabled: true },
+          { name: 'grep_search', enabled: true },
+          { name: 'git_status', enabled: true }
+        ],
+        passOutputToNext: true,
+        allowCompletionTool: false
+      },
+      {
+        id: 'planner',
+        name: 'Implementation Planner',
+        provider: 'openai-compatible',
+        endpoint: 'http://localhost:11434/v1/chat/completions',
+        model: 'llama3',
+        contextWindowTokens: 32768,
+        systemPrompt: 'You are an implementation planner. Use the original request and context scan output. Produce a small, ordered plan with exact files to change, tool permissions needed, validation commands, and rollback considerations. Do not edit files.',
+        temperature: 0.1,
+        maxTokens: 2500,
+        maxToolTurns: 10,
+        maxRetries: 1,
+        tools: [
+          { name: 'list_repo_tree', enabled: true },
+          { name: 'list_dir', enabled: true },
+          { name: 'read_file', enabled: true },
+          { name: 'grep_search', enabled: true }
+        ],
+        passOutputToNext: true,
+        allowCompletionTool: false
+      },
+      {
+        id: 'implementer',
+        name: 'Safe Implementer',
+        provider: 'openai-compatible',
+        endpoint: 'http://localhost:11434/v1/chat/completions',
+        model: 'llama3',
+        contextWindowTokens: 32768,
+        systemPrompt: 'You are the implementation agent. Apply the plan using small, valid tool calls. Prefer replace_in_file and insert_in_file over write_file. For new files, use create_file then insert_in_file in chunks. After editing, summarize changed files.',
+        temperature: 0.15,
+        maxTokens: 6000,
+        maxToolTurns: 40,
+        maxRetries: 1,
+        tools: [
+          { name: 'list_repo_tree', enabled: true },
+          { name: 'list_dir', enabled: true },
+          { name: 'read_file', enabled: true },
+          { name: 'grep_search', enabled: true },
+          { name: 'create_file', enabled: true },
+          { name: 'write_file', enabled: false },
+          { name: 'replace_in_file', enabled: true },
+          { name: 'insert_in_file', enabled: true },
+          { name: 'create_directory', enabled: true },
+          { name: 'git_diff', enabled: true },
+          { name: 'git_status', enabled: true }
+        ],
+        passOutputToNext: true,
+        allowCompletionTool: false
+      },
+      {
+        id: 'validator',
+        name: 'Validator',
+        provider: 'openai-compatible',
+        endpoint: 'http://localhost:11434/v1/chat/completions',
+        model: 'llama3',
+        contextWindowTokens: 32768,
+        systemPrompt: 'You are the validation agent. Run relevant validation commands (npm run build, npm test, typecheck, lint). If validation fails, explain the failure and propose the smallest repair.',
+        temperature: 0.1,
+        maxTokens: 4000,
+        maxToolTurns: 20,
+        maxRetries: 1,
+        tools: [
+          { name: 'read_file', enabled: true },
+          { name: 'grep_search', enabled: true },
+          { name: 'run_terminal_command', enabled: true },
+          { name: 'git_diff', enabled: true },
+          { name: 'git_status', enabled: true }
+        ],
+        passOutputToNext: true,
+        allowCompletionTool: false
+      },
+      {
+        id: 'reviewer',
+        name: 'Reviewer Checkpoint',
+        provider: 'openai-compatible',
+        endpoint: 'http://localhost:11434/v1/chat/completions',
+        model: 'llama3',
+        contextWindowTokens: 32768,
+        systemPrompt: 'You are the final reviewer. Review all previous output and current diff. Lead with any bugs, risks, or missing tests. Provide a concise summary and suggested human review points.',
+        temperature: 0.1,
+        maxTokens: 4000,
+        maxToolTurns: 5,
+        maxRetries: 1,
+        tools: [
+          { name: 'read_file', enabled: true },
+          { name: 'grep_search', enabled: true },
+          { name: 'git_diff', enabled: true },
+          { name: 'git_status', enabled: true }
+        ],
+        passOutputToNext: false,
+        allowCompletionTool: true
+      }
+    ]
+  },
+
+  quick_fix: {
+    version: 1,
+    name: 'Quick Fix',
+    description: '2-stage pipeline: Analyze → Implement. Fast workflow for simple changes.',
+    loopUntilComplete: false,
+    maxLoops: 3,
+    completionMarker: 'TASK_COMPLETE',
+    steps: [
+      {
+        id: 'analyze',
+        name: 'Analyze',
+        provider: 'openai-compatible',
+        endpoint: 'http://localhost:11434/v1/chat/completions',
+        model: 'llama3',
+        contextWindowTokens: 32768,
+        systemPrompt: 'Analyze the request and identify the files that need changes. Read relevant files and produce a concise plan.',
+        temperature: 0.1,
+        maxTokens: 2000,
+        maxToolTurns: 15,
+        maxRetries: 1,
+        tools: [
+          { name: 'list_repo_tree', enabled: true },
+          { name: 'list_dir', enabled: true },
+          { name: 'read_file', enabled: true },
+          { name: 'grep_search', enabled: true }
+        ],
+        passOutputToNext: true,
+        allowCompletionTool: false
+      },
+      {
+        id: 'implement',
+        name: 'Implement',
+        provider: 'openai-compatible',
+        endpoint: 'http://localhost:11434/v1/chat/completions',
+        model: 'llama3',
+        contextWindowTokens: 32768,
+        systemPrompt: 'Implement the changes using replace_in_file or insert_in_file. Keep changes focused and minimal.',
+        temperature: 0.15,
+        maxTokens: 4000,
+        maxToolTurns: 30,
+        maxRetries: 1,
+        tools: [
+          { name: 'read_file', enabled: true },
+          { name: 'grep_search', enabled: true },
+          { name: 'create_file', enabled: true },
+          { name: 'replace_in_file', enabled: true },
+          { name: 'insert_in_file', enabled: true },
+          { name: 'git_diff', enabled: true }
+        ],
+        passOutputToNext: false,
+        allowCompletionTool: true
+      }
+    ]
+  },
+
+  code_review: {
+    version: 1,
+    name: 'Code Review',
+    description: '3-stage pipeline: Scan → Review → Suggestions. Analyze code quality and provide improvement recommendations.',
+    loopUntilComplete: false,
+    maxLoops: 1,
+    completionMarker: 'TASK_COMPLETE',
+    steps: [
+      {
+        id: 'scan',
+        name: 'Repository Scan',
+        provider: 'openai-compatible',
+        endpoint: 'http://localhost:11434/v1/chat/completions',
+        model: 'llama3',
+        contextWindowTokens: 32768,
+        systemPrompt: 'Scan the repository structure. Identify key source files, test files, and configuration. Use list_repo_tree, list_dir, and read_file to understand the project.',
+        temperature: 0.1,
+        maxTokens: 2500,
+        maxToolTurns: 20,
+        maxRetries: 1,
+        tools: [
+          { name: 'list_repo_tree', enabled: true },
+          { name: 'list_dir', enabled: true },
+          { name: 'read_file', enabled: true },
+          { name: 'grep_search', enabled: true }
+        ],
+        passOutputToNext: true,
+        allowCompletionTool: false
+      },
+      {
+        id: 'review',
+        name: 'Code Reviewer',
+        provider: 'openai-compatible',
+        endpoint: 'http://localhost:11434/v1/chat/completions',
+        model: 'llama3',
+        contextWindowTokens: 32768,
+        systemPrompt: 'Review the code for quality issues: bugs, security concerns, performance problems, style violations, and missing tests. Read relevant files in detail.',
+        temperature: 0.1,
+        maxTokens: 4000,
+        maxToolTurns: 25,
+        maxRetries: 1,
+        tools: [
+          { name: 'read_file', enabled: true },
+          { name: 'grep_search', enabled: true },
+          { name: 'git_diff', enabled: true },
+          { name: 'git_status', enabled: true }
+        ],
+        passOutputToNext: true,
+        allowCompletionTool: false
+      },
+      {
+        id: 'suggestions',
+        name: 'Suggestions',
+        provider: 'openai-compatible',
+        endpoint: 'http://localhost:11434/v1/chat/completions',
+        model: 'llama3',
+        contextWindowTokens: 32768,
+        systemPrompt: 'Produce a structured review report with: critical issues, warnings, suggestions, and positive findings. Do not make edits.',
+        temperature: 0.1,
+        maxTokens: 3000,
+        maxToolTurns: 5,
+        maxRetries: 1,
+        tools: [
+          { name: 'read_file', enabled: true },
+          { name: 'grep_search', enabled: true }
+        ],
+        passOutputToNext: false,
+        allowCompletionTool: true
+      }
+    ]
+  }
+};
+

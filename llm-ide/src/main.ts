@@ -5,7 +5,7 @@ import { ChildProcessWithoutNullStreams } from 'child_process';
 import { chatWithTools, listModelCatalog } from './backend/llmClient';
 import { runOrchestration } from './backend/orchestrationEngine';
 import { deleteChatSession, listChatSessions, loadChatSession, saveChatSession } from './backend/chatSessionStore';
-import { defaultPlan, normalizeAdvancedStageIds, validatePlan } from './backend/schema';
+import { defaultPlan, normalizeAdvancedStageIds, validatePlan, planPresets } from './backend/schema';
 import { loadPlan, savePlan } from './backend/planStore';
 import { pruneChatContextDumps } from './backend/chatDebugDumps';
 import {
@@ -989,6 +989,22 @@ ipcMain.handle('orch:validate-plan', async (_event, raw: string) => {
   } catch (error) {
     return [error instanceof Error ? `Invalid JSON: ${error.message}` : 'Invalid JSON'];
   }
+});
+
+ipcMain.handle('orch:list-plan-presets', async () => {
+  const presets: Record<string, { name: string; description: string }> = {};
+  for (const [key, plan] of Object.entries(planPresets) as [string, OrchestrationPlan][]) {
+    presets[key] = { name: plan.name, description: plan.description };
+  }
+  return presets;
+});
+
+ipcMain.handle('orch:get-plan-preset', async (_event, key: string) => {
+  const preset = planPresets[key];
+  if (!preset) {
+    throw new Error(`Unknown preset: ${key}`);
+  }
+  return preset;
 });
 
 ipcMain.handle(
