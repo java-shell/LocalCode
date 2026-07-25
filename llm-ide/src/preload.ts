@@ -147,7 +147,7 @@ const api = {
     ipcRenderer.invoke('workspace:watch-file', payload),
   unwatchWorkspaceFile: async (payload: { path: string }): Promise<{ watching: boolean }> =>
     ipcRenderer.invoke('workspace:unwatch-file', payload),
-  onWorkspaceFileChanged: (listener: WorkspaceFileChangeListener) => {
+    onWorkspaceFileChanged: (listener: WorkspaceFileChangeListener) => {
     const wrapped = (_event: Electron.IpcRendererEvent, relativePath: string) => listener(relativePath);
     ipcRenderer.on('workspace:file-changed', wrapped);
     return () => ipcRenderer.removeListener('workspace:file-changed', wrapped);
@@ -156,7 +156,15 @@ const api = {
     const wrapped = (_event: Electron.IpcRendererEvent, value: string) => listener(value);
     ipcRenderer.on('orch:event', wrapped);
     return () => ipcRenderer.removeListener('orch:event', wrapped);
-  }
+  },
+  listReferenceWorkspaces: async (): Promise<{ referenceWorkspaces?: import('./shared/types').ReferenceWorkspace[] }> =>
+    ipcRenderer.invoke('workspace:list-reference-workspaces'),
+  addReferenceWorkspace: async (payload: { label?: string; path?: string; allowWrite?: boolean }): Promise<unknown> =>
+    ipcRenderer.invoke('workspace:add-reference-workspace', payload),
+  removeReferenceWorkspace: async (payload: { id: string }): Promise<{ ok: boolean; reason?: string }> =>
+    ipcRenderer.invoke('workspace:remove-reference-workspace', payload),
+  updateReferenceWorkspace: async (payload: { id: string; allowWrite?: boolean; label?: string }): Promise<unknown> =>
+    ipcRenderer.invoke('workspace:update-reference-workspace', payload)
 };
 
 contextBridge.exposeInMainWorld('llmIde', api);

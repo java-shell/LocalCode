@@ -31,10 +31,21 @@
           <strong>Workspace</strong>
           <div class="filetree-actions">
             <button id="workspaceSelect">Select</button>
+            <button id="workspaceSelectReference" type="button" title="Add a reference workspace folder from another codebase">+ Reference</button>
             <button id="workspaceRefresh">Refresh</button>
           </div>
         </div>
         <div id="workspacePath" class="workspace-path"></div>
+        <div id="referenceWorkspacesSection" class="reference-workspaces-section">
+          <div class="reference-workspaces-header">
+            <strong>Reference Workspaces</strong>
+            <div class="reference-actions">
+              <button id="addReferenceWorkspace" type="button" title="Add a reference workspace folder">+ Add</button>
+              <button id="removeAllReferenceWorkspaces" type="button" title="Remove all reference workspaces">Clear All</button>
+            </div>
+          </div>
+          <div id="referenceWorkspacesList" class="reference-workspaces-list"></div>
+        </div>
         <div id="filetree" class="filetree"></div>
       </section>
 

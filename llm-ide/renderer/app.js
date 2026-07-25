@@ -5333,6 +5333,7 @@ async function main() {
   initTerminalPanel();
   await setupMonaco();
   await initWorkspaceTree();
+  await loadReferenceWorkspaces();
   await initChat();
   await initOrchestration();
   await initAdvancedOrchestration();
@@ -5343,3 +5344,138 @@ main().catch(error => {
   const body = document.body;
   body.innerHTML = `<pre style=\"color:#ff6e7c;padding:20px\">${error instanceof Error ? error.stack : String(error)}</pre>`;
 });
+
+
+/* ========================================
+   Reference Workspace Management
+   ======================================== */
+
+let referenceWorkspaces = [];
+
+async function loadReferenceWorkspaces() {
+  try {
+    const result = await window.llmIde.listReferenceWorkspaces();
+    referenceWorkspaces = result.referenceWorkspaces || [];
+    renderReferenceWorkspaces();
+  } catch (err) {
+    console.error('Failed to load reference workspaces:', err);
+  }
+}
+
+function renderReferenceWorkspaces() {
+  const section = document.getElementById('referenceWorkspacesSection');
+  const list = document.getElementById('referenceWorkspacesList');
+  if (!section || !list) return;
+
+  section.hidden = false;
+  list.innerHTML = '';
+
+  for (const ref of referenceWorkspaces) {
+    const item = document.createElement('div');
+    item.className = 'ref-workspace-item';
+    item.dataset.id = ref.id;
+
+    // Label
+    const label = document.createElement('span');
+    label.className = 'ref-workspace-label';
+    label.textContent = ref.label;
+    label.title = ref.path;
+
+    // Path (truncated)
+    const pathSpan = document.createElement('span');
+    pathSpan.className = 'ref-workspace-path';
+    pathSpan.textContent = ref.path;
+    pathSpan.title = ref.path;
+
+    // Write toggle
+    const toggle = document.createElement('label');
+    toggle.className = 'ref-workspace-toggle';
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.checked = ref.allowWrite;
+    checkbox.title = ref.allowWrite ? 'Read/Write access enabled' : 'Read-only (click to enable write access)';
+    checkbox.addEventListener('change', async () => {
+      try {
+        await window.llmIde.updateReferenceWorkspace({ id: ref.id, allowWrite: checkbox.checked });
+        ref.allowWrite = checkbox.checked;
+        loadWorkspaceState(); // Refresh tool definitions
+      } catch (err) {
+        console.error('Failed to update reference workspace:', err);
+        checkbox.checked = ref.allowWrite;
+      }
+    });
+    const toggleLabel = document.createElement('span');
+    toggleLabel.textContent = 'RW';
+    toggle.appendChild(checkbox);
+    toggle.appendChild(toggleLabel);
+
+    // Remove button
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'ref-workspace-remove';
+    removeBtn.textContent = '✕';
+    removeBtn.title = 'Remove reference workspace';
+    removeBtn.addEventListener('click', async () => {
+      try {
+        await window.llmIde.removeReferenceWorkspace({ id: ref.id });
+        referenceWorkspaces = referenceWorkspaces.filter(r => r.id !== ref.id);
+        renderReferenceWorkspaces();
+        loadWorkspaceState(); // Refresh tool definitions
+      } catch (err) {
+        console.error('Failed to remove reference workspace:', err);
+      }
+    });
+
+    item.appendChild(label);
+    item.appendChild(pathSpan);
+    item.appendChild(toggle);
+    item.appendChild(removeBtn);
+    list.appendChild(item);
+  }
+}
+
+async function addReferenceWorkspace() {
+  try {
+    const result = await window.llmIde.addReferenceWorkspace({});
+    if (result && result.ok) {
+      referenceWorkspaces.push({ id: result.id, label: result.label, path: result.path, allowWrite: result.allowWrite });
+      renderReferenceWorkspaces();
+      loadWorkspaceState(); // Refresh tool definitions
+    }
+  } catch (err) {
+    console.error('Failed to add reference workspace:', err);
+  }
+}
+
+async function removeAllReferenceWorkspaces() {
+  try {
+    // Remove all reference workspaces one by one
+    const ids = referenceWorkspaces.map(r => r.id);
+    for (const id of ids) {
+      await window.llmIde.removeReferenceWorkspace({ id });
+    }
+    referenceWorkspaces = [];
+    renderReferenceWorkspaces();
+    loadWorkspaceState(); // Refresh tool definitions
+  } catch (err) {
+    console.error('Failed to remove all reference workspaces:', err);
+  }
+}
+
+// Wire up the add button and clear all button
+document.addEventListener('DOMContentLoaded', () => {
+  const addBtn = document.getElementById('addReferenceWorkspace');
+  if (addBtn) {
+    addBtn.addEventListener('click', addReferenceWorkspace);
+  }
+
+  const selectRefBtn = document.getElementById('workspaceSelectReference');
+  if (selectRefBtn) {
+    selectRefBtn.addEventListener('click', addReferenceWorkspace);
+  }
+
+  const removeAllBtn = document.getElementById('removeAllReferenceWorkspaces');
+  if (removeAllBtn) {
+    removeAllBtn.addEventListener('click', removeAllReferenceWorkspaces);
+  }
+});
+

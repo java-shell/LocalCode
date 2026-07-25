@@ -23,10 +23,11 @@ import {
 } from './shared/types';
 import { executeTool, getAllowedToolDefinitions, runTerminalCommand, toolDefinitions } from './backend/toolRuntime';
 import { buildWorkspaceTree, readWorkspaceFile, writeWorkspaceFile } from './backend/workspaceFs';
-import { TurboVecMemory } from './backend/turboVecMemory';
+import { TurboVecMemory, computeAdaptiveInjectionLimits } from './backend/turboVecMemory';
 
 let mainWindow: BrowserWindow | null = null;
 let selectedWorkspaceDir = process.cwd();
+let referenceWorkspaces: import('./shared/types').ReferenceWorkspace[] = [];
 let activeTerminalProcess: ChildProcessWithoutNullStreams | null = null;
 let activeChatAbortController: AbortController | null = null;
 let activeOrchestrationAbortController: AbortController | null = null;
@@ -253,7 +254,8 @@ function runtimeContext(sender?: Electron.WebContents, eventChannel: 'chat:event
 function workspaceState(): WorkspaceState {
   return {
     workspaceDir: selectedWorkspaceDir,
-    rootDir: selectedWorkspaceDir
+    rootDir: selectedWorkspaceDir,
+    referenceWorkspaces
   };
 }
 
@@ -280,14 +282,26 @@ function mainStatePath(): string {
 function restoreLastWorkspaceSelection() {
   try {
     const raw = fs.readFileSync(mainStatePath(), 'utf8');
-    const parsed = JSON.parse(raw) as { lastWorkspaceDir?: unknown };
+    const parsed = JSON.parse(raw) as { lastWorkspaceDir?: unknown; referenceWorkspaces?: import('./shared/types').ReferenceWorkspace[] };
     const candidate = String(parsed?.lastWorkspaceDir ?? '').trim();
-    if (!candidate) {
-      return;
+    if (candidate) {
+      try {
+        const stat = fs.statSync(candidate);
+        if (stat.isDirectory()) {
+          selectedWorkspaceDir = candidate;
+        }
+      } catch {
+        // Directory no longer exists, keep default
+      }
     }
-    const stat = fs.statSync(candidate);
-    if (stat.isDirectory()) {
-      selectedWorkspaceDir = candidate;
+    if (Array.isArray(parsed?.referenceWorkspaces)) {
+      referenceWorkspaces = parsed.referenceWorkspaces.filter(ref => {
+        try {
+          return fs.statSync(ref.path).isDirectory();
+        } catch {
+          return false;
+        }
+      });
     }
   } catch {
     // Ignore missing/invalid state file and keep default workspace.
@@ -296,7 +310,8 @@ function restoreLastWorkspaceSelection() {
 
 function persistLastWorkspaceSelection() {
   const payload = {
-    lastWorkspaceDir: selectedWorkspaceDir
+    lastWorkspaceDir: selectedWorkspaceDir,
+    referenceWorkspaces
   };
 
   void fs.promises
@@ -482,6 +497,8 @@ app.whenReady().then(() => {
   const turboVecVenvDir = path.join(app.getPath('userData'), '.turbovec-venv');
   const bridgeScript = unpackedAppResourcePath('src', 'backend', 'turbovec_bridge.py');
   turboMemory = new TurboVecMemory(memoryRoot, bridgeScript, undefined, turboVecVenvDir, globalMemoryRoot);
+  // P3 #10: Load persisted GraphRAG stats from disk on startup
+  turboMemory.loadPersistedGraphRagStats().catch(() => {});
   createWindow();
 
   app.on('activate', () => {
@@ -538,11 +555,11 @@ ipcMain.handle(
             });
 
         if (recalled.length > 0) {
-          const memoryLines = formatMemoryInjection(recalled, {
-            maxItems: 4,
-            maxCharsPerItem: 1000,
-            maxTotalChars: 3500
-          });
+          // P3 #8: Use adaptive injection limits based on context window
+          const injectionLimits = computeAdaptiveInjectionLimits(
+            payload.contextWindowTokens || config.contextWindowTokens
+          );
+          const memoryLines = formatMemoryInjection(recalled, injectionLimits);
           recalledPromptTokens = estimateTokensFromText(memoryLines);
           messages.push({
             role: 'system',
@@ -1100,3 +1117,72 @@ ipcMain.handle(
     }
   }
 );
+
+// Reference workspace management IPC handlers
+ipcMain.handle('workspace:list-reference-workspaces', async () => {
+  return { referenceWorkspaces };
+});
+
+ipcMain.handle('workspace:add-reference-workspace', async (_event, payload: { label?: string; path?: string; allowWrite?: boolean }) => {
+  let targetPath = String(payload.path ?? '').trim();
+
+  if (!targetPath) {
+    const result = await dialog.showOpenDialog(mainWindow!, {
+      title: 'Select Reference Workspace Directory',
+      properties: ['openDirectory']
+    });
+    if (result.canceled || result.filePaths.length === 0) {
+      return { ok: false, reason: 'canceled' };
+    }
+    targetPath = result.filePaths[0];
+  }
+
+  try {
+    const stat = fs.statSync(targetPath);
+    if (!stat.isDirectory()) {
+      return { ok: false, reason: 'not_a_directory' };
+    }
+  } catch {
+    return { ok: false, reason: 'path_not_found' };
+  }
+
+  const label = String(payload.label ?? path.basename(targetPath)).trim();
+  const id = 'ref_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+  const allowWrite = Boolean(payload.allowWrite);
+
+  if (referenceWorkspaces.some(ref => ref.path === targetPath)) {
+    return { ok: false, reason: 'duplicate_path' };
+  }
+
+  referenceWorkspaces.push({ id, label, path: targetPath, allowWrite });
+  persistLastWorkspaceSelection();
+  return { ok: true, id, label, path: targetPath, allowWrite };
+});
+
+ipcMain.handle('workspace:remove-reference-workspace', async (_event, payload: { id: string }) => {
+  const id = String(payload.id ?? '').trim();
+  const index = referenceWorkspaces.findIndex(ref => ref.id === id);
+  if (index < 0) {
+    return { ok: false, reason: 'not_found' };
+  }
+  referenceWorkspaces.splice(index, 1);
+  persistLastWorkspaceSelection();
+  return { ok: true };
+});
+
+ipcMain.handle('workspace:update-reference-workspace', async (_event, payload: { id: string; allowWrite?: boolean; label?: string }) => {
+  const id = String(payload.id ?? '').trim();
+  const ref = referenceWorkspaces.find(r => r.id === id);
+  if (!ref) {
+    return { ok: false, reason: 'not_found' };
+  }
+  if (typeof payload.allowWrite === 'boolean') {
+    ref.allowWrite = payload.allowWrite;
+  }
+  if (typeof payload.label === 'string') {
+    ref.label = payload.label.trim() || require('path').basename(ref.path);
+  }
+  persistLastWorkspaceSelection();
+  return { ok: true, referenceWorkspace: ref };
+});
+

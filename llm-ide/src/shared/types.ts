@@ -240,4 +240,18 @@ export interface WorkspaceTreeNode {
 export interface WorkspaceState {
   workspaceDir: string;
   rootDir: string;
+  referenceWorkspaces?: ReferenceWorkspace[];
 }
+
+
+export interface ReferenceWorkspace {
+  /** Unique identifier for this reference workspace */
+  id: string;
+  /** Display label shown in the UI */
+  label: string;
+  /** Absolute path to the reference folder */
+  path: string;
+  /** When true, the model may write to this workspace without prompting. Default: false (read-only). */
+  allowWrite: boolean;
+}
+

@@ -12,7 +12,7 @@ import {
   OrchestrationStep,
   TokenUsage
 } from '../shared/types';
-import { RetrievedMemoryItem } from './turboVecMemory';
+import { RetrievedMemoryItem, computeAdaptiveInjectionLimits } from './turboVecMemory';
 
 export interface RuntimeContext {
   workspaceDir: string;
@@ -115,10 +115,10 @@ function estimateTokensFromText(text: string): number {
   return Math.max(1, Math.ceil(normalized.length / 4));
 }
 
-function formatRecalledMemory(items: RetrievedMemoryItem[]): string {
-  const maxItems = 4;
-  const maxCharsPerItem = 1000;
-  const maxTotalChars = 3500;
+function formatRecalledMemory(items: RetrievedMemoryItem[], limits?: { maxItems?: number; maxCharsPerItem?: number; maxTotalChars?: number }): string {
+  const maxItems = Math.max(1, Math.min(20, Number(limits?.maxItems ?? 4)));
+  const maxCharsPerItem = Math.max(200, Math.min(4000, Number(limits?.maxCharsPerItem ?? 1000)));
+  const maxTotalChars = Math.max(500, Math.min(12000, Number(limits?.maxTotalChars ?? 3500)));
 
   let used = 0;
   const lines: string[] = [];
@@ -321,7 +321,9 @@ async function runStepWithRetries(
     if (memoryAdapter) {
       const recalled = await memoryAdapter.retrieve(config, `${originalPrompt}\n\n${stepInput}`, step.name);
       if (recalled.length > 0) {
-        const recalledBlock = formatRecalledMemory(recalled);
+        // P3 #8: Use adaptive injection limits based on context window
+        const injectionLimits = computeAdaptiveInjectionLimits(config.contextWindowTokens);
+        const recalledBlock = formatRecalledMemory(recalled, injectionLimits);
         messages.push({
           role: 'system',
           content:

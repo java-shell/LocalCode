@@ -3,7 +3,7 @@ import * as path from 'path';
 import simpleGit from 'simple-git';
 import axios from 'axios';
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
-import { ToolDefinition, LLMConfig } from '../shared/types';
+import { ToolDefinition, LLMConfig, ReferenceWorkspace } from '../shared/types';
 import type { TurboVecMemory, TurboVecNamespaceDiagnostics } from './turboVecMemory';
 
 export interface QueryUserRequest {
@@ -24,6 +24,7 @@ type QueryUserCallback = (request: QueryUserRequest) => Promise<QueryUserRespons
 interface RuntimeContext {
   workspaceDir: string;
   rootDir: string;
+  referenceWorkspaces?: ReferenceWorkspace[];
   onTerminalOutput?: (payload: { source: 'stdout' | 'stderr'; text: string }) => void;
   onTerminalEvent?: (payload: { type: 'start' | 'end'; command: string; cwd: string; code?: number | null; signal?: string | null }) => void;
   setActiveTerminalProcess?: (child: ChildProcessWithoutNullStreams | null) => void;
@@ -36,9 +37,49 @@ interface RuntimeContext {
   llmConfig?: LLMConfig;
   activeNamespaces?: string[];
   onQueryUser?: QueryUserCallback;
+  requestReferenceWriteApproval?: (payload: {
+    tool: string;
+    summary: string;
+    referenceLabel: string;
+    targets: string[];
+  }) => Promise<boolean>;
 }
 
-type ToolScope = 'workspace' | 'root';
+/** Tool scope: 'workspace', 'root', or a reference workspace id prefixed with 'ref:' */
+type ToolScope = string;
+
+const BUILTIN_SCOPES = new Set(['workspace', 'root']);
+
+function isReferenceScope(scope: string): boolean {
+  return scope.startsWith('ref:') && !BUILTIN_SCOPES.has(scope);
+}
+
+function getReferenceId(scope: string): string | null {
+  if (!isReferenceScope(scope)) return null;
+  return scope.slice(4);
+}
+
+function findReferenceWorkspace(id: string, context?: RuntimeContext): ReferenceWorkspace | undefined {
+  const refs = context?.referenceWorkspaces;
+  if (!refs || refs.length === 0) return undefined;
+  return refs.find(ref => ref.id === id);
+}
+
+function getScopeLabel(scope: ToolScope, context?: RuntimeContext): string {
+  if (scope === 'workspace') return 'workspace';
+  if (scope === 'root') return 'root';
+  const ref = findReferenceWorkspace(getReferenceId(scope) ?? '', context);
+  if (ref) return `reference "${ref.label}"`;
+  return scope;
+}
+
+function isScopeWritable(scope: ToolScope, context?: RuntimeContext): boolean {
+  if (scope === 'workspace') return true;
+  if (scope === 'root') return true;
+  const ref = findReferenceWorkspace(getReferenceId(scope) ?? '', context);
+  if (ref) return ref.allowWrite;
+  return false;
+}
 
 function defaultRootDir(): string {
   return process.cwd();
@@ -48,21 +89,49 @@ function effectiveContext(context?: RuntimeContext): RuntimeContext {
   const root = context?.rootDir || defaultRootDir();
   return {
     workspaceDir: context?.workspaceDir || root,
-    rootDir: root
+    rootDir: root,
+    referenceWorkspaces: context?.referenceWorkspaces
   };
 }
 
 function parseScope(args: Record<string, unknown>): ToolScope {
-  return String(args.scope ?? 'workspace').toLowerCase() === 'root' ? 'root' : 'workspace';
+  const raw = String(args.scope ?? 'workspace').toLowerCase();
+  if (raw === 'root') return 'root';
+  if (raw.startsWith('ref:')) return raw;
+  return 'workspace';
 }
 
-function scopeBaseDir(scope: ToolScope, context?: RuntimeContext): string {
+function internalScopeBaseDir(scope: ToolScope, context?: RuntimeContext): string | null {
   const ctx = effectiveContext(context);
-  return scope === 'root' ? ctx.rootDir : ctx.workspaceDir;
+  if (scope === 'root') return ctx.rootDir;
+  if (scope === 'workspace') return ctx.workspaceDir;
+  const ref = findReferenceWorkspace(getReferenceId(scope) ?? '', context);
+  if (ref) return ref.path;
+  return null;
+}
+
+function requireScopeBaseDir(scope: ToolScope, context?: RuntimeContext): string {
+  const base = internalScopeBaseDir(scope, context);
+  if (base === null) {
+    throw new Error(`Unknown scope: ${scope}`);
+  }
+  return base;
+}
+
+// Backward-compatible scopeBaseDir that throws on unknown scope
+function scopeBaseDir(scope: ToolScope, context?: RuntimeContext): string {
+  const base = internalScopeBaseDir(scope, context);
+  if (base === null) {
+    throw new Error(`Unknown scope: ${scope}`);
+  }
+  return base;
 }
 
 function resolveScopedPath(inputPath: string, scope: ToolScope, context?: RuntimeContext): string {
   const base = scopeBaseDir(scope, context);
+  if (base === null) {
+    throw new Error(`Unknown scope: ${scope}`);
+  }
   const resolved = path.resolve(base, inputPath || '.');
   const relative = path.relative(base, resolved);
   if (relative.startsWith('..') || path.isAbsolute(relative)) {
@@ -70,7 +139,6 @@ function resolveScopedPath(inputPath: string, scope: ToolScope, context?: Runtim
   }
   return resolved;
 }
-
 async function pathExists(target: string): Promise<boolean> {
   try {
     await fs.access(target);
@@ -107,6 +175,36 @@ function toPositiveInteger(value: unknown, fallback: number): number {
   return parsed;
 }
 
+function buildScopeProperty(context?: RuntimeContext): Record<string, unknown> {
+  const values = getScopeEnumValues(context);
+  const descriptions = getScopeDescriptions(context);
+  return {
+    type: 'string',
+    enum: values,
+    description: `Scope to operate in. ${descriptions}`
+  };
+}
+
+function getScopeEnumValues(context?: RuntimeContext): string[] {
+  const values = ['workspace', 'root'];
+  for (const ref of context?.referenceWorkspaces ?? []) {
+    values.push(`ref:${ref.id}`);
+  }
+  return values;
+}
+
+function getScopeDescriptions(context?: RuntimeContext): string {
+  const parts: string[] = [];
+  parts.push('"workspace" (default): the primary workspace directory');
+  parts.push('"root": the application root directory');
+  for (const ref of context?.referenceWorkspaces ?? []) {
+    const access = ref.allowWrite ? 'read/write' : 'read-only';
+    parts.push(`"ref:${ref.id}": reference workspace "${ref.label}" (${access})`);
+  }
+  return parts.join('. ');
+}
+
+// Default scope property for tool definitions (will be overridden at runtime)
 const scopeProperty = { type: 'string', enum: ['workspace', 'root'] };
 
 const mutatingTools = new Set([
@@ -571,9 +669,33 @@ export const toolDefinitions: ToolDefinition[] = [
 
 ];
 
-export function getAllowedToolDefinitions(names: string[]): ToolDefinition[] {
+export function getAllowedToolDefinitions(names: string[], context?: RuntimeContext): ToolDefinition[] {
   const allowed = new Set(names);
-  return toolDefinitions.filter(tool => allowed.has(tool.function.name));
+  const filtered = toolDefinitions.filter(tool => allowed.has(tool.function.name));
+  if (!context || !context.referenceWorkspaces || context.referenceWorkspaces.length === 0) {
+    return filtered;
+  }
+  // Override scope enums with reference workspace values
+  const scopeProp = buildScopeProperty(context);
+  return filtered.map(tool => {
+    const params = tool.function.parameters;
+    if (params && params.properties && params.properties.scope) {
+      return {
+        ...tool,
+        function: {
+          ...tool.function,
+          parameters: {
+            ...params,
+            properties: {
+              ...params.properties,
+              scope: scopeProp
+            }
+          }
+        }
+      };
+    }
+    return tool;
+  });
 }
 
 function insideDir(base: string, target: string): boolean {
@@ -638,7 +760,7 @@ async function enforceWorkspaceMutationApproval(
     try {
       return resolveScopedPath(input, scope, context);
     } catch {
-      return path.resolve(scopeBase, input || '.');
+      return path.resolve(requireScopeBaseDir(scope, context) ?? context.workspaceDir, input || '.');
     }
   });
   const outsideTargets = absoluteTargets.filter(target => !insideDir(context.workspaceDir, target));
@@ -998,6 +1120,8 @@ async function fileSearch(args: Record<string, unknown>, context?: RuntimeContex
 
 async function readFile(args: Record<string, unknown>, context?: RuntimeContext) {
   const scope = parseScope(args);
+  const base = scopeBaseDir(scope, context);
+  if (base === null) throw new Error(`Unknown scope: ${scope}`);
   const target = resolveScopedPath(String(args.path ?? ''), scope, context);
   const content = await fs.readFile(target, 'utf8');
   const lines = splitFileIntoLines(content);
@@ -1032,6 +1156,8 @@ async function readFile(args: Record<string, unknown>, context?: RuntimeContext)
 
 async function writeFile(args: Record<string, unknown>, context?: RuntimeContext) {
   const scope = parseScope(args);
+  const base = scopeBaseDir(scope, context);
+  if (base === null) throw new Error(`Unknown scope: ${scope}`);
   const target = resolveScopedPath(String(args.path ?? ''), scope, context);
   const content = String(args.content ?? '');
   await fs.mkdir(path.dirname(target), { recursive: true });
@@ -1214,7 +1340,7 @@ async function gitStatus(args: Record<string, unknown>, context?: RuntimeContext
 
 async function gitDiff(args: Record<string, unknown>, context?: RuntimeContext) {
   const scope = parseScope(args);
-  const git = simpleGit(scopeBaseDir(scope, context));
+  const git = (function() { const b = scopeBaseDir(scope, context); if (b === null) throw new Error('Unknown scope: ' + scope); return simpleGit(b); })();
   const file = args.path ? String(args.path) : undefined;
   const diff = await git.diff(file ? [file] : undefined);
   return { path: file ?? null, diff: diff.slice(0, 30000) };
@@ -1222,7 +1348,7 @@ async function gitDiff(args: Record<string, unknown>, context?: RuntimeContext) 
 
 async function gitAdd(args: Record<string, unknown>, context?: RuntimeContext) {
   const scope = parseScope(args);
-  const git = simpleGit(scopeBaseDir(scope, context));
+  const git = (function() { const b = scopeBaseDir(scope, context); if (b === null) throw new Error('Unknown scope: ' + scope); return simpleGit(b); })();
   if (Boolean(args.all)) {
     await git.add('.');
     return { staged: 'all' };
@@ -1237,7 +1363,7 @@ async function gitAdd(args: Record<string, unknown>, context?: RuntimeContext) {
 
 async function gitCommit(args: Record<string, unknown>, context?: RuntimeContext) {
   const scope = parseScope(args);
-  const git = simpleGit(scopeBaseDir(scope, context));
+  const git = (function() { const b = scopeBaseDir(scope, context); if (b === null) throw new Error('Unknown scope: ' + scope); return simpleGit(b); })();
   const message = String(args.message ?? '').trim();
   if (!message) {
     throw new Error('message is required');
@@ -1618,58 +1744,109 @@ async function queryUser(
 
 
 
+async function enforceReferenceWriteApproval(
+  name: string,
+  args: Record<string, unknown>,
+  context?: RuntimeContext
+): Promise<Record<string, unknown>> {
+  if (!mutatingTools.has(name) || !context) {
+    return args;
+  }
+
+  const scope = parseScope(args);
+  if (!isReferenceScope(scope)) {
+    return args;
+  }
+
+  if (isScopeWritable(scope, context)) {
+    return args;
+  }
+
+  const refId = getReferenceId(scope);
+  const ref = findReferenceWorkspace(refId ?? '', context);
+  const label = ref ? ref.label : scope;
+
+  const targetInputs = toolTargetInputs(name, args);
+  if (!targetInputs.length) {
+    return args;
+  }
+
+  const scopeBase = scopeBaseDir(scope, context);
+  const absoluteTargets = targetInputs.map(input => {
+    try {
+      return resolveScopedPath(input, scope, context);
+    } catch {
+      return path.resolve(requireScopeBaseDir(scope, context) ?? context.workspaceDir, input || '.');
+    }
+  });
+
+  const approved = await context.requestReferenceWriteApproval?.({
+    tool: name,
+    summary: toolIntentSummary(name, args),
+    referenceLabel: label,
+    targets: absoluteTargets
+  });
+
+  if (!approved) {
+    throw new Error(`Blocked: write to read-only reference workspace "${label}" requires user approval.`);
+  }
+
+  return args;
+}
+
 export async function executeTool(name: string, args: unknown, context?: RuntimeContext): Promise<unknown> {
   const rawArgs = (args && typeof args === 'object' ? args : {}) as Record<string, unknown>;
   const safeArgs = await enforceWorkspaceMutationApproval(name, rawArgs, context);
+  const refSafeArgs = await enforceReferenceWriteApproval(name, safeArgs, context);
 
   switch (name) {
     case 'list_dir':
-      return listDir(safeArgs, context);
+      return listDir(refSafeArgs, context);
     case 'browser_fetch':
-      return browserFetch(safeArgs);
+      return browserFetch(refSafeArgs);
     case 'web_search':
-      return webSearch(safeArgs);
+      return webSearch(refSafeArgs);
     case 'list_repo_tree':
-      return listRepoTree(safeArgs, context);
+      return listRepoTree(refSafeArgs, context);
     case 'file_search':
-      return fileSearch(safeArgs, context);
+      return fileSearch(refSafeArgs, context);
     case 'read_file':
-      return readFile(safeArgs, context);
+      return readFile(refSafeArgs, context);
     case 'create_file':
-      return createFile(safeArgs, context);
+      return createFile(refSafeArgs, context);
     case 'write_file':
-      return writeFile(safeArgs, context);
+      return writeFile(refSafeArgs, context);
     case 'replace_in_file':
-      return replaceInFile(safeArgs, context);
+      return replaceInFile(refSafeArgs, context);
     case 'insert_in_file':
-      return insertInFile(safeArgs, context);
+      return insertInFile(refSafeArgs, context);
     case 'create_directory':
-      return createDirectory(safeArgs, context);
+      return createDirectory(refSafeArgs, context);
     case 'move_path':
-      return movePath(safeArgs, context);
+      return movePath(refSafeArgs, context);
     case 'delete_path':
-      return deletePath(safeArgs, context);
+      return deletePath(refSafeArgs, context);
     case 'grep_search':
-      return grepSearch(safeArgs, context);
+      return grepSearch(refSafeArgs, context);
     case 'git_status':
-      return gitStatus(safeArgs, context);
+      return gitStatus(refSafeArgs, context);
     case 'git_diff':
-      return gitDiff(safeArgs, context);
+      return gitDiff(refSafeArgs, context);
     case 'git_add':
-      return gitAdd(safeArgs, context);
+      return gitAdd(refSafeArgs, context);
     case 'git_commit':
-      return gitCommit(safeArgs, context);
+      return gitCommit(refSafeArgs, context);
     case 'run_terminal_command':
-      return runTerminalCommand(safeArgs, context);
+      return runTerminalCommand(refSafeArgs, context);
     case 'complete_orchestration_task':
       // Intercepted by the orchestration engine; this fallback handles unexpected direct calls.
       return { ok: true, message: 'Task completion acknowledged.' };
     case 'list_namespaces':
-      return listNamespaces(safeArgs, context);
+      return listNamespaces(refSafeArgs, context);
     case 'query_memory':
-      return queryMemory(safeArgs, context);
+      return queryMemory(refSafeArgs, context);
     case 'query_user':
-      return queryUser(safeArgs, context);
+      return queryUser(refSafeArgs, context);
     default:
       throw new Error(`Unsupported tool: ${name}`);
   }
