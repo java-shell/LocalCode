@@ -679,7 +679,7 @@ export function getAllowedToolDefinitions(names: string[], context?: RuntimeCont
   const scopeProp = buildScopeProperty(context);
   return filtered.map(tool => {
     const params = tool.function.parameters;
-    if (params && params.properties && params.properties.scope) {
+    if (params && params.properties && params.properties.scope === scopeProperty) {
       return {
         ...tool,
         function: {

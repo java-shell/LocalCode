@@ -5352,6 +5352,18 @@ main().catch(error => {
 
 let referenceWorkspaces = [];
 
+async function loadWorkspaceState() {
+  try {
+    const state = await window.llmIde.getWorkspaceState();
+    const workspacePath = document.getElementById('workspacePath');
+    if (workspacePath && state) {
+      workspacePath.textContent = `Workspace: ${state.workspaceDir}\nRoot: ${state.rootDir}`;
+    }
+  } catch (err) {
+    console.error('Failed to load workspace state:', err);
+  }
+}
+
 async function loadReferenceWorkspaces() {
   try {
     const result = await window.llmIde.listReferenceWorkspaces();

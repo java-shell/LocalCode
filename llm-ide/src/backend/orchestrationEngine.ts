@@ -21,6 +21,7 @@ export interface RuntimeContext {
   referenceWorkspaces?: ReferenceWorkspace[];
   turboMemory?: any; // TurboVecMemory instance for memory tools
   activeNamespaces?: string[]; // Namespaces to search by default
+  llmConfig?: LLMConfig;
 }
 
 export interface OrchestrationMemoryAdapter {
@@ -364,6 +365,14 @@ async function runStepWithRetries(
         messages,
         toolDefs,
         async (name, args) => {
+          const stepRuntimeContext: RuntimeContext = {
+            workspaceDir: runtimeContext?.workspaceDir ?? process.cwd(),
+            rootDir: runtimeContext?.rootDir ?? process.cwd(),
+            referenceWorkspaces: runtimeContext?.referenceWorkspaces,
+            turboMemory: runtimeContext?.turboMemory,
+            activeNamespaces: runtimeContext?.activeNamespaces,
+            llmConfig: config
+          };
           if (name === COMPLETION_TOOL) {
             taskCompleted = true;
             completionSummary = String((args as Record<string, unknown>)?.summary ?? '');
@@ -394,9 +403,9 @@ async function runStepWithRetries(
             const input = (args && typeof args === 'object') ? (args as Record<string, unknown>) : {};
             const rawTimeout = Number(input.timeoutMs ?? 30000);
             const boundedTimeoutMs = rawTimeout <= 0 ? 30000 : Math.max(1000, Math.min(120000, rawTimeout));
-            return executeTool(name, { ...input, timeoutMs: boundedTimeoutMs }, runtimeContext);
+            return executeTool(name, { ...input, timeoutMs: boundedTimeoutMs }, stepRuntimeContext);
           }
-          return executeTool(name, args, runtimeContext);
+          return executeTool(name, args, stepRuntimeContext);
         },
         event => {
           onEvent?.(`${step.name}:iteration:${iteration}:${event}`);

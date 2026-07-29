@@ -248,6 +248,36 @@ function runtimeContext(sender?: Electron.WebContents, eventChannel: 'chat:event
       const approved = result.response === 0;
       sender?.send(eventChannel, `[warning] outside-workspace operation ${approved ? 'approved' : 'denied'}.`);
       return approved;
+    },
+    requestReferenceWriteApproval: async (payload: {
+      tool: string;
+      summary: string;
+      referenceLabel: string;
+      targets: string[];
+    }) => {
+      sender?.send(
+        eventChannel,
+        `[warning] ${payload.tool} wants to write to read-only reference workspace "${payload.referenceLabel}" and needs approval: ${payload.summary}`
+      );
+
+      if (!mainWindow) {
+        return false;
+      }
+
+      const result = await dialog.showMessageBox(mainWindow, {
+        type: 'warning',
+        buttons: ['Allow', 'Deny'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+        title: 'Approve Write To Read-Only Reference Workspace',
+        message: `Tool ${payload.tool} wants to modify files in read-only reference workspace "${payload.referenceLabel}".`,
+        detail: `Intent: ${payload.summary}\n\nTargets:\n${payload.targets.join('\n')}`
+      });
+
+      const approved = result.response === 0;
+      sender?.send(eventChannel, `[warning] reference-write operation ${approved ? 'approved' : 'denied'}.`);
+      return approved;
     }
   };
 }
@@ -1060,6 +1090,17 @@ ipcMain.handle(
     const orchRuntimeContext = {
       ...runtimeContext(event.sender, 'orch:event'),
       turboMemory: turboMemory ?? undefined,
+      llmConfig: payload.plan?.steps?.[0]
+        ? {
+            endpoint: payload.plan.steps[0].endpoint,
+            provider: payload.plan.steps[0].provider,
+            model: payload.plan.steps[0].model,
+            apiKey: payload.plan.steps[0].apiKey,
+            temperature: payload.plan.steps[0].temperature ?? 0.2,
+            maxTokens: payload.plan.steps[0].maxTokens,
+            requestTimeoutMs: Number(payload.requestTimeoutMs ?? 0) || undefined
+          }
+        : undefined,
       activeNamespaces: orchestrationNamespaces.length > 0 ? orchestrationNamespaces : undefined
     };
 

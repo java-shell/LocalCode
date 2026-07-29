@@ -250,7 +250,7 @@ function toolParseFailureRetryMessage(): string {
   return (
     'The provider failed while parsing the previous tool call. Retry with smaller, simpler tool arguments. ' +
     'When calling a tool, emit only the tool call with pure JSON arguments and no explanatory prose, markdown, or extra text. ' +
-    'Use only values allowed by the tool schema (for example, scope must be workspace or root when present). ' +
+    'Use only values allowed by the tool schema (for example, scope must match one of the enum values such as workspace, root, or an allowed ref:<id> scope when present). ' +
     'Do not use write_file for large files. For new files, call create_file with no content, then use insert_in_file in chunks under 3000 characters. ' +
     'For existing files, prefer replace_in_file with focused snippets. Keep each tool argument a valid compact JSON object.'
   );
