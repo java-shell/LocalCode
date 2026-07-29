@@ -200,6 +200,7 @@ function runtimeContext(sender?: Electron.WebContents, eventChannel: 'chat:event
   return {
     workspaceDir: selectedWorkspaceDir,
     rootDir: selectedWorkspaceDir,
+    referenceWorkspaces,
     onTerminalOutput: sender
       ? (payload: { source: 'stdout' | 'stderr'; text: string }) => {
           sender.send('terminal:output', payload);
@@ -594,8 +595,6 @@ ipcMain.handle(
         ? payload.toolNames
         : availableToolNames.filter(name => name !== 'delete_path' && name !== 'git_commit');
 
-      const toolDefs = getAllowedToolDefinitions(requestedToolNames);
-
       // Build runtime context with memory access for this request
       const chatRuntimeContext = {
         ...runtimeContext(event.sender, 'chat:event'),
@@ -610,6 +609,8 @@ ipcMain.handle(
           });
         }
       };
+
+      const toolDefs = getAllowedToolDefinitions(requestedToolNames, chatRuntimeContext);
 
       const result = await chatWithTools(
         config,
@@ -762,10 +763,11 @@ ipcMain.handle('memory:diagnostics', async (_event, payload?: { model?: string }
     };
   }
 
-  // Only filter workspace-scoped namespaces by workspace path
-  // Global namespaces are always shown regardless of filter
+  // Only filter workspace-scoped namespaces by workspace path when a specific model is requested.
+  // When called without a model (e.g., Diagnostics tab), show ALL namespaces so the user can see everything.
+  // Global namespaces are always shown regardless of filter.
   const model = String(payload?.model ?? '').trim();
-  const filter = model ? `${selectedWorkspaceDir}:${model}` : selectedWorkspaceDir;
+  const filter = model ? `${selectedWorkspaceDir}:${model}` : undefined;
   return turboMemory.diagnostics(filter);
 });
 

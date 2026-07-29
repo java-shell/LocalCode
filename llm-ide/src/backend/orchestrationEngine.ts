@@ -10,6 +10,7 @@ import {
   OrchestrationRunResult,
   OrchestrationRunStep,
   OrchestrationStep,
+  ReferenceWorkspace,
   TokenUsage
 } from '../shared/types';
 import { RetrievedMemoryItem, computeAdaptiveInjectionLimits } from './turboVecMemory';
@@ -17,6 +18,7 @@ import { RetrievedMemoryItem, computeAdaptiveInjectionLimits } from './turboVecM
 export interface RuntimeContext {
   workspaceDir: string;
   rootDir: string;
+  referenceWorkspaces?: ReferenceWorkspace[];
   turboMemory?: any; // TurboVecMemory instance for memory tools
   activeNamespaces?: string[]; // Namespaces to search by default
 }
@@ -342,12 +344,12 @@ async function runStepWithRetries(
     selectedDownstreamStageId = '';
     selectedDownstreamHandoff = '';
 
-    let toolDefs = getAllowedToolDefinitions(allowedToolNames);
+    let toolDefs = getAllowedToolDefinitions(allowedToolNames, runtimeContext);
     if (downstreamStageOptions.length > 0) {
       toolDefs = [...toolDefs, buildDownstreamRoutingToolDefinition(downstreamStageOptions)];
     }
     if (loopMode && allowCompletionTool) {
-      const completionDef = getAllowedToolDefinitions([COMPLETION_TOOL]);
+      const completionDef = getAllowedToolDefinitions([COMPLETION_TOOL], runtimeContext);
       if (completionDef.length > 0 && !toolDefs.some(t => t.function.name === COMPLETION_TOOL)) {
         toolDefs = [...toolDefs, completionDef[0]];
       }
