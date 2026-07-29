@@ -277,6 +277,19 @@ export const toolDefinitions: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'list_reference_workspaces',
+      description:
+        'List configured reference workspaces and their scope IDs. ' +
+        'Use returned scope values (ref:<id>) in other tools that accept a scope parameter.',
+      parameters: {
+        type: 'object',
+        properties: {}
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
       name: 'browser_fetch',
       description: 'Fetch a web page and return title, text content, and links for model browsing.',
       parameters: {
@@ -1742,6 +1755,20 @@ async function queryUser(
   }
 }
 
+async function listReferenceWorkspacesTool(_args: Record<string, unknown>, context?: RuntimeContext) {
+  const refs = context?.referenceWorkspaces ?? [];
+  return {
+    count: refs.length,
+    referenceWorkspaces: refs.map(ref => ({
+      id: ref.id,
+      scope: `ref:${ref.id}`,
+      label: ref.label,
+      path: ref.path,
+      allowWrite: Boolean(ref.allowWrite)
+    }))
+  };
+}
+
 
 
 async function enforceReferenceWriteApproval(
@@ -1800,6 +1827,8 @@ export async function executeTool(name: string, args: unknown, context?: Runtime
   const refSafeArgs = await enforceReferenceWriteApproval(name, safeArgs, context);
 
   switch (name) {
+    case 'list_reference_workspaces':
+      return listReferenceWorkspacesTool(refSafeArgs, context);
     case 'list_dir':
       return listDir(refSafeArgs, context);
     case 'browser_fetch':

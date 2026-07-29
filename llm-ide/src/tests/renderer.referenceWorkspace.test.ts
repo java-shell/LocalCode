@@ -25,3 +25,11 @@ test('reference workspace handlers call an existing loadWorkspaceState helper', 
   const callSites = source.match(/loadWorkspaceState\(\);\s*\/\/ Refresh tool definitions/g) ?? [];
   assert.ok(callSites.length >= 4, 'Expected all reference workspace mutation handlers to invoke loadWorkspaceState().');
 });
+
+test('chat and advanced orchestration expose reference workspace discovery tool', async () => {
+  const source = await readRendererSource();
+
+  assert.match(source, /toolNames:\s*\[\s*'list_reference_workspaces'/);
+  assert.match(source, /const availableTools = \[\s*'list_reference_workspaces'/);
+  assert.match(source, /enabled:\s*\['list_reference_workspaces', 'list_repo_tree', 'list_dir', 'read_file', 'grep_search'\]\.includes\(toolName\)/);
+});

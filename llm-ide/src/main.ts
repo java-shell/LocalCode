@@ -86,6 +86,26 @@ function estimateTokensFromText(text: string): number {
   return Math.max(1, Math.ceil(normalized.length / 4));
 }
 
+function formatReferenceWorkspaceGuidance(
+  refs: import('./shared/types').ReferenceWorkspace[]
+): string {
+  if (!Array.isArray(refs) || refs.length === 0) {
+    return '';
+  }
+
+  const lines = refs.map(ref => {
+    const scope = `ref:${ref.id}`;
+    const access = ref.allowWrite ? 'read/write' : 'read-only';
+    return `- ${scope}: ${ref.label} (${access}) at ${ref.path}`;
+  });
+
+  return [
+    'Reference workspaces are available for scoped tools.',
+    'When a tool supports scope, set scope to one of these ref IDs:',
+    ...lines
+  ].join('\n');
+}
+
 interface ChatContextDebugMessage {
   role: ChatMessage['role'];
   content: string;
@@ -616,6 +636,13 @@ ipcMain.handle(
 
       if (priorMessages.length > 0) {
         messages.push(...priorMessages);
+      }
+
+      if (referenceWorkspaces.length > 0) {
+        messages.push({
+          role: 'system',
+          content: formatReferenceWorkspaceGuidance(referenceWorkspaces)
+        });
       }
 
       messages.push({ role: 'user', content: payload.prompt });

@@ -141,6 +141,33 @@ function formatRecalledMemory(items: RetrievedMemoryItem[], limits?: { maxItems?
   return lines.join('\n');
 }
 
+function formatReferenceWorkspaceGuidance(
+  referenceWorkspaces?: ReferenceWorkspace[],
+  canUseDiscoveryTool = false
+): string {
+  const refs = Array.isArray(referenceWorkspaces) ? referenceWorkspaces : [];
+  if (refs.length === 0) {
+    return '';
+  }
+
+  const referenceLines = refs.map(ref => {
+    const access = ref.allowWrite ? 'read/write' : 'read-only';
+    return `- ref:${ref.id}: ${ref.label} (${access}) at ${ref.path}`;
+  });
+
+  const guidanceLines = [
+    'Reference workspaces are available for scoped tools in this stage.',
+    'Available scope IDs:',
+    ...referenceLines
+  ];
+
+  if (canUseDiscoveryTool) {
+    guidanceLines.splice(1, 0, 'Use list_reference_workspaces if you need to refresh the mappings.');
+  }
+
+  return guidanceLines.join('\n');
+}
+
 function matchesBranchPattern(matchPattern: string | undefined, value: string): boolean {
   const pattern = String(matchPattern ?? '').trim();
   if (!pattern) {
@@ -335,6 +362,14 @@ async function runStepWithRetries(
         });
         recalledPromptTokens = estimateTokensFromText(recalledBlock);
       }
+    }
+
+    const referenceGuidance = formatReferenceWorkspaceGuidance(
+      runtimeContext?.referenceWorkspaces,
+      allowedToolNames.includes('list_reference_workspaces')
+    );
+    if (referenceGuidance) {
+      messages.push({ role: 'system', content: referenceGuidance });
     }
 
     messages.push({

@@ -2502,6 +2502,7 @@ async function initChat() {
         chatDebugDumpsEnabled: settingsState.chatDebugDumpsEnabled,
         maxToolTurns: settingsState.maxToolTurns,
         toolNames: [
+          'list_reference_workspaces',
           'browser_fetch',
           'web_search',
           'query_memory',
@@ -2622,6 +2623,7 @@ async function initOrchestration() {
   const outputLogEl = document.getElementById('orchOutputLog');
 
   const availableTools = [
+    'list_reference_workspaces',
     'browser_fetch',
     'web_search',
     'query_memory',
@@ -3707,7 +3709,7 @@ async function initAdvancedOrchestration() {
   function defaultTools() {
     return availableTools.map(toolName => ({
       name: toolName,
-      enabled: ['list_repo_tree', 'list_dir', 'read_file', 'grep_search'].includes(toolName)
+      enabled: ['list_reference_workspaces', 'list_repo_tree', 'list_dir', 'read_file', 'grep_search'].includes(toolName)
     }));
   }
 

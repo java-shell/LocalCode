@@ -92,6 +92,7 @@ export const defaultPlan: OrchestrationPlan = {
       maxToolTurns: 40,
       maxRetries: 1,
       tools: [
+        { name: 'list_reference_workspaces', enabled: true },
         { name: 'browser_fetch', enabled: true },
         { name: 'list_repo_tree', enabled: true },
         { name: 'list_dir', enabled: true },
@@ -116,6 +117,7 @@ export const defaultPlan: OrchestrationPlan = {
       maxToolTurns: 40,
       maxRetries: 1,
       tools: [
+        { name: 'list_reference_workspaces', enabled: true },
         { name: 'browser_fetch', enabled: true },
         { name: 'list_repo_tree', enabled: true },
         { name: 'file_search', enabled: true },

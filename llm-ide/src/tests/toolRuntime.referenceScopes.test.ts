@@ -63,6 +63,42 @@ test('getAllowedToolDefinitions only rewrites workspace scope properties', () =>
   assert.deepEqual(namespaceScopeEnum, ['all', 'global', 'workspace']);
 });
 
+test('list_reference_workspaces returns scope IDs and metadata', async () => {
+  const context = {
+    workspaceDir: '/tmp/workspace',
+    rootDir: '/tmp/root',
+    referenceWorkspaces: [
+      {
+        id: 'ref_one',
+        label: 'Reference One',
+        path: '/tmp/reference-one',
+        allowWrite: false
+      },
+      {
+        id: 'ref_two',
+        label: 'Reference Two',
+        path: '/tmp/reference-two',
+        allowWrite: true
+      }
+    ]
+  };
+
+  const result = await executeTool('list_reference_workspaces', {}, context as any) as {
+    count: number;
+    referenceWorkspaces: Array<{ scope: string; label: string; allowWrite: boolean }>;
+  };
+
+  assert.equal(result.count, 2);
+  assert.deepEqual(
+    result.referenceWorkspaces.map(item => item.scope),
+    ['ref:ref_one', 'ref:ref_two']
+  );
+  assert.deepEqual(
+    result.referenceWorkspaces.map(item => item.allowWrite),
+    [false, true]
+  );
+});
+
 test('executeTool blocks writes to read-only reference workspace without approval', async () => {
   const base = await fs.mkdtemp(path.join(os.tmpdir(), 'localcode-ref-deny-'));
   const approvals: Array<{ tool: string; referenceLabel: string; targets: string[] }> = [];

@@ -181,3 +181,46 @@ test('orchestration step can execute query_memory without llmConfig errors', asy
     assert.equal(run.steps[0].output, 'memory consulted');
   });
 });
+
+test('orchestration injects reference workspace guidance for stage models', async () => {
+  const plan = makePlan();
+  const memory = new MockTurboMemory();
+
+  await withMockedChatWithTools(async (_config, initialMessages) => {
+    const systemMessages = initialMessages.filter(message => message.role === 'system');
+    const merged = systemMessages.map(message => String(message.content ?? '')).join('\n\n');
+
+    assert.match(merged, /Reference workspaces are available for scoped tools/i);
+    assert.match(merged, /ref:ref_alpha/);
+    assert.match(merged, /Shared Library/);
+
+    return {
+      text: 'guidance seen',
+      usage: { promptTokens: 6, completionTokens: 3, totalTokens: 9, requests: 1 }
+    };
+  }, async () => {
+    const run = await runOrchestration(
+      plan,
+      'Review architecture',
+      undefined,
+      undefined,
+      {
+        workspaceDir: '/mock/workspace',
+        rootDir: '/mock/root',
+        turboMemory: memory,
+        activeNamespaces: ['orch:test'],
+        referenceWorkspaces: [
+          {
+            id: 'ref_alpha',
+            label: 'Shared Library',
+            path: '/mock/shared-library',
+            allowWrite: false
+          }
+        ]
+      }
+    );
+
+    assert.equal(run.steps.length, 1);
+    assert.equal(run.steps[0].output, 'guidance seen');
+  });
+});
