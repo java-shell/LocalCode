@@ -190,6 +190,8 @@ test('orchestration injects reference workspace guidance for stage models', asyn
     const systemMessages = initialMessages.filter(message => message.role === 'system');
     const merged = systemMessages.map(message => String(message.content ?? '')).join('\n\n');
 
+    assert.match(merged, /Tools are enabled for this stage/i);
+    assert.match(merged, /Enabled tools: query_memory/);
     assert.match(merged, /Reference workspaces are available for scoped tools/i);
     assert.match(merged, /ref:ref_alpha/);
     assert.match(merged, /Shared Library/);

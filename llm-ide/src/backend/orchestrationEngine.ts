@@ -168,6 +168,18 @@ function formatReferenceWorkspaceGuidance(
   return guidanceLines.join('\n');
 }
 
+function formatStageToolAvailabilityGuidance(toolNames: string[]): string {
+  if (!Array.isArray(toolNames) || toolNames.length === 0) {
+    return '';
+  }
+
+  return [
+    'Tools are enabled for this stage.',
+    'Use exact function names with valid JSON arguments.',
+    `Enabled tools: ${toolNames.join(', ')}`
+  ].join('\n');
+}
+
 function matchesBranchPattern(matchPattern: string | undefined, value: string): boolean {
   const pattern = String(matchPattern ?? '').trim();
   if (!pattern) {
@@ -368,6 +380,10 @@ async function runStepWithRetries(
       runtimeContext?.referenceWorkspaces,
       allowedToolNames.includes('list_reference_workspaces')
     );
+    const stageToolGuidance = formatStageToolAvailabilityGuidance(allowedToolNames);
+    if (stageToolGuidance) {
+      messages.push({ role: 'system', content: stageToolGuidance });
+    }
     if (referenceGuidance) {
       messages.push({ role: 'system', content: referenceGuidance });
     }

@@ -106,6 +106,18 @@ function formatReferenceWorkspaceGuidance(
   ].join('\n');
 }
 
+function formatToolAvailabilityGuidance(toolNames: string[]): string {
+  if (!Array.isArray(toolNames) || toolNames.length === 0) {
+    return '';
+  }
+
+  return [
+    'Tools are enabled for this turn.',
+    'Use the exact function name and valid JSON arguments only.',
+    `Enabled tools: ${toolNames.join(', ')}`
+  ].join('\n');
+}
+
 interface ChatContextDebugMessage {
   role: ChatMessage['role'];
   content: string;
@@ -634,8 +646,18 @@ ipcMain.handle(
             .filter(message => (message.role === 'user' || message.role === 'assistant') && message.content.trim().length > 0)
         : [];
 
+      const availableToolNames = toolDefinitions.map(def => def.function.name);
+      const requestedToolNames = Array.isArray(payload.toolNames) && payload.toolNames.length > 0
+        ? payload.toolNames
+        : availableToolNames.filter(name => name !== 'delete_path' && name !== 'git_commit');
+
       if (priorMessages.length > 0) {
         messages.push(...priorMessages);
+      }
+
+      const toolGuidance = formatToolAvailabilityGuidance(requestedToolNames);
+      if (toolGuidance) {
+        messages.push({ role: 'system', content: toolGuidance });
       }
 
       if (referenceWorkspaces.length > 0) {
@@ -647,10 +669,7 @@ ipcMain.handle(
 
       messages.push({ role: 'user', content: payload.prompt });
 
-      const availableToolNames = toolDefinitions.map(def => def.function.name);
-      const requestedToolNames = Array.isArray(payload.toolNames) && payload.toolNames.length > 0
-        ? payload.toolNames
-        : availableToolNames.filter(name => name !== 'delete_path' && name !== 'git_commit');
+      event.sender.send('chat:event', `[tools] enabled ${requestedToolNames.length} tool(s): ${requestedToolNames.join(', ')}`);
 
       // Build runtime context with memory access for this request
       const chatRuntimeContext = {
