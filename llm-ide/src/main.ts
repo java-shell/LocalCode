@@ -112,11 +112,25 @@ function formatToolAvailabilityGuidance(toolNames: string[]): string {
     return '';
   }
 
+  const hasSubAgentTool = toolNames.includes('spawn_sub_agent');
+  const subAgentGuidance = hasSubAgentTool
+    ? [
+        '',
+        'Sub-agent strategy:',
+        '- You can delegate narrow, well-scoped parallel tasks via spawn_sub_agent.',
+        '- Use sub-agents when delegation will clearly improve speed or reduce context switching.',
+        '- Avoid over-delegation: do not spawn sub-agents for trivial or tightly-coupled steps you can complete directly.',
+        '- Before spawning, define a focused objective, expected output, and the minimum tool set needed.',
+        '- Integrate sub-agent results, verify quality, and keep final responsibility in this main chat turn.'
+      ].join('\n')
+    : '';
+
   return [
     'Tools are enabled for this turn.',
     'Use the exact function name and valid JSON arguments only.',
-    `Enabled tools: ${toolNames.join(', ')}`
-  ].join('\n');
+    `Enabled tools: ${toolNames.join(', ')}`,
+    subAgentGuidance
+  ].filter(Boolean).join('\n');
 }
 
 function truncateText(value: string, maxChars: number): string {
