@@ -40,8 +40,18 @@ export interface LLMConfig {
   requestTimeoutMs?: number;
 }
 
+export interface SubAgentConfigProfile extends LLMConfig {
+  id: string;
+  label?: string;
+  maxConcurrentSpawns?: number;
+  /** @deprecated Use maxConcurrentSpawns. Kept for backward compatibility with saved settings. */
+  maxSpawnsPerRun?: number;
+}
+
 export interface ChatStreamRequest {
   config: LLMConfig;
+  subAgentConfig?: LLMConfig;
+  subAgentConfigs?: SubAgentConfigProfile[];
   prompt: string;
   historyMessages?: ChatMessage[];
   toolNames?: string[];
@@ -54,6 +64,8 @@ export interface ChatStreamRequest {
 
 export interface OrchestrationRunRequest {
   plan: OrchestrationPlan;
+  subAgentConfig?: LLMConfig;
+  subAgentConfigs?: SubAgentConfigProfile[];
   prompt: string;
   memoryNamespace?: string;
   memoryGlobalNamespace?: string;

@@ -122,7 +122,7 @@ function resolveRequestTimeoutMs(value: unknown): number {
   if (!Number.isFinite(ms)) {
     return 180000;
   }
-  return Math.max(1000, Math.min(600000, ms));
+  return Math.max(1000, Math.min(3600000, ms));
 }
 
 function parseUsage(usage: CompletionResponse['usage']): Omit<TokenUsage, 'requests'> {
@@ -844,6 +844,8 @@ export async function chatWithTools(
         return args.summary ? `signal completion: ${String(args.summary).slice(0, 120)}` : 'signal task completion';
       case 'query_user':
         return `ask user: ${String(args.question ?? '').slice(0, 80)}`;
+      case 'spawn_sub_agent':
+        return `spawn sub-agent for: ${String(args.prompt ?? '').slice(0, 80)}`;
       default:
         return 'execute requested operation';
     }

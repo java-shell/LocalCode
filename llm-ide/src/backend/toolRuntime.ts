@@ -3,8 +3,16 @@ import * as path from 'path';
 import simpleGit from 'simple-git';
 import axios from 'axios';
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
-import { ToolDefinition, LLMConfig, ReferenceWorkspace } from '../shared/types';
+import { chatWithTools } from './llmClient';
+import { ToolDefinition, LLMConfig, ReferenceWorkspace, ChatMessage } from '../shared/types';
 import type { TurboVecMemory, TurboVecNamespaceDiagnostics } from './turboVecMemory';
+
+interface RuntimeSubAgentProfile {
+  id: string;
+  label: string;
+  maxConcurrentSpawns: number;
+  config: LLMConfig;
+}
 
 export interface QueryUserRequest {
   question: string;
@@ -35,7 +43,15 @@ interface RuntimeContext {
   }) => Promise<boolean>;
   turboMemory?: TurboVecMemory;
   llmConfig?: LLMConfig;
+  subAgentConfig?: LLMConfig;
+  subAgentProfiles?: RuntimeSubAgentProfile[];
+  subAgentActiveCounts?: Record<string, number>;
+  /** @deprecated Use subAgentActiveCounts. */
+  subAgentSpawnCounts?: Record<string, number>;
   activeNamespaces?: string[];
+  allowedToolNames?: string[];
+  subAgentDepth?: number;
+  onAgentEvent?: (message: string) => void;
   onQueryUser?: QueryUserCallback;
   requestReferenceWriteApproval?: (payload: {
     tool: string;
@@ -639,6 +655,75 @@ export const toolDefinitions: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'spawn_sub_agent',
+      description:
+        'Spawn one or more tightly scoped sub-agent runs and return findings. ' +
+        'Provide explicit child tool allowlists. The sub-agent cannot spawn additional sub-agents.',
+      parameters: {
+        type: 'object',
+        properties: {
+          profileId: {
+            type: 'string',
+            description:
+              'Optional configured sub-agent profile ID to use. If omitted, runtime chooses a profile with concurrent capacity.'
+          },
+          prompt: {
+            type: 'string',
+            description: 'Tightly scoped task prompt for the sub-agent.'
+          },
+          toolNames: {
+            type: 'array',
+            items: { type: 'string' },
+            description:
+              'Exact tools the sub-agent may use. Must be a subset of tools currently allowed to the parent model.'
+          },
+          maxToolTurns: {
+            type: 'number',
+            description: 'Optional cap for sub-agent tool turns. Default 8, max 20.'
+          },
+          tasks: {
+            type: 'array',
+            description:
+              'Optional parallel fan-out tasks. When provided, each task spawns a sub-agent and top-level prompt/toolNames are ignored.',
+            items: {
+              type: 'object',
+              properties: {
+                profileId: {
+                  type: 'string',
+                  description:
+                    'Optional configured sub-agent profile ID for this task. If omitted, runtime selects a profile with available concurrent capacity.'
+                },
+                prompt: {
+                  type: 'string',
+                  description: 'Tightly scoped task prompt for this sub-agent task.'
+                },
+                toolNames: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: 'Exact tools this sub-agent task may use.'
+                },
+                maxToolTurns: {
+                  type: 'number',
+                  description: 'Optional cap for this task. Default 8, max 20.'
+                }
+              },
+              required: ['prompt', 'toolNames']
+            }
+          },
+          maxParallel: {
+            type: 'number',
+            description:
+              'Maximum number of sub-agent tasks to run simultaneously when tasks is provided. Default runs all at once.'
+          }
+        },
+        required: []
+      }
+    }
+  }
+  ,
+  {
+    type: 'function',
+    function: {
       name: 'query_user',
       description:
         'Ask the user a question and wait for their response. ' +
@@ -685,29 +770,74 @@ export const toolDefinitions: ToolDefinition[] = [
 export function getAllowedToolDefinitions(names: string[], context?: RuntimeContext): ToolDefinition[] {
   const allowed = new Set(names);
   const filtered = toolDefinitions.filter(tool => allowed.has(tool.function.name));
-  if (!context || !context.referenceWorkspaces || context.referenceWorkspaces.length === 0) {
-    return filtered;
-  }
-  // Override scope enums with reference workspace values
-  const scopeProp = buildScopeProperty(context);
   return filtered.map(tool => {
     const params = tool.function.parameters;
-    if (params && params.properties && params.properties.scope === scopeProperty) {
-      return {
-        ...tool,
-        function: {
-          ...tool.function,
-          parameters: {
-            ...params,
-            properties: {
-              ...params.properties,
-              scope: scopeProp
-            }
-          }
-        }
-      };
+    if (!params || !params.properties) {
+      return tool;
     }
-    return tool;
+
+    let changed = false;
+    const nextProperties: Record<string, unknown> = { ...params.properties };
+
+    if (params.properties.scope === scopeProperty && context?.referenceWorkspaces?.length) {
+      nextProperties.scope = buildScopeProperty(context);
+      changed = true;
+    }
+
+    if (tool.function.name === 'spawn_sub_agent' && Array.isArray(context?.subAgentProfiles)) {
+      const profileIds = context.subAgentProfiles.map(profile => profile.id).filter(Boolean);
+      if (profileIds.length > 0) {
+        nextProperties.profileId = {
+          type: 'string',
+          enum: profileIds,
+          description:
+            'Configured sub-agent profile to use. If omitted, the first profile with remaining concurrent capacity is selected.'
+        };
+
+        const tasksSchema = nextProperties.tasks as Record<string, unknown> | undefined;
+        const taskItems = tasksSchema && typeof tasksSchema === 'object'
+          ? (tasksSchema.items as Record<string, unknown> | undefined)
+          : undefined;
+        const taskProps = taskItems && typeof taskItems === 'object'
+          ? (taskItems.properties as Record<string, unknown> | undefined)
+          : undefined;
+
+        if (taskProps && taskProps.profileId) {
+          nextProperties.tasks = {
+            ...(tasksSchema as Record<string, unknown>),
+            items: {
+              ...(taskItems as Record<string, unknown>),
+              properties: {
+                ...taskProps,
+                profileId: {
+                  type: 'string',
+                  enum: profileIds,
+                  description:
+                    'Configured sub-agent profile for this task. If omitted, runtime selects a profile with concurrent capacity.'
+                }
+              }
+            }
+          };
+        }
+
+        changed = true;
+      }
+    }
+
+    if (!changed) {
+      return tool;
+    }
+
+    return {
+      ...tool,
+      function: {
+        ...tool.function,
+        parameters: {
+          ...params,
+          properties: nextProperties
+        }
+      }
+    };
   });
 }
 
@@ -748,6 +878,21 @@ function toolIntentSummary(name: string, args: Record<string, unknown>): string 
       return `move ${String(args.from ?? '')} to ${String(args.to ?? '')}`;
     case 'delete_path':
       return `delete ${String(args.path ?? '')}`;
+    case 'spawn_sub_agent': {
+      const tasks = Array.isArray(args.tasks) ? args.tasks : [];
+      if (tasks.length > 0) {
+        const firstTask = tasks[0] && typeof tasks[0] === 'object'
+          ? tasks[0] as Record<string, unknown>
+          : {};
+        const firstPrompt = String(firstTask.prompt ?? '').trim();
+        const preview = firstPrompt.length > 120 ? `${firstPrompt.slice(0, 117)}...` : firstPrompt;
+        return `spawn ${tasks.length} sub-agent task(s) in parallel; first prompt preview: ${preview}`;
+      }
+
+      const prompt = String(args.prompt ?? '').trim();
+      const preview = prompt.length > 120 ? `${prompt.slice(0, 117)}...` : prompt;
+      return `spawn sub-agent prompt preview: ${preview}`;
+    }
     default:
       return name;
   }
@@ -1622,6 +1767,384 @@ interface QueryMemoryResult {
   error?: string;
 }
 
+interface SpawnSubAgentResult {
+  ok: boolean;
+  findings: string;
+  toolNames: string[];
+  batch?: {
+    total: number;
+    succeeded: number;
+    failed: number;
+    maxParallel: number;
+    results: Array<{
+      index: number;
+      profileId?: string;
+      ok: boolean;
+      findings: string;
+      error?: string;
+      model?: string;
+      endpoint?: string;
+    }>;
+  };
+  model?: string;
+  endpoint?: string;
+  usage?: {
+    promptTokens: number;
+    completionTokens: number;
+    totalTokens: number;
+    requests: number;
+  };
+  toolBudgetExhausted?: boolean;
+  continuationSummary?: string;
+  error?: string;
+}
+
+function sanitizeSubAgentToolNames(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const known = new Set(toolDefinitions.map(tool => tool.function.name));
+  const deduped: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    const name = String(item ?? '').trim();
+    if (!name || seen.has(name) || !known.has(name)) {
+      continue;
+    }
+    seen.add(name);
+    deduped.push(name);
+  }
+  return deduped;
+}
+
+function normalizeSpawnLimit(value: unknown): number {
+  const parsed = Math.floor(Number(value) || 0);
+  return Math.max(1, Math.min(50, parsed || 1));
+}
+
+function fallbackSubAgentProfile(context?: RuntimeContext): RuntimeSubAgentProfile[] {
+  const configuredSubAgent = context?.subAgentConfig;
+  const parent = context?.llmConfig;
+  const config = (configuredSubAgent?.endpoint && configuredSubAgent?.model)
+    ? configuredSubAgent
+    : parent;
+  if (!config || !String(config.endpoint ?? '').trim() || !String(config.model ?? '').trim()) {
+    return [];
+  }
+
+  return [
+    {
+      id: 'default-sub-agent',
+      label: 'Default Sub-Agent',
+      maxConcurrentSpawns: 1,
+      config
+    }
+  ];
+}
+
+async function runParallelSubAgentTasks(
+  args: Record<string, unknown>,
+  context?: RuntimeContext
+): Promise<SpawnSubAgentResult | null> {
+  const rawTasks = Array.isArray(args.tasks) ? args.tasks : [];
+  if (rawTasks.length === 0) {
+    return null;
+  }
+
+  const tasks = rawTasks
+    .map(item => (item && typeof item === 'object' ? item as Record<string, unknown> : null))
+    .filter((item): item is Record<string, unknown> => Boolean(item));
+
+  if (tasks.length === 0) {
+    return {
+      ok: false,
+      findings: '',
+      toolNames: [],
+      error: 'tasks must contain at least one valid task object.'
+    };
+  }
+
+  const parsedMaxParallel = Math.floor(Number(args.maxParallel) || tasks.length);
+  const maxParallel = Math.max(1, Math.min(20, parsedMaxParallel || tasks.length));
+  const results: Array<{
+    index: number;
+    profileId?: string;
+    ok: boolean;
+    findings: string;
+    error?: string;
+    model?: string;
+    endpoint?: string;
+  }> = new Array(tasks.length);
+
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(maxParallel, tasks.length) }, async () => {
+    while (true) {
+      const currentIndex = cursor;
+      cursor += 1;
+      if (currentIndex >= tasks.length) {
+        return;
+      }
+
+      const task = tasks[currentIndex];
+      const taskResult = await spawnSubAgent({
+        profileId: task.profileId,
+        prompt: task.prompt,
+        toolNames: Array.isArray(task.toolNames) ? task.toolNames : args.toolNames,
+        maxToolTurns: task.maxToolTurns ?? args.maxToolTurns
+      }, context);
+
+      results[currentIndex] = {
+        index: currentIndex,
+        profileId: String(task.profileId ?? '').trim() || undefined,
+        ok: taskResult.ok,
+        findings: taskResult.findings,
+        error: taskResult.error,
+        model: taskResult.model,
+        endpoint: taskResult.endpoint
+      };
+    }
+  });
+
+  await Promise.all(workers);
+
+  const succeeded = results.filter(result => result && result.ok).length;
+  const failed = results.length - succeeded;
+  const findings = results
+    .map(result => {
+      if (!result) {
+        return '- Task ? failed: unknown result';
+      }
+      if (result.ok) {
+        const compactFindings = String(result.findings ?? '').trim() || '(no findings)';
+        return `- Task ${result.index + 1}: ${compactFindings}`;
+      }
+      return `- Task ${result.index + 1} failed: ${String(result.error ?? 'unknown error')}`;
+    })
+    .join('\n');
+
+  return {
+    ok: succeeded > 0,
+    findings,
+    toolNames: [],
+    batch: {
+      total: results.length,
+      succeeded,
+      failed,
+      maxParallel,
+      results
+    },
+    error: failed > 0 ? `${failed} sub-agent task(s) failed.` : undefined
+  };
+}
+
+/**
+ * Spawn one or more tightly scoped sub-agent runs and return concise findings to the parent model.
+ *
+ * Purpose: Allow the parent model to delegate focused investigations with a constrained tool set.
+ * Inputs: Single-run prompt/toolNames or a tasks[] batch for parallel fan-out.
+ * Outputs: Structured findings plus usage metadata for parent review and continuation.
+ * Side effects: Executes model calls and may execute child tool operations approved by runtime policy.
+ * Errors: Returns `ok=false` with error detail for invalid args, missing config, disallowed tools, or runtime failures.
+ * Security: Child tools are restricted to a parent-provided subset and nested sub-agent spawning is blocked.
+ * Concurrency: Supports parallel fan-out while honoring per-profile concurrent capacity limits.
+ */
+async function spawnSubAgent(
+  args: Record<string, unknown>,
+  context?: RuntimeContext
+): Promise<SpawnSubAgentResult> {
+  const parentConfig = context?.llmConfig;
+  const profiles = Array.isArray(context?.subAgentProfiles) && context.subAgentProfiles.length > 0
+    ? context.subAgentProfiles
+    : fallbackSubAgentProfile(context);
+
+  if (profiles.length === 0) {
+    return {
+      ok: false,
+      findings: '',
+      toolNames: [],
+      error: 'Sub-agent LLM configuration is required.'
+    };
+  }
+
+  if ((context?.subAgentDepth ?? 0) > 0) {
+    return {
+      ok: false,
+      findings: '',
+      toolNames: [],
+      error: 'Nested sub-agent execution is not allowed.'
+    };
+  }
+
+  const batchResult = await runParallelSubAgentTasks(args, context);
+  if (batchResult) {
+    return batchResult;
+  }
+
+  const scopedPrompt = String(args.prompt ?? '').trim();
+  if (!scopedPrompt) {
+    return {
+      ok: false,
+      findings: '',
+      toolNames: [],
+      error: 'prompt is required.'
+    };
+  }
+
+  const requestedChildToolNames = sanitizeSubAgentToolNames(args.toolNames);
+  const parentAllowed = new Set(context?.allowedToolNames ?? toolDefinitions.map(tool => tool.function.name));
+  const disallowed = requestedChildToolNames.filter(name => !parentAllowed.has(name));
+  if (disallowed.length > 0) {
+    return {
+      ok: false,
+      findings: '',
+      toolNames: requestedChildToolNames,
+      error: `Sub-agent requested tool(s) not allowed by parent: ${disallowed.join(', ')}`
+    };
+  }
+
+  const requestedProfileId = String(args.profileId ?? '').trim();
+  let selectedProfile = requestedProfileId
+    ? profiles.find(profile => profile.id === requestedProfileId)
+    : undefined;
+
+  if (requestedProfileId && !selectedProfile) {
+    return {
+      ok: false,
+      findings: '',
+      toolNames: requestedChildToolNames,
+      error: `Unknown sub-agent profile: ${requestedProfileId}`
+    };
+  }
+
+  const activeCounts = context?.subAgentActiveCounts ?? context?.subAgentSpawnCounts ?? {};
+  const hasCapacity = (profile: RuntimeSubAgentProfile): boolean => {
+    const active = Math.max(0, Number(activeCounts[profile.id] ?? 0));
+    return active < normalizeSpawnLimit(profile.maxConcurrentSpawns);
+  };
+
+  if (!selectedProfile) {
+    selectedProfile = profiles.find(hasCapacity);
+  }
+
+  if (!selectedProfile) {
+    return {
+      ok: false,
+      findings: '',
+      toolNames: requestedChildToolNames,
+      error: 'All configured sub-agent profiles reached their max concurrent spawns.'
+    };
+  }
+
+  if (!hasCapacity(selectedProfile)) {
+    return {
+      ok: false,
+      findings: '',
+      toolNames: requestedChildToolNames,
+      error: `Sub-agent profile ${selectedProfile.id} reached its max concurrent spawns.`
+    };
+  }
+
+  const subAgentConfig = selectedProfile.config;
+  const limit = normalizeSpawnLimit(selectedProfile.maxConcurrentSpawns);
+  const nextActive = Math.max(0, Number(activeCounts[selectedProfile.id] ?? 0)) + 1;
+  activeCounts[selectedProfile.id] = nextActive;
+
+  const childToolNames = requestedChildToolNames.filter(name => name !== 'spawn_sub_agent');
+  const childToolDefs = getAllowedToolDefinitions(childToolNames, context);
+  const childAllowed = new Set(childToolNames);
+  const maxToolTurns = Math.max(1, Math.min(20, Math.floor(Number(args.maxToolTurns ?? 8) || 8)));
+
+  const messages: ChatMessage[] = [
+    {
+      role: 'system',
+      content:
+        'You are a focused sub-agent. Complete only the scoped task below. ' +
+        'Do not expand scope. Use tools only when necessary. ' +
+        'Return concise findings the parent model can immediately act on.'
+    },
+    {
+      role: 'user',
+      content:
+        `Scoped sub-agent task:\n${scopedPrompt}\n\n` +
+        'Deliver a short findings report with: key observations, evidence, and recommended next step.'
+    }
+  ];
+
+  const childContext: RuntimeContext = {
+    workspaceDir: context?.workspaceDir ?? process.cwd(),
+    rootDir: context?.rootDir ?? process.cwd(),
+    referenceWorkspaces: context?.referenceWorkspaces,
+    onTerminalOutput: context?.onTerminalOutput,
+    onTerminalEvent: context?.onTerminalEvent,
+    setActiveTerminalProcess: context?.setActiveTerminalProcess,
+    requestOutsideWorkspaceApproval: context?.requestOutsideWorkspaceApproval,
+    turboMemory: context?.turboMemory,
+    llmConfig: parentConfig,
+    subAgentConfig,
+    subAgentProfiles: profiles,
+    subAgentActiveCounts: activeCounts,
+    activeNamespaces: context?.activeNamespaces,
+    allowedToolNames: childToolNames,
+    subAgentDepth: (context?.subAgentDepth ?? 0) + 1,
+    onQueryUser: context?.onQueryUser,
+    requestReferenceWriteApproval: context?.requestReferenceWriteApproval,
+    onAgentEvent: context?.onAgentEvent
+  };
+
+  context?.onAgentEvent?.(
+    `[sub-agent] start | profile=${selectedProfile.id} (active=${nextActive}/${limit}) | model=${subAgentConfig.model} | tools=${childToolNames.join(', ') || '(none)'}`
+  );
+
+  try {
+    const run = await chatWithTools(
+      subAgentConfig,
+      messages,
+      childToolDefs,
+      async (name, toolArgs) => {
+        if (!childAllowed.has(name)) {
+          throw new Error(`Sub-agent tool ${name} is not allowed.`);
+        }
+        return executeTool(name, toolArgs, childContext);
+      },
+      event => {
+        context?.onAgentEvent?.(`[sub-agent] ${event}`);
+      },
+      maxToolTurns
+    );
+
+    context?.onAgentEvent?.('[sub-agent] completed');
+
+    return {
+      ok: true,
+      findings: String(run.text ?? '').trim(),
+      toolNames: childToolNames,
+      model: subAgentConfig.model,
+      endpoint: subAgentConfig.endpoint,
+      usage: run.usage,
+      toolBudgetExhausted: Boolean(run.toolBudgetExhausted),
+      continuationSummary: run.continuationSummary
+    };
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    context?.onAgentEvent?.(`[sub-agent] failed | ${detail}`);
+    return {
+      ok: false,
+      findings: '',
+      toolNames: childToolNames,
+      model: subAgentConfig.model,
+      endpoint: subAgentConfig.endpoint,
+      error: detail
+    };
+  } finally {
+    const currentActive = Math.max(0, Number(activeCounts[selectedProfile.id] ?? 0));
+    activeCounts[selectedProfile.id] = Math.max(0, currentActive - 1);
+    context?.onAgentEvent?.(
+      `[sub-agent] end | profile=${selectedProfile.id} (active=${activeCounts[selectedProfile.id]}/${limit})`
+    );
+  }
+}
+
 async function queryMemory(
   args: Record<string, unknown>,
   context?: RuntimeContext
@@ -1874,6 +2397,8 @@ export async function executeTool(name: string, args: unknown, context?: Runtime
       return listNamespaces(refSafeArgs, context);
     case 'query_memory':
       return queryMemory(refSafeArgs, context);
+    case 'spawn_sub_agent':
+      return spawnSubAgent(refSafeArgs, context);
     case 'query_user':
       return queryUser(refSafeArgs, context);
     default:

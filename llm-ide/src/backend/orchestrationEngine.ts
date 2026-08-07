@@ -22,6 +22,16 @@ export interface RuntimeContext {
   turboMemory?: any; // TurboVecMemory instance for memory tools
   activeNamespaces?: string[]; // Namespaces to search by default
   llmConfig?: LLMConfig;
+  subAgentConfig?: LLMConfig;
+  subAgentProfiles?: Array<{
+    id: string;
+    label: string;
+    maxConcurrentSpawns: number;
+    config: LLMConfig;
+  }>;
+  subAgentActiveCounts?: Record<string, number>;
+  allowedToolNames?: string[];
+  onAgentEvent?: (message: string) => void;
 }
 
 export interface OrchestrationMemoryAdapter {
@@ -422,7 +432,14 @@ async function runStepWithRetries(
             referenceWorkspaces: runtimeContext?.referenceWorkspaces,
             turboMemory: runtimeContext?.turboMemory,
             activeNamespaces: runtimeContext?.activeNamespaces,
-            llmConfig: config
+            llmConfig: config,
+            subAgentConfig: runtimeContext?.subAgentConfig,
+            subAgentProfiles: runtimeContext?.subAgentProfiles,
+            subAgentActiveCounts: runtimeContext?.subAgentActiveCounts,
+            allowedToolNames,
+            onAgentEvent: (message: string) => {
+              onEvent?.(`${step.name}:iteration:${iteration}:${message}`);
+            }
           };
           if (name === COMPLETION_TOOL) {
             taskCompleted = true;

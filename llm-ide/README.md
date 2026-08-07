@@ -18,11 +18,12 @@ It is not a VS Code extension.
 | Feature | Description |
 | --- | --- |
 | **Streaming Responses** | Token-by-token display of model output in markdown |
-| **Tool Calling** | 21+ tools available (filesystem, git, web, memory, interaction) |
+| **Tool Calling** | 22+ tools available (filesystem, git, web, memory, interaction, delegation) |
 | **Session Management** | Create, switch, and delete chat sessions with full history |
 | **TurboVec Memory** | Inject recalled memories from workspace or global namespaces |
 | **Context Windows** | Per-model context window configuration with auto-detection hints |
 | **Model Discovery** | Auto-discover available models via `/v1/models` endpoint |
+| **Sub-Agent Model Settings** | Configure multiple sub-agent profiles (provider/endpoint/model/API key) with per-profile max concurrent spawn limits and optional parallel `spawn_sub_agent` fan-out |
 | **Presets** | Quick-apply common configurations (Ollama, OpenAI-compatible, etc.) |
 
 ### Orchestration Panel (Simple)
@@ -150,7 +151,7 @@ Each step can enable these tools:
 - `replace_in_file`, `insert_in_file`, `create_directory`, `move_path`, `delete_path`
 - `grep_search`, `git_status`, `git_diff`, `git_add`, `git_commit`
 - `run_terminal_command`, `browser_fetch`, `web_search`
-- `list_namespaces`, `query_memory`, `query_user`
+- `list_namespaces`, `query_memory`, `query_user`, `spawn_sub_agent`
 
 Tool execution is restricted to workspace paths and only to tools enabled on that step.
 

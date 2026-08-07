@@ -56,7 +56,7 @@
           <span>Monaco Editor</span>
           <div class="editor-actions">
             <button id="markdownViewToggle" type="button" hidden>Preview Markdown</button>
-            <button id="saveFile">Save File</button>
+            <button id="saveFile" class="btn-primary">Save File</button>
             <button id="saveAllFiles">Save All</button>
             <button id="openSample">Load Sample</button>
           </div>
@@ -75,7 +75,7 @@
           <pre id="terminalOutput" class="terminal-output"></pre>
           <div class="terminal-input-row">
             <input id="terminalInput" placeholder="Type a command, terminal input, or (ctrl+c)" />
-            <button id="terminalSend" type="button">Send</button>
+            <button id="terminalSend" type="button" class="btn-primary">Send</button>
           </div>
         </div>
       </section>
@@ -103,7 +103,7 @@
             <label class="label" for="chatSessionList">Chat History</label>
             <div class="chat-session-actions">
               <button id="chatNewSession" type="button">New Chat</button>
-              <button id="chatDeleteSession" type="button">Delete Chat</button>
+              <button id="chatDeleteSession" type="button" class="btn-danger">Delete Chat</button>
             </div>
           </div>
           <select id="chatSessionList"></select>
@@ -143,8 +143,8 @@
           <label class="label">Prompt</label>
           <textarea id="chatPrompt" placeholder="Ask for code, analysis, or generation..."></textarea>
           <div class="actions actions-two">
-            <button id="chatSend">Send</button>
-            <button id="chatStop" type="button" disabled>Stop</button>
+            <button id="chatSend" class="btn-primary">Send</button>
+            <button id="chatStop" type="button" class="btn-danger" disabled>Stop</button>
           </div>
         </section>
 
@@ -164,8 +164,8 @@
             <button id="orchExport">Export JSON</button>
             <button id="orchValidate">Validate</button>
             <button id="orchSave">Save</button>
-            <button id="orchRun">Run</button>
-            <button id="orchStop" type="button" disabled>Stop</button>
+            <button id="orchRun" class="btn-primary">Run</button>
+            <button id="orchStop" type="button" class="btn-danger" disabled>Stop</button>
           </div>
           <label class="label" for="orchPlanName">Workflow Name</label>
           <input id="orchPlanName" placeholder="Planner -> Coder" />
@@ -231,8 +231,8 @@
             <button id="orchAdvancedExport">Export JSON</button>
             <button id="orchAdvancedValidate">Validate</button>
             <button id="orchAdvancedSave">Save</button>
-            <button id="orchAdvancedRun">Run</button>
-            <button id="orchAdvancedStop" type="button" disabled>Stop</button>
+            <button id="orchAdvancedRun" class="btn-primary">Run</button>
+            <button id="orchAdvancedStop" type="button" class="btn-danger" disabled>Stop</button>
             <button id="orchAdvancedFullscreenToggle" type="button" aria-pressed="false">Full Screen</button>
           </div>
           <label class="label" for="orchAdvancedPlanName">Workflow Name</label>
@@ -290,33 +290,56 @@
   </div>
 
   <div id="settingsModal" class="settings-modal" aria-hidden="true">
-    <div class="settings-card">
+    <div class="settings-card" role="dialog" aria-labelledby="settingsTitle" aria-modal="true">
       <div class="settings-header">
-        <strong>Settings</strong>
+        <strong id="settingsTitle">Settings</strong>
+        <button id="settingsCancelTop" type="button" class="settings-close-btn" aria-label="Close settings" onclick="document.getElementById('settingsCancel').click()">✕</button>
       </div>
-      <label class="label" for="settingMaxToolTurns">Max Tool Turns (Chat)</label>
-      <input id="settingMaxToolTurns" type="number" min="1" max="200" step="1" />
-      <label class="label" for="settingRequestTimeoutMs">LLM Request Timeout (ms)</label>
-      <input id="settingRequestTimeoutMs" type="number" min="1000" max="600000" step="1000" />
-      <label class="label" for="settingEndpoint">Default Endpoint</label>
-      <input id="settingEndpoint" placeholder="http://localhost:11434/v1/chat/completions" />
-      <label class="label" for="settingProvider">Default Provider</label>
-      <select id="settingProvider">
-        <option value="openai-compatible">openai-compatible</option>
-        <option value="ollama">ollama</option>
-      </select>
-      <label class="label" for="settingModel">Default Model</label>
-      <input id="settingModel" placeholder="llama3" />
-      <label class="label" for="settingApiKey">Default API Key (optional)</label>
-      <input id="settingApiKey" type="password" placeholder="sk-..." />
-      <label class="orch-tool-item" for="settingChatDebugDumpsEnabled">
-        <input id="settingChatDebugDumpsEnabled" type="checkbox" />
-        Enable chat debug dumps
-      </label>
-      <div class="settings-help">Defaults: max tool turns 40, timeout 180000 ms (3 minutes).</div>
+
+      <div class="settings-body">
+        <section class="settings-section">
+          <div class="settings-section-title">Chat Behavior</div>
+          <div class="settings-grid">
+            <label class="label" for="settingMaxToolTurns">Max Tool Turns</label>
+            <input id="settingMaxToolTurns" type="number" min="1" max="200" step="1" />
+            <label class="label" for="settingRequestTimeoutMs">Request Timeout (ms)</label>
+            <input id="settingRequestTimeoutMs" type="number" min="1000" max="3600000" step="1000" />
+          </div>
+          <div class="settings-help">Defaults: 40 tool turns, 180000 ms (3 minutes).</div>
+          <label class="orch-tool-item settings-checkbox" for="settingChatDebugDumpsEnabled">
+            <input id="settingChatDebugDumpsEnabled" type="checkbox" />
+            Enable chat debug dumps
+          </label>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-title">Default Model Connection</div>
+          <div class="settings-grid">
+            <label class="label" for="settingProvider">Provider</label>
+            <select id="settingProvider">
+              <option value="openai-compatible">openai-compatible</option>
+              <option value="ollama">ollama</option>
+            </select>
+            <label class="label" for="settingEndpoint">Endpoint</label>
+            <input id="settingEndpoint" placeholder="http://localhost:11434/v1/chat/completions" />
+            <label class="label" for="settingModel">Model</label>
+            <input id="settingModel" placeholder="llama3" />
+            <label class="label" for="settingApiKey">API Key (optional)</label>
+            <input id="settingApiKey" type="password" placeholder="sk-..." />
+          </div>
+        </section>
+
+        <section class="settings-section">
+          <div class="settings-section-title">Sub-Agent Profiles</div>
+          <div class="settings-help">Provider + Endpoint + Max Concurrent Spawns per profile.</div>
+          <div id="settingSubAgentProfilesEditor" class="sub-agent-profiles-editor"></div>
+          <button id="settingAddSubAgentProfile" type="button" class="settings-add-btn">+ Add Sub-Agent Profile</button>
+        </section>
+      </div>
+
       <div class="settings-actions">
         <button id="settingsCancel" type="button">Cancel</button>
-        <button id="settingsSave" type="button">Save</button>
+        <button id="settingsSave" type="button" class="btn-primary">Save</button>
       </div>
     </div>
   </div>

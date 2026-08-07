@@ -14,6 +14,7 @@ import {
   ChatMessage,
   ChatStreamRequest,
   LLMConfig,
+  SubAgentConfigProfile,
   OrchestrationExportResult,
   OrchestrationImportResult,
   OrchestrationPlan,
@@ -116,6 +117,108 @@ function formatToolAvailabilityGuidance(toolNames: string[]): string {
     'Use the exact function name and valid JSON arguments only.',
     `Enabled tools: ${toolNames.join(', ')}`
   ].join('\n');
+}
+
+function truncateText(value: string, maxChars: number): string {
+  const text = String(value ?? '').trim();
+  if (text.length <= maxChars) {
+    return text;
+  }
+  return `${text.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+function isInternalServerRetryableError(detail: string): boolean {
+  const normalized = String(detail ?? '').toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+  if (/canceled$/.test(normalized) || /stopped by user/.test(normalized)) {
+    return false;
+  }
+  return /\bstatus=500\b/.test(normalized) || normalized.includes('internal server error');
+}
+
+interface RuntimeSubAgentProfile {
+  id: string;
+  label: string;
+  maxConcurrentSpawns: number;
+  config: LLMConfig;
+}
+
+function normalizeSpawnLimit(value: unknown): number {
+  const parsed = Math.floor(Number(value) || 0);
+  return Math.max(1, Math.min(50, parsed || 1));
+}
+
+function normalizeRuntimeSubAgentProfiles(
+  profiles: SubAgentConfigProfile[] | undefined,
+  fallbackConfig: LLMConfig,
+  legacySingleConfig?: LLMConfig
+): RuntimeSubAgentProfile[] {
+  const source = Array.isArray(profiles) ? profiles : [];
+  const normalized: RuntimeSubAgentProfile[] = [];
+  const seen = new Set<string>();
+
+  for (const [index, profile] of source.entries()) {
+    const endpoint = String(profile?.endpoint ?? '').trim();
+    const model = String(profile?.model ?? '').trim();
+    if (!endpoint || !model) {
+      continue;
+    }
+
+    const rawId = String(profile?.id ?? '').trim() || `sub-agent-${index + 1}`;
+    const id = seen.has(rawId) ? `${rawId}-${index + 1}` : rawId;
+    seen.add(id);
+
+    normalized.push({
+      id,
+      label: String(profile?.label ?? '').trim() || id,
+      maxConcurrentSpawns: normalizeSpawnLimit(profile?.maxConcurrentSpawns ?? profile?.maxSpawnsPerRun),
+      config: {
+        endpoint,
+        provider: profile?.provider ?? fallbackConfig.provider,
+        model,
+        apiKey: profile?.apiKey,
+        temperature: Number(profile?.temperature ?? fallbackConfig.temperature ?? 0.2),
+        maxTokens: Number(profile?.maxTokens ?? 0) || undefined,
+        contextWindowTokens: Math.max(0, Number(profile?.contextWindowTokens ?? 0)) || undefined,
+        requestTimeoutMs:
+          Number(profile?.requestTimeoutMs ?? 0) ||
+          fallbackConfig.requestTimeoutMs
+      }
+    });
+  }
+
+  if (normalized.length > 0) {
+    return normalized;
+  }
+
+  const legacy = legacySingleConfig ?? fallbackConfig;
+  const endpoint = String(legacy?.endpoint ?? '').trim() || String(fallbackConfig.endpoint ?? '').trim();
+  const model = String(legacy?.model ?? '').trim() || String(fallbackConfig.model ?? '').trim();
+  if (!endpoint || !model) {
+    return [];
+  }
+
+  return [
+    {
+      id: 'default-sub-agent',
+      label: 'Default Sub-Agent',
+      maxConcurrentSpawns: 1,
+      config: {
+        endpoint,
+        provider: legacy?.provider ?? fallbackConfig.provider,
+        model,
+        apiKey: legacy?.apiKey,
+        temperature: Number(legacy?.temperature ?? fallbackConfig.temperature ?? 0.2),
+        maxTokens: Number(legacy?.maxTokens ?? 0) || undefined,
+        contextWindowTokens: Math.max(0, Number(legacy?.contextWindowTokens ?? 0)) || undefined,
+        requestTimeoutMs:
+          Number(legacy?.requestTimeoutMs ?? 0) ||
+          fallbackConfig.requestTimeoutMs
+      }
+    }
+  ];
 }
 
 interface ChatContextDebugMessage {
@@ -584,6 +687,24 @@ ipcMain.handle(
       ...payload.config,
       contextWindowTokens: Math.max(0, Number(payload.contextWindowTokens ?? 0)) || undefined
     };
+    const legacySubAgentConfig: LLMConfig = {
+      endpoint: String(payload.subAgentConfig?.endpoint ?? config.endpoint).trim() || config.endpoint,
+      provider: payload.subAgentConfig?.provider ?? config.provider,
+      model: String(payload.subAgentConfig?.model ?? config.model).trim() || config.model,
+      apiKey: payload.subAgentConfig?.apiKey ?? config.apiKey,
+      temperature: Number(payload.subAgentConfig?.temperature ?? config.temperature ?? 0.2),
+      maxTokens: Number(payload.subAgentConfig?.maxTokens ?? 0) || undefined,
+      contextWindowTokens:
+        Math.max(0, Number(payload.subAgentConfig?.contextWindowTokens ?? 0)) || undefined,
+      requestTimeoutMs:
+        Number(payload.subAgentConfig?.requestTimeoutMs ?? 0) || config.requestTimeoutMs
+    };
+    const subAgentProfiles = normalizeRuntimeSubAgentProfiles(
+      payload.subAgentConfigs,
+      config,
+      legacySubAgentConfig
+    );
+    const subAgentActiveCounts: Record<string, number> = {};
     const abortController = new AbortController();
     activeChatAbortController = abortController;
     const requestedChatNamespace = String(payload.memoryNamespace ?? '').trim();
@@ -676,7 +797,14 @@ ipcMain.handle(
         ...runtimeContext(event.sender, 'chat:event'),
         turboMemory: turboMemory ?? undefined,
         llmConfig: config,
+        subAgentConfig: subAgentProfiles[0]?.config,
+        subAgentProfiles,
+        subAgentActiveCounts,
         activeNamespaces: chatNamespaces.length > 0 ? chatNamespaces : undefined,
+        allowedToolNames: requestedToolNames,
+        onAgentEvent: (message: string) => {
+          event.sender.send('chat:event', message);
+        },
         onQueryUser: async (request: import('./backend/toolRuntime').QueryUserRequest) => {
           // Send query to renderer and wait for user response
           event.sender.send('chat:query-user', request);
@@ -688,22 +816,60 @@ ipcMain.handle(
 
       const toolDefs = getAllowedToolDefinitions(requestedToolNames, chatRuntimeContext);
 
-      const result = await chatWithTools(
-        config,
-        messages,
-        toolDefs,
-        async (name, args) => {
-          if (!requestedToolNames.includes(name)) {
-            throw new Error(`Tool ${name} is not enabled for chat.`);
+      const chatMaxRetries = 1;
+      let attempt = 0;
+      let retryErrorDetail = '';
+      let result: Awaited<ReturnType<typeof chatWithTools>> | null = null;
+      let initialMessagesForDebug: ChatMessage[] = [...messages];
+
+      while (attempt <= chatMaxRetries) {
+        const attemptMessages: ChatMessage[] = [...messages];
+        if (retryErrorDetail) {
+          attemptMessages.push({
+            role: 'system',
+            content:
+              `Previous attempt failed in this chat turn with: ${truncateText(retryErrorDetail, 1200)}\n` +
+              'Retry this chat turn by fixing the issue directly. Keep output concise and continue from the same user request.'
+          });
+          event.sender.send(
+            'chat:event',
+            `[retry] internal server error detected; asking model to try again (${attempt + 1}/${chatMaxRetries + 1}).`
+          );
+        }
+
+        try {
+          initialMessagesForDebug = attemptMessages;
+          result = await chatWithTools(
+            config,
+            attemptMessages,
+            toolDefs,
+            async (name, args) => {
+              if (!requestedToolNames.includes(name)) {
+                throw new Error(`Tool ${name} is not enabled for chat.`);
+              }
+              return executeTool(name, args, chatRuntimeContext);
+            },
+            message => {
+              event.sender.send('chat:event', message);
+            },
+            payload.maxToolTurns ?? 40,
+            abortController.signal
+          );
+          break;
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : String(error);
+          if (attempt < chatMaxRetries && isInternalServerRetryableError(detail)) {
+            retryErrorDetail = detail;
+            attempt += 1;
+            continue;
           }
-          return executeTool(name, args, chatRuntimeContext);
-        },
-        message => {
-          event.sender.send('chat:event', message);
-        },
-        payload.maxToolTurns ?? 40,
-        abortController.signal
-      );
+          throw error;
+        }
+      }
+
+      if (!result) {
+        throw new Error('Chat failed after retry attempts without returning a result.');
+      }
       const text = result.text;
 
       const debugDumpEnabled = payload.chatDebugDumpsEnabled !== false;
@@ -715,7 +881,7 @@ ipcMain.handle(
             contextWindowTokens: payload.contextWindowTokens,
             recalledPromptTokens,
             historyMessageCount: Array.isArray(payload.historyMessages) ? payload.historyMessages.length : 0,
-            initialMessages: messages,
+            initialMessages: initialMessagesForDebug,
             finalMessages: result.debug?.finalMessages,
             turns: result.debug?.turns,
             totalToolCalls: result.debug?.totalToolCalls,
@@ -1119,6 +1285,38 @@ ipcMain.handle(
 
     const requestedNamespace = String(payload.memoryNamespace ?? '').trim();
     const requestedGlobalNamespace = String(payload.memoryGlobalNamespace ?? '').trim();
+    const fallbackStep = normalizedPlan?.steps?.[0];
+    const fallbackConfig: LLMConfig = {
+      endpoint: String(fallbackStep?.endpoint ?? '').trim(),
+      provider: fallbackStep?.provider,
+      model: String(fallbackStep?.model ?? '').trim(),
+      apiKey: fallbackStep?.apiKey,
+      temperature: Number(fallbackStep?.temperature ?? 0.2),
+      maxTokens: Number(fallbackStep?.maxTokens ?? 0) || undefined,
+      contextWindowTokens:
+        Math.max(0, Number(fallbackStep?.contextWindowTokens ?? 0)) || undefined,
+      requestTimeoutMs: Number(payload.requestTimeoutMs ?? 0) || undefined
+    };
+    const legacySubAgentConfig: LLMConfig = {
+      endpoint: String(payload.subAgentConfig?.endpoint ?? fallbackStep?.endpoint ?? '').trim(),
+      provider: payload.subAgentConfig?.provider ?? fallbackStep?.provider,
+      model: String(payload.subAgentConfig?.model ?? fallbackStep?.model ?? '').trim(),
+      apiKey: payload.subAgentConfig?.apiKey ?? fallbackStep?.apiKey,
+      temperature: Number(payload.subAgentConfig?.temperature ?? fallbackStep?.temperature ?? 0.2),
+      maxTokens: Number(payload.subAgentConfig?.maxTokens ?? 0) || undefined,
+      contextWindowTokens:
+        Math.max(0, Number(payload.subAgentConfig?.contextWindowTokens ?? 0)) || undefined,
+      requestTimeoutMs:
+        Number(payload.subAgentConfig?.requestTimeoutMs ?? 0) ||
+        Number(payload.requestTimeoutMs ?? 0) ||
+        undefined
+    };
+    const subAgentProfiles = normalizeRuntimeSubAgentProfiles(
+      payload.subAgentConfigs,
+      fallbackConfig,
+      legacySubAgentConfig
+    );
+    const subAgentActiveCounts: Record<string, number> = {};
     
     // Build list of namespaces to retrieve from (global + workspace)
     const orchestrationNamespaces: string[] = [];
@@ -1136,17 +1334,20 @@ ipcMain.handle(
     const orchRuntimeContext = {
       ...runtimeContext(event.sender, 'orch:event'),
       turboMemory: turboMemory ?? undefined,
-      llmConfig: payload.plan?.steps?.[0]
+      llmConfig: normalizedPlan?.steps?.[0]
         ? {
-            endpoint: payload.plan.steps[0].endpoint,
-            provider: payload.plan.steps[0].provider,
-            model: payload.plan.steps[0].model,
-            apiKey: payload.plan.steps[0].apiKey,
-            temperature: payload.plan.steps[0].temperature ?? 0.2,
-            maxTokens: payload.plan.steps[0].maxTokens,
+            endpoint: normalizedPlan.steps[0].endpoint,
+            provider: normalizedPlan.steps[0].provider,
+            model: normalizedPlan.steps[0].model,
+            apiKey: normalizedPlan.steps[0].apiKey,
+            temperature: normalizedPlan.steps[0].temperature ?? 0.2,
+            maxTokens: normalizedPlan.steps[0].maxTokens,
             requestTimeoutMs: Number(payload.requestTimeoutMs ?? 0) || undefined
           }
         : undefined,
+      subAgentConfig: subAgentProfiles[0]?.config,
+      subAgentProfiles,
+      subAgentActiveCounts,
       activeNamespaces: orchestrationNamespaces.length > 0 ? orchestrationNamespaces : undefined
     };
 

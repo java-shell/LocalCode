@@ -20,6 +20,12 @@ const settingsState = {
   endpoint: 'http://localhost:11434/v1/chat/completions',
   model: 'llama3',
   apiKey: '',
+  subAgentProvider: 'ollama',
+  subAgentEndpoint: 'http://localhost:11434/v1/chat/completions',
+  subAgentModel: 'llama3',
+  subAgentApiKey: '',
+  subAgentContextWindowTokens: 0,
+  subAgentProfiles: [],
   modelContextWindows: {},
   chatMemoryNamespace: '',
   chatMemoryGlobalNamespace: '',
@@ -31,6 +37,51 @@ const settingsState = {
 };
 
 const usageByModel = new Map();
+const subAgentActivityByProfile = new Map();
+let refreshSubAgentProfileActivityIndicators = () => {};
+
+function parseSubAgentActivityEvent(rawEvent) {
+  const text = String(rawEvent || '');
+  const match = text.match(/\[sub-agent\]\s+(?:start|end)\s+\|\s+profile=(.+?)\s+\(active=(\d+)\/(\d+)\)/i);
+  if (!match) {
+    return null;
+  }
+
+  const profileId = String(match[1] || '').trim();
+  if (!profileId) {
+    return null;
+  }
+
+  return {
+    profileId,
+    active: Math.max(0, Number(match[2]) || 0),
+    limit: Math.max(1, Number(match[3]) || 1)
+  };
+}
+
+function applySubAgentActivityEvent(rawEvent) {
+  const parsed = parseSubAgentActivityEvent(rawEvent);
+  if (!parsed) {
+    return;
+  }
+  subAgentActivityByProfile.set(parsed.profileId, {
+    active: parsed.active,
+    limit: parsed.limit,
+    updatedAt: Date.now()
+  });
+  refreshSubAgentProfileActivityIndicators();
+}
+
+function getSubAgentActivityLabel(profileId, configuredLimit) {
+  const limit = clampSubAgentSpawnLimit(Number(configuredLimit || 1));
+  const current = subAgentActivityByProfile.get(String(profileId || '').trim());
+  if (!current) {
+    return `Active: 0/${limit}`;
+  }
+  const displayLimit = clampSubAgentSpawnLimit(Number(current.limit || limit));
+  const displayActive = Math.max(0, Math.min(displayLimit, Number(current.active) || 0));
+  return `Active: ${displayActive}/${displayLimit}`;
+}
 
 const contextWindowHints = [
   { pattern: /(gpt-5|gpt-4\.1|o4|o3)/i, tokens: 128000 },
@@ -47,7 +98,7 @@ function clampMaxToolTurns(value) {
 
 function clampRequestTimeoutMs(value) {
   if (!Number.isFinite(value)) return 180000;
-  return Math.max(1000, Math.min(600000, Math.floor(value)));
+  return Math.max(1000, Math.min(3600000, Math.floor(value)));
 }
 
 function clampContextWindowTokens(value) {
@@ -57,6 +108,57 @@ function clampContextWindowTokens(value) {
 
 function normalizeProvider(value) {
   return String(value || '').trim().toLowerCase() === 'ollama' ? 'ollama' : 'openai-compatible';
+}
+
+function clampSubAgentSpawnLimit(value) {
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(1, Math.min(50, Math.floor(value)));
+}
+
+function createDefaultSubAgentProfile(index = 0) {
+  const id = `sub-agent-${index + 1}`;
+  return {
+    id,
+    label: `Sub-Agent ${index + 1}`,
+    provider: normalizeProvider(settingsState.provider),
+    endpoint: settingsState.endpoint,
+    model: settingsState.model,
+    apiKey: settingsState.apiKey,
+    contextWindowTokens: 0,
+    maxConcurrentSpawns: 1
+  };
+}
+
+function normalizeSubAgentProfiles(rawProfiles) {
+  const items = Array.isArray(rawProfiles) ? rawProfiles : [];
+  const normalized = [];
+  const seen = new Set();
+
+  for (let i = 0; i < items.length; i += 1) {
+    const item = items[i] && typeof items[i] === 'object' ? items[i] : {};
+    const endpoint = String(item.endpoint ?? '').trim();
+    const model = String(item.model ?? '').trim();
+    if (!endpoint || !model) {
+      continue;
+    }
+
+    const rawId = String(item.id ?? '').trim() || `sub-agent-${i + 1}`;
+    const id = seen.has(rawId) ? `${rawId}-${i + 1}` : rawId;
+    seen.add(id);
+
+    normalized.push({
+      id,
+      label: String(item.label ?? '').trim() || id,
+      provider: normalizeProvider(item.provider),
+      endpoint,
+      model,
+      apiKey: String(item.apiKey ?? ''),
+      contextWindowTokens: clampContextWindowTokens(Number(item.contextWindowTokens ?? 0)),
+      maxConcurrentSpawns: clampSubAgentSpawnLimit(Number(item.maxConcurrentSpawns ?? item.maxSpawnsPerRun ?? 1))
+    });
+  }
+
+  return normalized;
 }
 
 /* ========================================
@@ -565,6 +667,41 @@ function loadSettings() {
     settingsState.endpoint = String(parsed.endpoint ?? settingsState.endpoint).trim() || settingsState.endpoint;
     settingsState.model = String(parsed.model ?? settingsState.model).trim() || settingsState.model;
     settingsState.apiKey = String(parsed.apiKey ?? settingsState.apiKey);
+    settingsState.subAgentProvider = normalizeProvider(
+      parsed.subAgentProvider ?? settingsState.subAgentProvider ?? settingsState.provider
+    );
+    settingsState.subAgentEndpoint =
+      String(parsed.subAgentEndpoint ?? settingsState.subAgentEndpoint ?? settingsState.endpoint).trim()
+      || settingsState.subAgentEndpoint
+      || settingsState.endpoint;
+    settingsState.subAgentModel =
+      String(parsed.subAgentModel ?? settingsState.subAgentModel ?? settingsState.model).trim()
+      || settingsState.subAgentModel
+      || settingsState.model;
+    settingsState.subAgentApiKey = String(
+      parsed.subAgentApiKey ?? settingsState.subAgentApiKey ?? settingsState.apiKey
+    );
+    settingsState.subAgentContextWindowTokens = clampContextWindowTokens(
+      Number(parsed.subAgentContextWindowTokens ?? settingsState.subAgentContextWindowTokens ?? 0)
+    );
+    const parsedProfiles = normalizeSubAgentProfiles(parsed.subAgentProfiles);
+    if (parsedProfiles.length > 0) {
+      settingsState.subAgentProfiles = parsedProfiles;
+    } else {
+      const migrated = normalizeSubAgentProfiles([
+        {
+          id: 'default-sub-agent',
+          label: 'Default Sub-Agent',
+          provider: settingsState.subAgentProvider,
+          endpoint: settingsState.subAgentEndpoint,
+          model: settingsState.subAgentModel,
+          apiKey: settingsState.subAgentApiKey,
+          contextWindowTokens: settingsState.subAgentContextWindowTokens,
+          maxConcurrentSpawns: 1
+        }
+      ]);
+      settingsState.subAgentProfiles = migrated;
+    }
     settingsState.modelContextWindows =
       parsed.modelContextWindows && typeof parsed.modelContextWindows === 'object'
         ? Object.fromEntries(
@@ -587,6 +724,12 @@ function loadSettings() {
     settingsState.endpoint = 'http://localhost:11434/v1/chat/completions';
     settingsState.model = 'llama3';
     settingsState.apiKey = '';
+    settingsState.subAgentProvider = 'ollama';
+    settingsState.subAgentEndpoint = 'http://localhost:11434/v1/chat/completions';
+    settingsState.subAgentModel = 'llama3';
+    settingsState.subAgentApiKey = '';
+    settingsState.subAgentContextWindowTokens = 0;
+    settingsState.subAgentProfiles = [createDefaultSubAgentProfile(0)];
     settingsState.modelContextWindows = {};
     settingsState.chatMemoryNamespace = '';
     settingsState.chatMemoryGlobalNamespace = '';
@@ -596,10 +739,31 @@ function loadSettings() {
     settingsState.chatSettingsCollapsed = true;
     settingsState.lockedNamespaces = [];
   }
+
+  if (!Array.isArray(settingsState.subAgentProfiles) || settingsState.subAgentProfiles.length === 0) {
+    settingsState.subAgentProfiles = [createDefaultSubAgentProfile(0)];
+  }
 }
 
 function saveSettings() {
   window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settingsState));
+}
+
+function buildSubAgentConfigs() {
+  const profiles = normalizeSubAgentProfiles(settingsState.subAgentProfiles);
+  return profiles.map(profile => ({
+    id: profile.id,
+    label: profile.label,
+    provider: normalizeProvider(profile.provider),
+    endpoint: profile.endpoint,
+    model: profile.model,
+    apiKey: String(profile.apiKey || ''),
+    temperature: 0.2,
+    maxTokens: 0,
+    contextWindowTokens: clampContextWindowTokens(Number(profile.contextWindowTokens || 0)) || undefined,
+    requestTimeoutMs: settingsState.requestTimeoutMs,
+    maxConcurrentSpawns: clampSubAgentSpawnLimit(Number(profile.maxConcurrentSpawns || 1))
+  }));
 }
 
 function basename(filePath) {
@@ -1382,6 +1546,8 @@ function initSettingsMenu() {
   const providerInput = document.getElementById('settingProvider');
   const modelInput = document.getElementById('settingModel');
   const apiKeyInput = document.getElementById('settingApiKey');
+  const subAgentProfilesEditor = document.getElementById('settingSubAgentProfilesEditor');
+  const addSubAgentProfileButton = document.getElementById('settingAddSubAgentProfile');
   const chatDebugDumpsInput = document.getElementById('settingChatDebugDumpsEnabled');
   const cancel = document.getElementById('settingsCancel');
   const save = document.getElementById('settingsSave');
@@ -1390,6 +1556,163 @@ function initSettingsMenu() {
   const chatEndpoint = document.getElementById('chatEndpoint');
   const chatModel = document.getElementById('chatModel');
   const chatApiKey = document.getElementById('chatApiKey');
+  let modalSubAgentProfiles = [];
+
+  function renderSubAgentProfilesEditor() {
+    subAgentProfilesEditor.innerHTML = '';
+    const activityBadges = [];
+
+    if (!modalSubAgentProfiles.length) {
+      modalSubAgentProfiles.push(createDefaultSubAgentProfile(0));
+    }
+
+    for (const [index, profile] of modalSubAgentProfiles.entries()) {
+      const card = document.createElement('div');
+      card.className = 'sub-agent-profile-card';
+
+      const titleRow = document.createElement('div');
+      titleRow.className = 'sub-agent-profile-title-row';
+
+      const title = document.createElement('div');
+      title.className = 'sub-agent-profile-title';
+      title.textContent = `Profile ${index + 1}`;
+
+      const activityBadge = document.createElement('span');
+      activityBadge.className = 'sub-agent-profile-activity';
+      activityBadge.textContent = getSubAgentActivityLabel(profile.id, profile.maxConcurrentSpawns);
+
+      titleRow.appendChild(title);
+      titleRow.appendChild(activityBadge);
+
+      const idLabel = document.createElement('label');
+      idLabel.className = 'label';
+      idLabel.textContent = 'Profile ID';
+      const idInput = document.createElement('input');
+      idInput.value = profile.id;
+      idInput.placeholder = `sub-agent-${index + 1}`;
+      idInput.addEventListener('input', () => {
+        profile.id = idInput.value.trim() || `sub-agent-${index + 1}`;
+        activityBadge.textContent = getSubAgentActivityLabel(profile.id, profile.maxConcurrentSpawns);
+      });
+
+      const labelLabel = document.createElement('label');
+      labelLabel.className = 'label';
+      labelLabel.textContent = 'Label';
+      const labelInput = document.createElement('input');
+      labelInput.value = profile.label;
+      labelInput.placeholder = `Sub-Agent ${index + 1}`;
+      labelInput.addEventListener('input', () => {
+        profile.label = labelInput.value.trim() || `Sub-Agent ${index + 1}`;
+      });
+
+      const providerLabel = document.createElement('label');
+      providerLabel.className = 'label';
+      providerLabel.textContent = 'Provider';
+      const providerSelect = document.createElement('select');
+      providerSelect.innerHTML = '<option value="openai-compatible">openai-compatible</option><option value="ollama">ollama</option>';
+      providerSelect.value = normalizeProvider(profile.provider);
+      providerSelect.addEventListener('change', () => {
+        profile.provider = normalizeProvider(providerSelect.value);
+      });
+
+      const endpointLabel = document.createElement('label');
+      endpointLabel.className = 'label';
+      endpointLabel.textContent = 'Endpoint';
+      const endpointInput = document.createElement('input');
+      endpointInput.value = profile.endpoint;
+      endpointInput.placeholder = 'http://localhost:11434/v1/chat/completions';
+      endpointInput.addEventListener('input', () => {
+        profile.endpoint = endpointInput.value.trim();
+      });
+
+      const modelLabel = document.createElement('label');
+      modelLabel.className = 'label';
+      modelLabel.textContent = 'Model';
+      const modelInput = document.createElement('input');
+      modelInput.value = profile.model;
+      modelInput.placeholder = 'llama3';
+      modelInput.addEventListener('input', () => {
+        profile.model = modelInput.value.trim();
+      });
+
+      const apiKeyLabel = document.createElement('label');
+      apiKeyLabel.className = 'label';
+      apiKeyLabel.textContent = 'API Key (optional)';
+      const apiKeyInput = document.createElement('input');
+      apiKeyInput.type = 'password';
+      apiKeyInput.value = profile.apiKey || '';
+      apiKeyInput.placeholder = 'sk-...';
+      apiKeyInput.addEventListener('input', () => {
+        profile.apiKey = apiKeyInput.value;
+      });
+
+      const contextLabel = document.createElement('label');
+      contextLabel.className = 'label';
+      contextLabel.textContent = 'Context Window Tokens (optional)';
+      const contextInput = document.createElement('input');
+      contextInput.type = 'number';
+      contextInput.min = '1';
+      contextInput.step = '1';
+      contextInput.value = profile.contextWindowTokens ? String(profile.contextWindowTokens) : '';
+      contextInput.placeholder = 'Auto';
+      contextInput.addEventListener('input', () => {
+        profile.contextWindowTokens = clampContextWindowTokens(Number(contextInput.value || 0));
+      });
+
+      const limitLabel = document.createElement('label');
+      limitLabel.className = 'label';
+      limitLabel.textContent = 'Max Concurrent Spawns';
+      const limitInput = document.createElement('input');
+      limitInput.type = 'number';
+      limitInput.min = '1';
+      limitInput.max = '50';
+      limitInput.step = '1';
+      limitInput.value = String(clampSubAgentSpawnLimit(Number(profile.maxConcurrentSpawns || 1)));
+      limitInput.addEventListener('input', () => {
+        profile.maxConcurrentSpawns = clampSubAgentSpawnLimit(Number(limitInput.value || 1));
+        activityBadge.textContent = getSubAgentActivityLabel(profile.id, profile.maxConcurrentSpawns);
+      });
+
+      const removeButton = document.createElement('button');
+      removeButton.type = 'button';
+      removeButton.className = 'sub-agent-profile-remove';
+      removeButton.textContent = 'Remove Profile';
+      removeButton.disabled = modalSubAgentProfiles.length <= 1;
+      removeButton.addEventListener('click', () => {
+        modalSubAgentProfiles.splice(index, 1);
+        renderSubAgentProfilesEditor();
+      });
+
+      card.appendChild(titleRow);
+      card.appendChild(idLabel);
+      card.appendChild(idInput);
+      card.appendChild(labelLabel);
+      card.appendChild(labelInput);
+      card.appendChild(providerLabel);
+      card.appendChild(providerSelect);
+      card.appendChild(endpointLabel);
+      card.appendChild(endpointInput);
+      card.appendChild(modelLabel);
+      card.appendChild(modelInput);
+      card.appendChild(apiKeyLabel);
+      card.appendChild(apiKeyInput);
+      card.appendChild(contextLabel);
+      card.appendChild(contextInput);
+      card.appendChild(limitLabel);
+      card.appendChild(limitInput);
+      card.appendChild(removeButton);
+
+      subAgentProfilesEditor.appendChild(card);
+      activityBadges.push({ badge: activityBadge, profile });
+    }
+
+    refreshSubAgentProfileActivityIndicators = () => {
+      for (const entry of activityBadges) {
+        entry.badge.textContent = getSubAgentActivityLabel(entry.profile.id, entry.profile.maxConcurrentSpawns);
+      }
+    };
+    refreshSubAgentProfileActivityIndicators();
+  }
 
   function openModal() {
     input.value = String(settingsState.maxToolTurns);
@@ -1398,6 +1721,11 @@ function initSettingsMenu() {
     providerInput.value = normalizeProvider(settingsState.provider);
     modelInput.value = settingsState.model;
     apiKeyInput.value = settingsState.apiKey;
+    modalSubAgentProfiles = normalizeSubAgentProfiles(settingsState.subAgentProfiles);
+    if (!modalSubAgentProfiles.length) {
+      modalSubAgentProfiles = [createDefaultSubAgentProfile(0)];
+    }
+    renderSubAgentProfilesEditor();
     chatDebugDumpsInput.checked = settingsState.chatDebugDumpsEnabled;
     modal.classList.add('open');
     modal.setAttribute('aria-hidden', 'false');
@@ -1412,6 +1740,10 @@ function initSettingsMenu() {
 
   openButton.addEventListener('click', openModal);
   cancel.addEventListener('click', closeModal);
+  addSubAgentProfileButton.addEventListener('click', () => {
+    modalSubAgentProfiles.push(createDefaultSubAgentProfile(modalSubAgentProfiles.length));
+    renderSubAgentProfilesEditor();
+  });
 
   save.addEventListener('click', () => {
     settingsState.maxToolTurns = clampMaxToolTurns(Number(input.value));
@@ -1420,6 +1752,15 @@ function initSettingsMenu() {
     settingsState.provider = normalizeProvider(providerInput.value);
     settingsState.model = modelInput.value.trim() || settingsState.model;
     settingsState.apiKey = apiKeyInput.value;
+    settingsState.subAgentProfiles = normalizeSubAgentProfiles(modalSubAgentProfiles);
+    if (!settingsState.subAgentProfiles.length) {
+      settingsState.subAgentProfiles = [createDefaultSubAgentProfile(0)];
+    }
+    settingsState.subAgentProvider = settingsState.subAgentProfiles[0].provider;
+    settingsState.subAgentEndpoint = settingsState.subAgentProfiles[0].endpoint;
+    settingsState.subAgentModel = settingsState.subAgentProfiles[0].model;
+    settingsState.subAgentApiKey = settingsState.subAgentProfiles[0].apiKey;
+    settingsState.subAgentContextWindowTokens = settingsState.subAgentProfiles[0].contextWindowTokens;
     settingsState.chatDebugDumpsEnabled = Boolean(chatDebugDumpsInput.checked);
 
     chatProvider.value = settingsState.provider;
@@ -1935,6 +2276,8 @@ async function initChat() {
   }
 
   const offChatEvent = window.llmIde.onChatEvent(event => {
+    applySubAgentActivityEvent(event);
+
     const parsed = parseChatEvent(event);
     if (!parsed || !parsed.text) {
       return;
@@ -2495,6 +2838,7 @@ async function initChat() {
           maxTokens: 0,
           requestTimeoutMs: settingsState.requestTimeoutMs
         },
+        subAgentConfigs: buildSubAgentConfigs(),
         historyMessages: priorMessages,
         contextWindowTokens: resolveSelectedContextWindowTokens(),
         memoryNamespace: selectedChatMemoryNamespace() || undefined,
@@ -2507,6 +2851,7 @@ async function initChat() {
           'web_search',
           'query_memory',
           'list_namespaces',
+          'spawn_sub_agent',
           'query_user',
           'list_repo_tree',
           'list_dir',
@@ -2628,6 +2973,7 @@ async function initOrchestration() {
     'web_search',
     'query_memory',
     'list_namespaces',
+    'spawn_sub_agent',
     'query_user',
     'list_repo_tree',
     'list_dir',
@@ -3376,6 +3722,7 @@ async function initOrchestration() {
   }
 
   const offEvent = window.llmIde.onOrchestrationEvent(event => {
+    applySubAgentActivityEvent(event);
     appendLog(eventsEl, event);
   });
 
@@ -3568,6 +3915,7 @@ async function initOrchestration() {
       const result = await window.llmIde.runOrchestration({
         plan: parsed,
         prompt: promptText,
+        subAgentConfigs: buildSubAgentConfigs(),
         memoryNamespace: selectedOrchestrationMemoryNamespace() || undefined,
         memoryGlobalNamespace: selectedOrchestrationMemoryGlobalNamespace() || undefined,
         requestTimeoutMs: settingsState.requestTimeoutMs
@@ -3639,6 +3987,7 @@ async function initAdvancedOrchestration() {
     'web_search',
     'query_memory',
     'list_namespaces',
+    'spawn_sub_agent',
     'query_user',
     'list_repo_tree',
     'list_dir',
@@ -4717,6 +5066,7 @@ async function initAdvancedOrchestration() {
   }
 
   const offEvent = window.llmIde.onOrchestrationEvent(event => {
+    applySubAgentActivityEvent(event);
     if (!advancedRunning) {
       return;
     }
@@ -4827,6 +5177,7 @@ async function initAdvancedOrchestration() {
       const result = await window.llmIde.runOrchestration({
         plan,
         prompt: promptText,
+        subAgentConfigs: buildSubAgentConfigs(),
         requestTimeoutMs: settingsState.requestTimeoutMs
       });
       renderOutput(result);
