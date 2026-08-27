@@ -17,7 +17,11 @@ async function withMockedChatWithTools(
     config: LLMConfig,
     initialMessages: ChatMessage[],
     tools: ToolDefinition[],
-    executeTool: (name: string, args: unknown) => Promise<unknown>
+    executeTool: (name: string, args: unknown) => Promise<unknown>,
+    onEvent?: (message: string) => void,
+    maxToolTurns?: number,
+    signal?: AbortSignal,
+    onToken?: (token: string) => void
   ) => Promise<{ text: string; usage: { promptTokens: number; completionTokens: number; totalTokens: number; requests: number } }>,
   callback: () => Promise<void>
 ): Promise<void> {
@@ -334,5 +338,31 @@ test('spawn_sub_agent can fan out parallel tasks in one tool call', async () => 
     assert.match(result.findings, /Task 1:/);
     assert.match(result.findings, /Task 2:/);
     assert.equal(peakInFlight, 2);
+  });
+});
+
+test('spawn_sub_agent clamps maxToolTurns to 50', async () => {
+  await withMockedChatWithTools(async (
+    _config: LLMConfig,
+    _initialMessages: ChatMessage[],
+    _tools: ToolDefinition[],
+    _executeTool: (name: string, args: unknown) => Promise<unknown>,
+    _onEvent?: (message: string) => void,
+    maxToolTurns?: number
+  ) => {
+    assert.equal(maxToolTurns, 50);
+    return {
+      text: 'Clamped tool-turn run completed.',
+      usage: { promptTokens: 3, completionTokens: 4, totalTokens: 7, requests: 1 }
+    };
+  }, async () => {
+    const result = await executeTool('spawn_sub_agent', {
+      prompt: 'Use a high tool-turn budget.',
+      toolNames: ['read_file'],
+      maxToolTurns: 999
+    }, makeContext() as any) as { ok: boolean; findings: string };
+
+    assert.equal(result.ok, true);
+    assert.match(result.findings, /Clamped tool-turn run completed/);
   });
 });

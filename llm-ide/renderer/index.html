@@ -126,6 +126,14 @@
             </div>
             <label class="label">Context Window Tokens</label>
             <input id="chatContextWindowTokens" type="number" min="1" step="1" placeholder="Auto-detect by model" />
+            <label class="orch-tool-item chat-think-toggle" for="chatOllamaThinkMode">
+              <input id="chatOllamaThinkMode" type="checkbox" />
+              Enable Ollama Think Mode
+            </label>
+            <label class="orch-tool-item chat-think-toggle" for="chatOllamaStreamingMode">
+              <input id="chatOllamaStreamingMode" type="checkbox" />
+              Enable Ollama Streaming
+            </label>
             <label class="label">API Key (optional)</label>
             <input id="chatApiKey" type="password" placeholder="sk-..." />
             <label class="label">Global Memory Namespace (optional)</label>

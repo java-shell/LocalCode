@@ -20,6 +20,8 @@ const settingsState = {
   endpoint: 'http://localhost:11434/v1/chat/completions',
   model: 'llama3',
   apiKey: '',
+  ollamaThink: true,
+  ollamaStreaming: true,
   subAgentProvider: 'ollama',
   subAgentEndpoint: 'http://localhost:11434/v1/chat/completions',
   subAgentModel: 'llama3',
@@ -667,6 +669,8 @@ function loadSettings() {
     settingsState.endpoint = String(parsed.endpoint ?? settingsState.endpoint).trim() || settingsState.endpoint;
     settingsState.model = String(parsed.model ?? settingsState.model).trim() || settingsState.model;
     settingsState.apiKey = String(parsed.apiKey ?? settingsState.apiKey);
+    settingsState.ollamaThink = Boolean(parsed.ollamaThink ?? settingsState.ollamaThink);
+    settingsState.ollamaStreaming = Boolean(parsed.ollamaStreaming ?? settingsState.ollamaStreaming);
     settingsState.subAgentProvider = normalizeProvider(
       parsed.subAgentProvider ?? settingsState.subAgentProvider ?? settingsState.provider
     );
@@ -724,6 +728,8 @@ function loadSettings() {
     settingsState.endpoint = 'http://localhost:11434/v1/chat/completions';
     settingsState.model = 'llama3';
     settingsState.apiKey = '';
+    settingsState.ollamaThink = true;
+    settingsState.ollamaStreaming = true;
     settingsState.subAgentProvider = 'ollama';
     settingsState.subAgentEndpoint = 'http://localhost:11434/v1/chat/completions';
     settingsState.subAgentModel = 'llama3';
@@ -1841,11 +1847,29 @@ async function initChat() {
   const prompt = document.getElementById('chatPrompt');
   const send = document.getElementById('chatSend');
   const stop = document.getElementById('chatStop');
+  const ollamaThinkMode = document.getElementById('chatOllamaThinkMode');
+  const ollamaStreamingMode = document.getElementById('chatOllamaStreamingMode');
 
   provider.value = normalizeProvider(settingsState.provider);
   endpoint.value = settingsState.endpoint;
   apiKey.value = settingsState.apiKey;
+  ollamaThinkMode.checked = Boolean(settingsState.ollamaThink);
+  ollamaStreamingMode.checked = Boolean(settingsState.ollamaStreaming);
   chatNewMemoryNamespace.value = '';
+
+  function syncOllamaThinkModeAvailability() {
+    const isOllama = normalizeProvider(provider.value) === 'ollama';
+    ollamaThinkMode.disabled = !isOllama;
+    ollamaThinkMode.title = isOllama
+      ? 'Enable provider thinking traces for Ollama native chat'
+      : 'Ollama Think Mode is only available when provider is ollama';
+    ollamaStreamingMode.disabled = !isOllama;
+    ollamaStreamingMode.title = isOllama
+      ? 'Stream Ollama chat responses into the conversation while preserving the legacy completion-only path when disabled'
+      : 'Ollama Streaming is only available when provider is ollama';
+  }
+
+  syncOllamaThinkModeAvailability();
 
   let currentWorkspaceDir = '';
   let chatSessions = [];
@@ -1968,6 +1992,8 @@ async function initChat() {
       provider: normalizeProvider(provider.value),
       endpoint: endpoint.value.trim() || settingsState.endpoint,
       model: model.value || settingsState.model,
+      ollamaThink: Boolean(ollamaThinkMode.checked),
+      ollamaStreaming: Boolean(ollamaStreamingMode.checked),
       contextWindowTokens: resolveSelectedContextWindowTokens(),
       memoryNamespace: selectedChatMemoryNamespace() || undefined
     };
@@ -2056,6 +2082,8 @@ async function initChat() {
 
     provider.value = normalizeProvider(session.config?.provider || settingsState.provider);
     endpoint.value = session.config?.endpoint || settingsState.endpoint;
+    ollamaThinkMode.checked = Boolean(session.config?.ollamaThink ?? settingsState.ollamaThink);
+    ollamaStreamingMode.checked = Boolean(session.config?.ollamaStreaming ?? settingsState.ollamaStreaming);
 
     await refreshModelOptions(session.config?.model || model.value || settingsState.model);
     if (session.config?.model) {
@@ -2071,6 +2099,8 @@ async function initChat() {
 
     settingsState.provider = normalizeProvider(provider.value);
     settingsState.endpoint = endpoint.value.trim() || settingsState.endpoint;
+    settingsState.ollamaThink = Boolean(ollamaThinkMode.checked);
+    settingsState.ollamaStreaming = Boolean(ollamaStreamingMode.checked);
     settingsState.chatMemoryNamespace = String(session.config?.memoryNamespace || '');
     saveSettings();
 
@@ -2207,6 +2237,16 @@ async function initChat() {
     });
   }
 
+  function closeAssistantBlock() {
+    if (assistantMarkdownEl && assistantMarkdownRaw) {
+      assistantMarkdownEl.innerHTML = renderMarkdownToHtml(assistantMarkdownRaw);
+    }
+    assistantRowEl = null;
+    assistantMarkdownEl = null;
+    assistantMarkdownRaw = '';
+    assistantReceivedToken = false;
+  }
+
   const offToken = window.llmIde.onChatToken(token => {
     assistantReceivedToken = true;
     assistantMarkdownRaw += token;
@@ -2220,6 +2260,20 @@ async function initChat() {
     const raw = String(rawEvent ?? '').trim();
     if (!raw) {
       return null;
+    }
+
+    if (raw.startsWith('thinking:')) {
+      return {
+        kind: 'thought',
+        text: raw.slice('thinking:'.length).trim()
+      };
+    }
+
+    if (raw.startsWith('intent:')) {
+      return {
+        kind: 'intent',
+        text: raw.slice('intent:'.length).trim()
+      };
     }
 
     if (raw.startsWith('thought:')) {
@@ -2283,6 +2337,10 @@ async function initChat() {
       return;
     }
 
+    if (parsed.kind === 'intent' || parsed.kind === 'tool') {
+      closeAssistantBlock();
+    }
+
     const row = document.createElement('div');
     row.className = `log-line log-line-event log-line-event-${parsed.kind}`;
     const kindLabel = document.createElement('span');
@@ -2297,11 +2355,7 @@ async function initChat() {
     row.appendChild(finalToggle);
     row.appendChild(kindLabel);
     row.appendChild(text);
-    if (assistantRowEl && assistantRowEl.parentElement === conversation) {
-      conversation.insertBefore(row, assistantRowEl);
-    } else {
-      conversation.appendChild(row);
-    }
+    conversation.appendChild(row);
     conversation.scrollTop = conversation.scrollHeight;
   });
 
@@ -2690,6 +2744,7 @@ async function initChat() {
   provider.addEventListener('change', () => {
     settingsState.provider = normalizeProvider(provider.value);
     saveSettings();
+    syncOllamaThinkModeAvailability();
   });
   endpoint.addEventListener('change', () => {
     settingsState.endpoint = endpoint.value.trim() || settingsState.endpoint;
@@ -2706,6 +2761,14 @@ async function initChat() {
     saveSettings();
     refreshChatNamespaceOptions();
     syncChatContextWindowInput();
+  });
+  ollamaThinkMode.addEventListener('change', () => {
+    settingsState.ollamaThink = Boolean(ollamaThinkMode.checked);
+    saveSettings();
+  });
+  ollamaStreamingMode.addEventListener('change', () => {
+    settingsState.ollamaStreaming = Boolean(ollamaStreamingMode.checked);
+    saveSettings();
   });
   chatContextWindowTokens.addEventListener('change', () => {
     persistSelectedContextWindow({ syncInput: true, save: true });
@@ -2834,6 +2897,8 @@ async function initChat() {
           endpoint: endpoint.value.trim(),
           model: model.value,
           apiKey: apiKey.value.trim() || undefined,
+          ollamaThink: Boolean(ollamaThinkMode.checked),
+          ollamaStreaming: Boolean(ollamaStreamingMode.checked),
           temperature: 0.2,
           maxTokens: 0,
           requestTimeoutMs: settingsState.requestTimeoutMs
@@ -2906,10 +2971,7 @@ async function initChat() {
       }
     } finally {
       setChatRunning(false);
-      assistantRowEl = null;
-      assistantMarkdownEl = null;
-      assistantReceivedToken = false;
-      assistantMarkdownRaw = '';
+      closeAssistantBlock();
       refreshChatNamespaceOptions();
     }
   });

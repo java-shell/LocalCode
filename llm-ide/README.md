@@ -23,6 +23,7 @@ It is not a VS Code extension.
 | **TurboVec Memory** | Inject recalled memories from workspace or global namespaces |
 | **Context Windows** | Per-model context window configuration with auto-detection hints |
 | **Model Discovery** | Auto-discover available models via `/v1/models` endpoint |
+| **Ollama Thinking** | Display native thinking separately; if a thinking response ends without final content, automatically request one concise Markdown summary with thinking and tools disabled, normalizing JSON-only replies for readability |
 | **Sub-Agent Model Settings** | Configure multiple sub-agent profiles (provider/endpoint/model/API key) with per-profile max concurrent spawn limits and optional parallel `spawn_sub_agent` fan-out |
 | **Presets** | Quick-apply common configurations (Ollama, OpenAI-compatible, etc.) |
 

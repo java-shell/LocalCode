@@ -747,6 +747,16 @@ button.btn-danger:hover:not(:disabled) {
   gap: 8px;
 }
 
+.chat-think-toggle {
+  margin-top: 2px;
+}
+
+.chat-think-toggle input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
+  margin: 0;
+}
+
 .chat-settings-panel.collapsed {
   display: none;
 }
@@ -1362,9 +1372,15 @@ button.btn-danger:hover:not(:disabled) {
   font-weight: 500;
 }
 
-.log-line-event-thought {
+.log-line-event-thinking {
   border-left-color: rgba(42, 195, 255, 0.75);
   color: #d6ecff;
+}
+
+.log-line-event-intent,
+.log-line-event-thought {
+  border-left-color: rgba(251, 191, 36, 0.75);
+  color: #fde68a;
 }
 
 .log-line-event-tool {

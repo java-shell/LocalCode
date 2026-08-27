@@ -41,6 +41,10 @@ interface OllamaNativeChatResponse {
   eval_count?: number;
 }
 
+interface OllamaNativeStreamChunk extends OllamaNativeChatResponse {
+  done?: boolean;
+}
+
 interface ModelsResponse {
   data?: Array<{
     id?: string;
@@ -217,6 +221,94 @@ function safeJsonStringify(value: unknown): string {
       ok: false,
       error: error instanceof Error ? error.message : String(error)
     });
+  }
+}
+
+/**
+ * Convert a JSON property name into a readable Markdown heading.
+ * Inputs: camelCase, snake_case, kebab-case, or plain property names.
+ * Outputs: title-cased display text; has no side effects.
+ */
+function formatSummaryLabel(value: string): string {
+  const spaced = value
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .trim();
+  return spaced.replace(/\b\w/g, character => character.toUpperCase());
+}
+
+/**
+ * Render a parsed JSON value as concise Markdown for the chat results pane.
+ * Inputs: JSON-compatible data returned by a model recovery request.
+ * Outputs: human-readable Markdown without executing or trusting embedded content.
+ * Rationale: Some models ignore output-format instructions and return structured JSON even when tools are disabled.
+ */
+function renderSummaryJson(value: unknown): string {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  if (typeof value !== 'object') {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(item => `- ${typeof item === 'object' ? safeJsonStringify(item) : String(item)}`).join('\n');
+  }
+
+  const record = value as Record<string, unknown>;
+  const sections: string[] = [];
+  const summary = record.summary ?? record.result ?? record.answer ?? record.message;
+  if (typeof summary === 'string' && summary.trim()) {
+    sections.push(summary.trim());
+  }
+
+  for (const [key, item] of Object.entries(record)) {
+    if (['summary', 'result', 'answer', 'message'].includes(key) || item === null || item === undefined) {
+      continue;
+    }
+    const label = formatSummaryLabel(key);
+    if (key.toLowerCase() === 'status' && typeof item !== 'object') {
+      sections.push(`Status: ${String(item)}`);
+      continue;
+    }
+    if (Array.isArray(item)) {
+      const bullets = item.map(entry => `- ${typeof entry === 'object' ? safeJsonStringify(entry) : String(entry)}`).join('\n');
+      sections.push(`## ${label}\n\n${bullets}`);
+      continue;
+    }
+    if (typeof item === 'object') {
+      const details = Object.entries(item as Record<string, unknown>)
+        .map(([nestedKey, nestedValue]) => `- **${formatSummaryLabel(nestedKey)}:** ${typeof nestedValue === 'object' ? safeJsonStringify(nestedValue) : String(nestedValue)}`)
+        .join('\n');
+      sections.push(`## ${label}\n\n${details}`);
+      continue;
+    }
+    sections.push(`## ${label}\n\n${String(item)}`);
+  }
+
+  return sections.filter(Boolean).join('\n\n');
+}
+
+/**
+ * Normalize a thought-recovery response for user display.
+ * Inputs: raw model text, optionally a complete JSON object/array or fenced JSON block.
+ * Outputs: readable Markdown for JSON responses, otherwise the original trimmed text.
+ * Errors: malformed or partial JSON is left untouched rather than discarded.
+ */
+function normalizeThinkingSummaryOutput(value: unknown): string {
+  const text = String(value ?? '').trim();
+  if (!text) {
+    return '';
+  }
+  const fencedMatch = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  const candidate = (fencedMatch?.[1] ?? text).trim();
+  if (!candidate.startsWith('{') && !candidate.startsWith('[')) {
+    return text;
+  }
+
+  try {
+    return renderSummaryJson(JSON.parse(candidate)) || text;
+  } catch {
+    return text;
   }
 }
 
@@ -460,6 +552,34 @@ function buildToolNameByCallId(messages: ChatMessage[]): Map<string, string> {
   return toolNames;
 }
 
+function normalizeForStrictSystemTemplates(messages: ChatMessage[]): ChatMessage[] {
+  const systemParts: string[] = [];
+  const nonSystem: ChatMessage[] = [];
+
+  for (const message of messages) {
+    if (message.role === 'system') {
+      const text = String(message.content ?? '').trim();
+      if (text) {
+        systemParts.push(text);
+      }
+      continue;
+    }
+    nonSystem.push(message);
+  }
+
+  if (systemParts.length === 0) {
+    return nonSystem;
+  }
+
+  return [
+    {
+      role: 'system',
+      content: systemParts.join('\n\n')
+    },
+    ...nonSystem
+  ];
+}
+
 function toOllamaMessages(messages: ChatMessage[]): Array<Record<string, unknown>> {
   const toolNames = buildToolNameByCallId(messages);
   return messages.map(message => {
@@ -557,13 +677,164 @@ function buildOllamaNativePayload(config: LLMConfig, messages: ChatMessage[], to
     model: config.model,
     messages: toOllamaMessages(messages),
     stream: false,
-    think: false,
+    think: Boolean(config.ollamaThink),
     options
   };
   if (tools.length > 0) {
     payload.tools = tools;
   }
   return payload;
+}
+
+async function streamOllamaNativeChat(
+  endpoint: string,
+  payload: Record<string, unknown>,
+  headers: Record<string, string>,
+  timeout: number,
+  signal: AbortSignal | undefined,
+  onToken?: (token: string) => void
+): Promise<{ assistant?: ChatMessage; thinking?: string; usage: Omit<TokenUsage, 'requests'> }> {
+  let response;
+  try {
+    response = await axios.post(endpoint, { ...payload, stream: true }, {
+      headers: { ...headers, Accept: 'text/event-stream' },
+      responseType: 'stream',
+      timeout,
+      signal
+    });
+  } catch (error) {
+    throw error;
+  }
+
+  const responseData = response.data as { on?: unknown };
+  if (typeof responseData.on !== 'function') {
+    const data = response.data as OllamaNativeChatResponse;
+    const assistant = ollamaResponseToAssistant(data);
+    const usage = parseOllamaUsage(data);
+    return {
+      assistant,
+      thinking: String(data.message?.thinking ?? '').trim(),
+      usage
+    };
+  }
+
+  return await new Promise((resolve, reject) => {
+    let pending = '';
+    let assistantContent = '';
+    let assistantThinking = '';
+    let toolCalls: OllamaNativeToolCall[] = [];
+    let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    let settled = false;
+
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+
+      const assistant: ChatMessage | undefined = assistantContent || toolCalls.length > 0 || assistantThinking
+        ? {
+            role: 'assistant',
+            content: assistantContent.trim(),
+            tool_calls: toolCalls.length > 0
+              ? toolCalls
+                  .filter(call => Boolean(call.function?.name))
+                  .map((call, index) => ({
+                    id: call.id || `ollama-tool-${index + 1}`,
+                    type: 'function' as const,
+                    function: {
+                      name: String(call.function?.name ?? ''),
+                      arguments:
+                        typeof call.function?.arguments === 'string'
+                          ? call.function.arguments
+                          : JSON.stringify(call.function?.arguments ?? {})
+                    }
+                  }))
+              : undefined
+          }
+        : undefined;
+
+      resolve({ assistant, thinking: assistantThinking, usage });
+    };
+
+    const handleChunk = (data: string) => {
+      const text = data.trim();
+      if (!text || text === '[DONE]') {
+        return;
+      }
+
+      try {
+        const chunk = JSON.parse(text) as OllamaNativeStreamChunk;
+        const message = chunk.message;
+        const nextContent = String(message?.content ?? '');
+        if (nextContent) {
+          const delta = nextContent.startsWith(assistantContent)
+            ? nextContent.slice(assistantContent.length)
+            : nextContent;
+          if (delta) {
+            assistantContent = nextContent.startsWith(assistantContent)
+              ? nextContent
+              : `${assistantContent}${delta}`;
+            onToken?.(delta);
+          }
+        }
+
+        const nextThinking = String(message?.thinking ?? '');
+        if (nextThinking) {
+          assistantThinking = nextThinking.startsWith(assistantThinking)
+            ? nextThinking
+            : `${assistantThinking}${nextThinking}`;
+        }
+
+        if (Array.isArray(message?.tool_calls) && message.tool_calls.length > 0) {
+          toolCalls = message.tool_calls;
+        }
+
+        usage = {
+          promptTokens: toFiniteNumber(chunk.prompt_eval_count),
+          completionTokens: toFiniteNumber(chunk.eval_count),
+          totalTokens: toFiniteNumber(chunk.prompt_eval_count) + toFiniteNumber(chunk.eval_count)
+        };
+
+        if (chunk.done) {
+          finish();
+        }
+      } catch {
+        // Ignore partial/non-json chunks.
+      }
+    };
+
+    response.data.on('data', (buffer: Buffer) => {
+      pending += buffer.toString('utf8');
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop() ?? '';
+
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) {
+          continue;
+        }
+
+        if (line.startsWith('data:')) {
+          handleChunk(line.replace(/^data:\s*/, ''));
+          continue;
+        }
+
+        if (line.startsWith('{') || line.startsWith('[')) {
+          handleChunk(line);
+        }
+      }
+    });
+
+    response.data.on('end', finish);
+    response.data.on('error', (err: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(err);
+    });
+  });
 }
 
 export async function streamChat(
@@ -688,7 +959,8 @@ export async function chatWithTools(
   executeTool: (name: string, args: unknown) => Promise<unknown>,
   onEvent?: (message: string) => void,
   maxToolTurns = 40,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  onToken?: (token: string) => void
 ): Promise<ChatWithToolsResult> {
   const messages = [...initialMessages];
   const maxTurns = Math.max(1, Math.min(200, Math.floor(maxToolTurns || 40)));
@@ -739,23 +1011,53 @@ export async function chatWithTools(
     onEvent?.(`provider:ollama | using native /api/chat with options.num_ctx=${toPositiveInteger(config.contextWindowTokens)}`);
   }
 
-  async function requestAssistantWithoutTools(prompt: string): Promise<string | null> {
+  async function requestAssistantWithoutTools(
+    prompt: string,
+    options?: { disableThinking?: boolean; normalizeOutput?: boolean }
+  ): Promise<string | null> {
     const summaryMessages: ChatMessage[] = [
       ...messages,
       {
-        role: 'system',
+        role: 'user',
         content: prompt
       }
     ];
 
     if (useOllamaNativeChat && ollamaNativeEndpoint) {
-      const payload = buildOllamaNativePayload(config, summaryMessages, []);
-      const response = await axios.post<OllamaNativeChatResponse>(ollamaNativeEndpoint, payload, {
-        headers: buildHeaders(config),
-        timeout: requestTimeoutMs,
-        signal
-      });
-      return String(ollamaResponseToAssistant(response.data)?.content ?? '').trim() || null;
+      const payload = buildOllamaNativePayload(
+        { ...config, ollamaThink: options?.disableThinking ? false : config.ollamaThink },
+        normalizeForStrictSystemTemplates(summaryMessages),
+        []
+      );
+      const shouldStream = Boolean(config.ollamaStreaming ?? true) && !options?.disableThinking;
+      const response = shouldStream
+        ? await streamOllamaNativeChat(
+            ollamaNativeEndpoint,
+            payload,
+            buildHeaders(config),
+            requestTimeoutMs,
+            signal,
+            onToken
+          )
+        : await axios.post<OllamaNativeChatResponse>(ollamaNativeEndpoint, payload, {
+            headers: buildHeaders(config),
+            timeout: requestTimeoutMs,
+            signal
+          }).then(result => ({
+            assistant: ollamaResponseToAssistant(result.data),
+            thinking: String(result.data.message?.thinking ?? '').trim(),
+            usage: parseOllamaUsage(result.data)
+          }));
+      const usage = response.usage;
+      usageTotals.promptTokens += usage.promptTokens;
+      usageTotals.completionTokens += usage.completionTokens;
+      usageTotals.totalTokens += usage.totalTokens;
+      usageTotals.requests += 1;
+      const text = String(response.assistant?.content ?? '').trim();
+      if (!text) {
+        return null;
+      }
+      return options?.normalizeOutput ? normalizeThinkingSummaryOutput(text) : text;
     }
 
     const payload: Record<string, unknown> = {
@@ -767,7 +1069,44 @@ export async function chatWithTools(
       timeout: requestTimeoutMs,
       signal
     });
-    return String(response.data.choices?.[0]?.message?.content ?? '').trim() || null;
+    const usage = parseUsage(response.data.usage);
+    usageTotals.promptTokens += usage.promptTokens;
+    usageTotals.completionTokens += usage.completionTokens;
+    usageTotals.totalTokens += usage.totalTokens;
+    usageTotals.requests += 1;
+    const text = String(response.data.choices?.[0]?.message?.content ?? '').trim();
+    if (!text) {
+      return null;
+    }
+    return options?.normalizeOutput ? normalizeThinkingSummaryOutput(text) : text;
+  }
+
+  async function requestFinalSummary(reason: string): Promise<string | null> {
+    const summaryPrompt =
+      'The prior response ended without a usable final answer. ' +
+      'Using the same conversation context and completed work, provide the final results summary now. ' +
+      'Do not call tools or include internal reasoning. Respond as concise, readable Markdown for the user. ' +
+      'Do not return JSON, a tool-call object, or a schema wrapper.';
+
+    onEvent?.(`final-summary:requesting:${reason}`);
+    try {
+      const summary = await requestAssistantWithoutTools(summaryPrompt, {
+        disableThinking: true,
+        normalizeOutput: true
+      });
+      if (!summary) {
+        onEvent?.(`final-summary:empty:${reason}`);
+        return null;
+      }
+
+      messages.push({ role: 'user', content: summaryPrompt });
+      messages.push({ role: 'assistant', content: summary });
+      onEvent?.(`final-summary:received:${reason}`);
+      return summary;
+    } catch (error) {
+      onEvent?.(`final-summary:failed:${reason}:${error instanceof Error ? error.message : String(error)}`);
+      return null;
+    }
   }
 
   function handleProviderToolParseFailure(error: unknown, context: { operation: string; endpoint: string; model?: string }): boolean {
@@ -781,7 +1120,7 @@ export async function chatWithTools(
     if (providerToolParseFailures === 1) {
       activeTools = saferToolSetAfterParseFailure(activeTools);
       messages.push({
-        role: 'system',
+        role: 'user',
         content: `${toolParseFailureRetryMessage()} ${buildProviderToolParseFailureFeedback(detail, providerToolParseFailures, activeTools.length > 0)}`
       });
       onEvent?.('provider tool-call parser failed; retrying with stricter JSON-only tool-call instructions and a safer tool subset.');
@@ -790,7 +1129,7 @@ export async function chatWithTools(
 
     if (providerToolParseFailures < maxTurns) {
       messages.push({
-        role: 'system',
+        role: 'user',
         content: buildProviderToolParseFailureFeedback(detail, providerToolParseFailures, activeTools.length > 0)
       });
       onEvent?.('provider tool-call parser failed again; returning the failure to the model so it can correct the next action.');
@@ -801,6 +1140,7 @@ export async function chatWithTools(
   }
 
   function intentSummary(name: string, args: Record<string, unknown>): string {
+    const spawnSubAgentPreviewChars = 320;
     switch (name) {
       case 'browser_fetch':
         return `fetch webpage ${String(args.url ?? '')}`;
@@ -845,7 +1185,7 @@ export async function chatWithTools(
       case 'query_user':
         return `ask user: ${String(args.question ?? '').slice(0, 80)}`;
       case 'spawn_sub_agent':
-        return `spawn sub-agent for: ${String(args.prompt ?? '').slice(0, 80)}`;
+        return `spawn sub-agent for: ${String(args.prompt ?? '').slice(0, spawnSubAgentPreviewChars)}`;
       default:
         return 'execute requested operation';
     }
@@ -859,14 +1199,32 @@ export async function chatWithTools(
     let usage: Omit<TokenUsage, 'requests'>;
 
     if (useOllamaNativeChat && ollamaNativeEndpoint) {
-      const payload = buildOllamaNativePayload(config, messages, activeTools);
-      let response;
+      const payload = buildOllamaNativePayload(config, normalizeForStrictSystemTemplates(messages), activeTools);
       try {
-        response = await axios.post<OllamaNativeChatResponse>(ollamaNativeEndpoint, payload, {
-          headers: buildHeaders(config),
-          timeout: requestTimeoutMs,
-          signal
-        });
+        const shouldStream = Boolean(config.ollamaStreaming ?? true);
+        if (shouldStream) {
+          const streamed = await streamOllamaNativeChat(
+            ollamaNativeEndpoint,
+            payload,
+            buildHeaders(config),
+            requestTimeoutMs,
+            signal,
+            onToken
+          );
+          assistant = streamed.assistant;
+          assistantThinking = String(streamed.thinking ?? '').trim();
+          usage = streamed.usage;
+        } else {
+          const response = await axios.post<OllamaNativeChatResponse>(ollamaNativeEndpoint, payload, {
+            headers: buildHeaders(config),
+            timeout: requestTimeoutMs,
+            signal
+          });
+
+          assistant = ollamaResponseToAssistant(response.data);
+          assistantThinking = String(response.data.message?.thinking ?? '').trim();
+          usage = parseOllamaUsage(response.data);
+        }
       } catch (error) {
         if (handleProviderToolParseFailure(error, {
           operation: 'Ollama native chat request',
@@ -881,10 +1239,6 @@ export async function chatWithTools(
           model: config.model
         });
       }
-
-      assistant = ollamaResponseToAssistant(response.data);
-      assistantThinking = summarizeThoughtText(response.data.message?.thinking);
-      usage = parseOllamaUsage(response.data);
     } else {
       const payload: Record<string, unknown> = {
         ...payloadBase(config, messages),
@@ -927,19 +1281,16 @@ export async function chatWithTools(
     usageTotals.totalTokens += usage.totalTokens;
     usageTotals.requests += 1;
     if (!assistant) {
+      const recoveredSummary = await requestFinalSummary('missing-assistant-message');
       return {
-        text: '',
+        text: recoveredSummary ?? '',
         usage: usageTotals,
         debug: buildDebug()
       };
     }
 
-    const assistantThought = summarizeThoughtText(assistant.content);
-    if ((assistant.tool_calls?.length ?? 0) > 0) {
-      const combinedThought = [assistantThinking, assistantThought].filter(Boolean).join(' | ');
-      if (combinedThought) {
-        onEvent?.(`thought:${combinedThought}`);
-      }
+    if (assistantThinking) {
+      onEvent?.(`thinking:${assistantThinking}`);
     }
 
     messages.push(assistant);
@@ -947,6 +1298,15 @@ export async function chatWithTools(
     totalToolCalls += assistantToolCalls;
 
     if (!assistant.tool_calls || assistant.tool_calls.length === 0) {
+      let finalText = String(assistant.content ?? '').trim();
+      if (!finalText) {
+        const summaryReason = assistantThinking ? 'thinking-only-output' : 'empty-output';
+        const recoveredSummary = await requestFinalSummary(summaryReason);
+        if (recoveredSummary) {
+          finalText = recoveredSummary;
+        }
+      }
+
       debugTurns.push({
         turn: i + 1,
         promptTokens: usage.promptTokens,
@@ -957,7 +1317,7 @@ export async function chatWithTools(
         assistantToolCalls: 0
       });
       return {
-        text: assistant.content ?? '',
+        text: finalText,
         usage: usageTotals,
         debug: buildDebug()
       };
@@ -987,7 +1347,7 @@ export async function chatWithTools(
       const summarizedArgs = (parsedArgs && typeof parsedArgs === 'object')
         ? (parsedArgs as Record<string, unknown>)
         : {};
-      onEvent?.(`thought:intent: ${intentSummary(toolName, summarizedArgs)}`);
+      onEvent?.(`intent:${intentSummary(toolName, summarizedArgs)}`);
       onEvent?.(`tool:${toolName}`);
       let result: unknown;
       try {
@@ -1024,8 +1384,13 @@ export async function chatWithTools(
     const summary = await requestAssistantWithoutTools(
       'You have reached the tool-call budget and cannot call any more tools in this response. ' +
       'Do not request or invoke tools. Summarize: (1) what you accomplished so far, (2) what remains, and (3) the best next action for the user.'
+      , {
+        disableThinking: true,
+        normalizeOutput: true
+      }
     );
     if (summary) {
+      onEvent?.('final-summary:received:tool-budget-exhausted');
       return {
         text: `${exhaustedMessage}\n\n${summary}`,
         usage: usageTotals,
@@ -1034,8 +1399,9 @@ export async function chatWithTools(
         debug: buildDebug()
       };
     }
+    onEvent?.('final-summary:empty:tool-budget-exhausted');
   } catch (error) {
-    onEvent?.(`tool-budget-summary-failed:${error instanceof Error ? error.message : String(error)}`);
+    onEvent?.(`final-summary:failed:tool-budget-exhausted:${error instanceof Error ? error.message : String(error)}`);
   }
 
   return {

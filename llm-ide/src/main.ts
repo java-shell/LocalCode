@@ -120,6 +120,7 @@ function formatToolAvailabilityGuidance(toolNames: string[]): string {
         '- You can delegate narrow, well-scoped parallel tasks via spawn_sub_agent.',
         '- Use sub-agents when delegation will clearly improve speed or reduce context switching.',
         '- Avoid over-delegation: do not spawn sub-agents for trivial or tightly-coupled steps you can complete directly.',
+        '- Sub-agent tool turns are clamped to 1-50 per run; omit maxToolTurns to use the default of 8.',
         '- Before spawning, define a focused objective, expected output, and the minimum tool set needed.',
         '- Integrate sub-agent results, verify quality, and keep final responsibility in this main chat turn.'
       ].join('\n')
@@ -737,6 +738,7 @@ ipcMain.handle(
     }
     
     const messages: ChatMessage[] = [];
+    const systemPromptSections: string[] = [];
     let recalledPromptTokens = 0;
 
     try {
@@ -759,12 +761,10 @@ ipcMain.handle(
           );
           const memoryLines = formatMemoryInjection(recalled, injectionLimits);
           recalledPromptTokens = estimateTokensFromText(memoryLines);
-          messages.push({
-            role: 'system',
-            content:
-              'Relevant long-term memory from prior interactions is available below. Use it only when useful and ignore stale items.\n\n' +
-              memoryLines
-          });
+          systemPromptSections.push(
+            'Relevant long-term memory from prior interactions is available below. Use it only when useful and ignore stale items.\n\n' +
+            memoryLines
+          );
           event.sender.send('chat:event', `[memory] injected ${recalled.length} memory item(s).`);
         }
       }
@@ -786,20 +786,21 @@ ipcMain.handle(
         ? payload.toolNames
         : availableToolNames.filter(name => name !== 'delete_path' && name !== 'git_commit');
 
-      if (priorMessages.length > 0) {
-        messages.push(...priorMessages);
-      }
-
       const toolGuidance = formatToolAvailabilityGuidance(requestedToolNames);
       if (toolGuidance) {
-        messages.push({ role: 'system', content: toolGuidance });
+        systemPromptSections.push(toolGuidance);
       }
 
       if (referenceWorkspaces.length > 0) {
-        messages.push({
-          role: 'system',
-          content: formatReferenceWorkspaceGuidance(referenceWorkspaces)
-        });
+        systemPromptSections.push(formatReferenceWorkspaceGuidance(referenceWorkspaces));
+      }
+
+      if (systemPromptSections.length > 0) {
+        messages.push({ role: 'system', content: systemPromptSections.join('\n\n') });
+      }
+
+      if (priorMessages.length > 0) {
+        messages.push(...priorMessages);
       }
 
       messages.push({ role: 'user', content: payload.prompt });
@@ -835,15 +836,17 @@ ipcMain.handle(
       let retryErrorDetail = '';
       let result: Awaited<ReturnType<typeof chatWithTools>> | null = null;
       let initialMessagesForDebug: ChatMessage[] = [...messages];
+      let streamedTokenCount = 0;
 
       while (attempt <= chatMaxRetries) {
         const attemptMessages: ChatMessage[] = [...messages];
+        streamedTokenCount = 0;
         if (retryErrorDetail) {
           attemptMessages.push({
-            role: 'system',
+            role: 'user',
             content:
-              `Previous attempt failed in this chat turn with: ${truncateText(retryErrorDetail, 1200)}\n` +
-              'Retry this chat turn by fixing the issue directly. Keep output concise and continue from the same user request.'
+              `Internal retry note: previous attempt failed with: ${truncateText(retryErrorDetail, 1200)}\n` +
+              'Continue the same user request. Fix the issue directly, keep output concise, and do not change scope.'
           });
           event.sender.send(
             'chat:event',
@@ -867,7 +870,11 @@ ipcMain.handle(
               event.sender.send('chat:event', message);
             },
             payload.maxToolTurns ?? 40,
-            abortController.signal
+            abortController.signal,
+            token => {
+              streamedTokenCount += 1;
+              event.sender.send('chat:token', token);
+            }
           );
           break;
         } catch (error) {
@@ -933,9 +940,11 @@ ipcMain.handle(
         }
       }
 
-      const chunkSize = 16;
-      for (let i = 0; i < text.length; i += chunkSize) {
-        event.sender.send('chat:token', text.slice(i, i + chunkSize));
+      if (streamedTokenCount === 0) {
+        const chunkSize = 16;
+        for (let i = 0; i < text.length; i += chunkSize) {
+          event.sender.send('chat:token', text.slice(i, i + chunkSize));
+        }
       }
 
       return {

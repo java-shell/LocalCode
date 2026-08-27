@@ -35,6 +35,8 @@ function normalizeConfig(config: Partial<ChatSessionConfig> | undefined): ChatSe
     provider: String(config?.provider ?? '').trim().toLowerCase() === 'ollama' ? 'ollama' : 'openai-compatible',
     endpoint: String(config?.endpoint ?? '').trim(),
     model: String(config?.model ?? '').trim(),
+    ollamaThink: config?.ollamaThink == null ? undefined : Boolean(config.ollamaThink),
+    ollamaStreaming: config?.ollamaStreaming == null ? undefined : Boolean(config.ollamaStreaming),
     contextWindowTokens: Math.max(0, Number(config?.contextWindowTokens ?? 0)) || undefined,
     memoryNamespace: String(config?.memoryNamespace ?? '').trim() || undefined
   };

@@ -34,6 +34,8 @@ export interface LLMConfig {
   model: string;
   provider?: 'openai-compatible' | 'ollama';
   apiKey?: string;
+  ollamaThink?: boolean;
+  ollamaStreaming?: boolean;
   temperature: number;
   maxTokens?: number;
   contextWindowTokens?: number;
@@ -94,6 +96,8 @@ export interface ChatSessionConfig {
   provider: 'openai-compatible' | 'ollama';
   endpoint: string;
   model: string;
+  ollamaThink?: boolean;
+  ollamaStreaming?: boolean;
   contextWindowTokens?: number;
   memoryNamespace?: string;
 }

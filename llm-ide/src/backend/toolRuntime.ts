@@ -679,7 +679,7 @@ export const toolDefinitions: ToolDefinition[] = [
           },
           maxToolTurns: {
             type: 'number',
-            description: 'Optional cap for sub-agent tool turns. Default 8, max 20.'
+            description: 'Optional cap for sub-agent tool turns. Default 8, max 50.'
           },
           tasks: {
             type: 'array',
@@ -704,7 +704,7 @@ export const toolDefinitions: ToolDefinition[] = [
                 },
                 maxToolTurns: {
                   type: 'number',
-                  description: 'Optional cap for this task. Default 8, max 20.'
+                  description: 'Optional cap for this task. Default 8, max 50.'
                 }
               },
               required: ['prompt', 'toolNames']
@@ -863,6 +863,8 @@ function toolTargetInputs(name: string, args: Record<string, unknown>): string[]
 }
 
 function toolIntentSummary(name: string, args: Record<string, unknown>): string {
+  const spawnSubAgentPreviewChars = 320;
+
   switch (name) {
     case 'create_file':
       return `create file ${String(args.path ?? '')}`;
@@ -885,12 +887,18 @@ function toolIntentSummary(name: string, args: Record<string, unknown>): string 
           ? tasks[0] as Record<string, unknown>
           : {};
         const firstPrompt = String(firstTask.prompt ?? '').trim();
-        const preview = firstPrompt.length > 120 ? `${firstPrompt.slice(0, 117)}...` : firstPrompt;
+        const preview =
+          firstPrompt.length > spawnSubAgentPreviewChars
+            ? `${firstPrompt.slice(0, Math.max(0, spawnSubAgentPreviewChars - 3))}...`
+            : firstPrompt;
         return `spawn ${tasks.length} sub-agent task(s) in parallel; first prompt preview: ${preview}`;
       }
 
       const prompt = String(args.prompt ?? '').trim();
-      const preview = prompt.length > 120 ? `${prompt.slice(0, 117)}...` : prompt;
+      const preview =
+        prompt.length > spawnSubAgentPreviewChars
+          ? `${prompt.slice(0, Math.max(0, spawnSubAgentPreviewChars - 3))}...`
+          : prompt;
       return `spawn sub-agent prompt preview: ${preview}`;
     }
     default:
@@ -2053,7 +2061,7 @@ async function spawnSubAgent(
   const childToolNames = requestedChildToolNames.filter(name => name !== 'spawn_sub_agent');
   const childToolDefs = getAllowedToolDefinitions(childToolNames, context);
   const childAllowed = new Set(childToolNames);
-  const maxToolTurns = Math.max(1, Math.min(20, Math.floor(Number(args.maxToolTurns ?? 8) || 8)));
+  const maxToolTurns = Math.max(1, Math.min(50, Math.floor(Number(args.maxToolTurns ?? 8) || 8)));
 
   const messages: ChatMessage[] = [
     {
