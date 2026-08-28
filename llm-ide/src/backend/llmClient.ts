@@ -3,7 +3,10 @@ import { ChatMessage, LLMConfig, TokenUsage, ToolDefinition } from '../shared/ty
 
 interface CompletionResponse {
   choices?: Array<{
-    message?: ChatMessage;
+    message?: ChatMessage & {
+      reasoning?: string;
+      reasoning_content?: string;
+    };
   }>;
   usage?: {
     prompt_tokens?: number;
@@ -18,8 +21,20 @@ interface StreamChunk {
   choices?: Array<{
     delta?: {
       content?: string;
+      reasoning?: string;
+      reasoning_content?: string;
+      tool_calls?: Array<{
+        index?: number;
+        id?: string;
+        function?: {
+          name?: string;
+          arguments?: string;
+        };
+      }>;
     };
+    finish_reason?: string | null;
   }>;
+  usage?: CompletionResponse['usage'];
 }
 
 interface OllamaNativeToolCall {
@@ -188,6 +203,21 @@ function formatAxiosFailure(error: unknown, context: { operation: string; endpoi
   ].filter(Boolean);
 
   return new Error(messageParts.join(' | '));
+}
+
+function isStreamTransportFailure(error: unknown): boolean {
+  if (!axios.isAxiosError(error)) {
+    return false;
+  }
+
+  const code = String(error.code ?? '').toUpperCase();
+  const message = String(error.message ?? '').toLowerCase();
+  return (
+    code === 'ECONNRESET'
+    || code === 'ECONNABORTED'
+    || message.includes('socket hang up')
+    || message.includes('stream') && message.includes('aborted')
+  );
 }
 
 function safeJsonStringify(value: unknown): string {
@@ -479,7 +509,13 @@ function isLikelyOllamaEndpoint(endpoint: string): boolean {
 }
 
 function shouldUseOllamaNativeChat(config: LLMConfig): boolean {
-  return config.provider === 'ollama' || isLikelyOllamaEndpoint(config.endpoint);
+  if (config.provider === 'ollama') {
+    return true;
+  }
+  if (config.provider === 'openai-compatible') {
+    return false;
+  }
+  return isLikelyOllamaEndpoint(config.endpoint);
 }
 
 function deriveOllamaNativeChatEndpoint(chatEndpoint: string): string {
@@ -820,6 +856,168 @@ async function streamOllamaNativeChat(
           continue;
         }
 
+        if (line.startsWith('{') || line.startsWith('[')) {
+          handleChunk(line);
+        }
+      }
+    });
+
+    response.data.on('end', finish);
+    response.data.on('error', (err: Error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(err);
+    });
+  });
+}
+
+function extractOpenAIReasoning(message: unknown): string {
+  if (!message || typeof message !== 'object') {
+    return '';
+  }
+
+  const record = message as Record<string, unknown>;
+  const direct = typeof record.reasoning_content === 'string'
+    ? record.reasoning_content
+    : typeof record.reasoning === 'string'
+      ? record.reasoning
+      : '';
+  return String(direct ?? '').trim();
+}
+
+async function streamOpenAICompatibleChat(
+  endpoint: string,
+  payload: Record<string, unknown>,
+  headers: Record<string, string>,
+  timeout: number,
+  signal: AbortSignal | undefined,
+  onToken?: (token: string) => void
+): Promise<{ assistant?: ChatMessage; thinking?: string; usage: Omit<TokenUsage, 'requests'> }> {
+  let response;
+  try {
+    response = await axios.post(endpoint, { ...payload, stream: true }, {
+      headers: { ...headers, Accept: 'text/event-stream' },
+      responseType: 'stream',
+      timeout,
+      signal
+    });
+  } catch (error) {
+    throw error;
+  }
+
+  const responseData = response.data as { on?: unknown };
+  if (typeof responseData.on !== 'function') {
+    const data = response.data as CompletionResponse;
+    const assistant = data.choices?.[0]?.message;
+    return {
+      assistant,
+      thinking: extractOpenAIReasoning(assistant),
+      usage: parseUsage(data.usage)
+    };
+  }
+
+  return await new Promise((resolve, reject) => {
+    let pending = '';
+    let assistantContent = '';
+    let assistantThinking = '';
+    const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
+    let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+    let settled = false;
+
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+
+      const normalizedToolCalls = Array.from(toolCalls.entries())
+        .sort((a, b) => a[0] - b[0])
+        .map(([index, call]) => ({
+          id: call.id || `openai-tool-${index + 1}`,
+          type: 'function' as const,
+          function: {
+            name: call.name,
+            arguments: call.arguments || '{}'
+          }
+        }))
+        .filter(call => Boolean(call.function.name));
+
+      const assistant: ChatMessage | undefined = assistantContent || normalizedToolCalls.length > 0 || assistantThinking
+        ? {
+            role: 'assistant',
+            content: assistantContent.trim(),
+            tool_calls: normalizedToolCalls.length > 0 ? normalizedToolCalls : undefined
+          }
+        : undefined;
+
+      resolve({ assistant, thinking: assistantThinking, usage });
+    };
+
+    const handleChunk = (data: string) => {
+      const text = data.trim();
+      if (!text || text === '[DONE]') {
+        if (text === '[DONE]') {
+          finish();
+        }
+        return;
+      }
+
+      try {
+        const chunk = JSON.parse(text) as StreamChunk;
+        const choice = chunk.choices?.[0];
+        const delta = choice?.delta;
+        const nextContent = String(delta?.content ?? '');
+        if (nextContent) {
+          assistantContent += nextContent;
+          onToken?.(nextContent);
+        }
+
+        const nextThinking = String(delta?.reasoning_content ?? delta?.reasoning ?? '');
+        if (nextThinking) {
+          assistantThinking += nextThinking;
+        }
+
+        for (const toolDelta of delta?.tool_calls ?? []) {
+          const index = Math.max(0, Number(toolDelta.index ?? 0) || 0);
+          const existing = toolCalls.get(index) ?? { id: '', name: '', arguments: '' };
+          if (toolDelta.id) {
+            existing.id = String(toolDelta.id);
+          }
+          if (toolDelta.function?.name) {
+            existing.name += String(toolDelta.function.name);
+          }
+          if (toolDelta.function?.arguments) {
+            existing.arguments += String(toolDelta.function.arguments);
+          }
+          toolCalls.set(index, existing);
+        }
+
+        usage = parseUsage(chunk.usage);
+
+        if (choice?.finish_reason) {
+          finish();
+        }
+      } catch {
+        // Ignore partial/non-json chunks.
+      }
+    };
+
+    response.data.on('data', (buffer: Buffer) => {
+      pending += buffer.toString('utf8');
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop() ?? '';
+
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line) {
+          continue;
+        }
+        if (line.startsWith('data:')) {
+          handleChunk(line.replace(/^data:\s*/, ''));
+          continue;
+        }
         if (line.startsWith('{') || line.startsWith('[')) {
           handleChunk(line);
         }
@@ -1250,13 +1448,50 @@ export async function chatWithTools(
         payload.parallel_tool_calls = false;
       }
 
-      let response;
       try {
-        response = await axios.post<CompletionResponse>(config.endpoint, payload, {
-          headers: buildHeaders(config),
-          timeout: requestTimeoutMs,
-          signal
-        });
+        if (onToken) {
+          let streamedTokenCount = 0;
+          try {
+            const streamed = await streamOpenAICompatibleChat(
+              config.endpoint,
+              payload,
+              buildHeaders(config),
+              requestTimeoutMs,
+              signal,
+              token => {
+                streamedTokenCount += 1;
+                onToken(token);
+              }
+            );
+            assistant = streamed.assistant;
+            assistantThinking = String(streamed.thinking ?? '').trim();
+            usage = streamed.usage;
+          } catch (streamError) {
+            if (streamedTokenCount > 0 || !isStreamTransportFailure(streamError)) {
+              throw streamError;
+            }
+
+            onEvent?.('provider:openai-compatible | streaming transport failed; retrying without stream for this turn.');
+            const response = await axios.post<CompletionResponse>(config.endpoint, payload, {
+              headers: buildHeaders(config),
+              timeout: requestTimeoutMs,
+              signal
+            });
+            assistant = response.data.choices?.[0]?.message;
+            assistantThinking = extractOpenAIReasoning(assistant);
+            usage = parseUsage(response.data.usage);
+          }
+        } else {
+          const response = await axios.post<CompletionResponse>(config.endpoint, payload, {
+            headers: buildHeaders(config),
+            timeout: requestTimeoutMs,
+            signal
+          });
+
+          assistant = response.data.choices?.[0]?.message;
+          assistantThinking = extractOpenAIReasoning(assistant);
+          usage = parseUsage(response.data.usage);
+        }
       } catch (error) {
         if (handleProviderToolParseFailure(error, {
           operation: 'Chat completion request',
@@ -1271,9 +1506,6 @@ export async function chatWithTools(
           model: config.model
         });
       }
-
-      assistant = response.data.choices?.[0]?.message;
-      usage = parseUsage(response.data.usage);
     }
 
     usageTotals.promptTokens += usage.promptTokens;
