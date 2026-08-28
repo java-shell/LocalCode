@@ -204,7 +204,159 @@ test('openai-compatible stream socket hang up falls back to non-stream response'
     assert.equal(requests.length, 2);
     assert.equal(requests[0]?.payload.stream, true);
     assert.equal(requests[1]?.payload.stream, false);
-    assert.ok(events.some(event => event.startsWith('provider:openai-compatible | streaming transport failed')));
+    assert.ok(events.some(event => event.startsWith('provider:openai-compatible | streaming request failed before any tokens')));
+  } finally {
+    axiosRef.post = originalPost;
+  }
+});
+
+test('openai-compatible stream HTTP 400 falls back to non-stream response', async () => {
+  const config: LLMConfig = {
+    provider: 'openai-compatible',
+    endpoint: 'http://192.168.0.224:8085/v1/chat/completions',
+    model: '/home/dan/extra/huggingface_models/qwen3.8/Qwen3.8-27B-UD-Q4_K_M.gguf',
+    temperature: 0.2
+  };
+  const requests: Array<{ url: string; payload: Record<string, unknown> }> = [];
+  const events: string[] = [];
+
+  const axiosRef = axios as unknown as {
+    post: (url: string, payload: Record<string, unknown>) => Promise<{
+      data: {
+        choices: Array<{ message: { role: 'assistant'; content: string } }>;
+        usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+      };
+    }>;
+  };
+
+  const originalPost = axiosRef.post;
+  axiosRef.post = async (url, payload) => {
+    requests.push({ url, payload });
+    if (payload.stream === true) {
+      const error = new Error('Request failed with status code 400') as Error & {
+        code?: string;
+        isAxiosError?: boolean;
+        response?: { status: number; statusText: string; data: unknown };
+      };
+      error.isAxiosError = true;
+      error.response = {
+        status: 400,
+        statusText: 'Bad Request',
+        data: {
+          error: {
+            message: 'streaming not supported for this endpoint'
+          }
+        }
+      };
+      throw error;
+    }
+
+    return {
+      data: {
+        choices: [{ message: { role: 'assistant', content: 'Recovered after HTTP 400 stream rejection.' } }],
+        usage: { prompt_tokens: 12, completion_tokens: 5, total_tokens: 17 }
+      }
+    };
+  };
+
+  try {
+    const result = await chatWithTools(
+      config,
+      [{ role: 'user', content: 'Return the summary.' }],
+      [],
+      async () => ({ ok: true }),
+      event => events.push(event),
+      40,
+      undefined,
+      () => {
+        // No streamed tokens arrive before the HTTP error.
+      }
+    );
+
+    assert.equal(result.text, 'Recovered after HTTP 400 stream rejection.');
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0]?.payload.stream, true);
+    assert.equal(requests[1]?.payload.stream, false);
+    assert.ok(events.some(event => event.startsWith('provider:openai-compatible | streaming request failed before any tokens')));
+  } finally {
+    axiosRef.post = originalPost;
+  }
+});
+
+test('openai-compatible retries with compacted history only after context overflow error', async () => {
+  const config: LLMConfig = {
+    provider: 'openai-compatible',
+    endpoint: 'http://localhost:1234/v1/chat/completions',
+    model: 'gpt-test',
+    temperature: 0.2,
+    contextWindowTokens: 1200
+  };
+
+  const longText = 'This is a long repeated transcript chunk to make the history large enough to exceed the configured context window. '.repeat(80);
+  const history = Array.from({ length: 14 }, (_, index) => ({
+    role: index % 2 === 0 ? 'user' as const : 'assistant' as const,
+    content: `${index + 1}. ${longText}`
+  }));
+
+  const requests: Array<{ url: string; payload: Record<string, unknown> }> = [];
+  const axiosRef = axios as unknown as {
+    post: (url: string, payload: Record<string, unknown>) => Promise<{
+      data: {
+        choices: Array<{ message: { role: 'assistant'; content: string } }>;
+        usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+      };
+    }>;
+  };
+
+  const originalPost = axiosRef.post;
+  const firstError = new Error('Request failed with status code 400') as Error & {
+    isAxiosError?: boolean;
+    response?: { status: number; statusText: string; data: unknown };
+  };
+  firstError.isAxiosError = true;
+  firstError.response = {
+    status: 400,
+    statusText: 'Bad Request',
+    data: {
+      error: {
+        message: 'request (131176 tokens) exceeds the available context size (131072 tokens), try increasing it',
+        type: 'exceed_context_size_error'
+      }
+    }
+  };
+
+  axiosRef.post = async (url, payload) => {
+    requests.push({ url, payload });
+    if (requests.length === 1) {
+      throw firstError;
+    }
+    return {
+      data: {
+        choices: [{ message: { role: 'assistant', content: 'Compact reply.' } }],
+        usage: { prompt_tokens: 120, completion_tokens: 30, total_tokens: 150 }
+      }
+    };
+  };
+
+  try {
+    const result = await chatWithTools(
+      config,
+      history,
+      [],
+      async () => ({ ok: true }),
+      () => undefined
+    );
+
+    assert.equal(result.text, 'Compact reply.');
+    assert.equal(requests.length, 2);
+    const firstAttempt = requests[0]?.payload.messages as Array<{ role?: string; content?: string }> | undefined;
+    const secondAttempt = requests[1]?.payload.messages as Array<{ role?: string; content?: string }> | undefined;
+    const firstSerialized = JSON.stringify(firstAttempt ?? []);
+    const secondSerialized = JSON.stringify(secondAttempt ?? []);
+
+    assert.ok(firstSerialized.includes(longText.slice(0, 80)));
+    assert.ok(!firstSerialized.includes('Earlier context summary:'));
+    assert.ok(secondSerialized.length < firstSerialized.length);
   } finally {
     axiosRef.post = originalPost;
   }

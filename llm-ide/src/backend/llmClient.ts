@@ -175,7 +175,7 @@ function summarizeResponseData(value: unknown): string {
   }
 
   try {
-    return JSON.stringify(value).slice(0, 800);
+    return safeJsonStringify(value).slice(0, 800);
   } catch {
     return String(value).slice(0, 800);
   }
@@ -218,6 +218,19 @@ function isStreamTransportFailure(error: unknown): boolean {
     || message.includes('socket hang up')
     || message.includes('stream') && message.includes('aborted')
   );
+}
+
+function shouldFallbackOpenAIStreamingFailure(error: unknown): boolean {
+  if (isStreamTransportFailure(error)) {
+    return true;
+  }
+
+  if (!axios.isAxiosError(error) || error.code === 'ERR_CANCELED') {
+    return false;
+  }
+
+  const status = Math.trunc(Number(error.response?.status ?? 0));
+  return status >= 400 && status < 600;
 }
 
 function safeJsonStringify(value: unknown): string {
@@ -614,6 +627,112 @@ function normalizeForStrictSystemTemplates(messages: ChatMessage[]): ChatMessage
     },
     ...nonSystem
   ];
+}
+
+function ensureOllamaUserPrompt(messages: ChatMessage[], fallbackPrompt = 'Please continue with the latest information and answer the user request.'): ChatMessage[] {
+  const prepared = [...messages];
+  const hasUserMessage = prepared.some(message => message.role === 'user' && String(message.content ?? '').trim().length > 0);
+  if (!hasUserMessage) {
+    prepared.push({ role: 'user', content: fallbackPrompt });
+    return prepared;
+  }
+
+  if (prepared.length > 0 && prepared[prepared.length - 1].role === 'tool') {
+    prepared.push({ role: 'user', content: fallbackPrompt });
+  }
+
+  return prepared;
+}
+
+function estimateMessageTokens(message: ChatMessage): number {
+  const content = String(message.content ?? '').replace(/\s+/g, ' ').trim();
+  const toolTokens = Array.isArray(message.tool_calls)
+    ? message.tool_calls.reduce((total, call) => {
+        const name = String(call.function?.name ?? '');
+        const args = String(call.function?.arguments ?? '');
+        return total + name.length + args.length;
+      }, 0)
+    : 0;
+
+  const tokenBudget = content.length + toolTokens + (message.tool_call_id ? 32 : 0) + (message.role === 'tool' ? 64 : 24);
+  return Math.max(1, Math.ceil(tokenBudget / 4));
+}
+
+function estimateMessagesTokens(messages: ChatMessage[]): number {
+  return messages.reduce((total, message) => total + estimateMessageTokens(message), 0);
+}
+
+function summarizeConversationForContext(messages: ChatMessage[]): string {
+  return messages
+    .map(message => {
+      const content = String(message.content ?? '').replace(/\s+/g, ' ').trim();
+      if (!content) {
+        return '';
+      }
+      const roleText = message.role.toUpperCase();
+      return `${roleText}: ${content.slice(0, 300)}`;
+    })
+    .filter(Boolean)
+    .join('\n')
+    .slice(0, 2000);
+}
+
+function compactMessagesForContext(messages: ChatMessage[], contextWindowTokens?: number, safetyMarginTokens = 512): ChatMessage[] {
+  const contextLimit = toPositiveInteger(contextWindowTokens);
+  if (!contextLimit) {
+    return messages;
+  }
+
+  const safeLimit = Math.max(256, contextLimit - safetyMarginTokens);
+  if (estimateMessagesTokens(messages) <= safeLimit) {
+    return messages;
+  }
+
+  const recentWindow = Math.min(Math.max(2, messages.length), 6);
+  const recent = messages.slice(-recentWindow);
+  const older = messages.slice(0, -recentWindow);
+  const summary = summarizeConversationForContext(older);
+  const compacted = [
+    ...(summary ? [{ role: 'user' as const, content: `Earlier context summary: ${summary}` }] : []),
+    ...recent
+  ];
+
+  if (estimateMessagesTokens(compacted) <= safeLimit) {
+    return compacted;
+  }
+
+  const aggressiveSummary = summary ? `Compressed earlier context: ${summary.slice(0, 900)}` : 'Earlier context omitted to fit the model context window.';
+  const aggressive = [
+    { role: 'user' as const, content: aggressiveSummary },
+    ...recent.map(message => ({
+      ...message,
+      content: String(message.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 900)
+    }))
+  ];
+
+  if (estimateMessagesTokens(aggressive) <= safeLimit) {
+    return aggressive;
+  }
+
+  return aggressive.slice(-Math.min(aggressive.length, 4));
+}
+
+function isContextOverflowError(error: unknown): boolean {
+  if (!axios.isAxiosError(error)) {
+    return false;
+  }
+
+  const status = Math.trunc(Number(error.response?.status ?? 0));
+  const summary = summarizeResponseData(error.response?.data).toLowerCase();
+  return status === 400 && (
+    summary.includes('context size')
+    || summary.includes('exceed_context_size_error')
+    || summary.includes('too many tokens')
+    || summary.includes('token budget')
+    || summary.includes('prompt is too long')
+    || summary.includes('requested tokens')
+    || summary.includes('context window')
+  );
 }
 
 function toOllamaMessages(messages: ChatMessage[]): Array<Record<string, unknown>> {
@@ -1221,62 +1340,77 @@ export async function chatWithTools(
       }
     ];
 
-    if (useOllamaNativeChat && ollamaNativeEndpoint) {
-      const payload = buildOllamaNativePayload(
-        { ...config, ollamaThink: options?.disableThinking ? false : config.ollamaThink },
-        normalizeForStrictSystemTemplates(summaryMessages),
-        []
-      );
-      const shouldStream = Boolean(config.ollamaStreaming ?? true) && !options?.disableThinking;
-      const response = shouldStream
-        ? await streamOllamaNativeChat(
-            ollamaNativeEndpoint,
-            payload,
-            buildHeaders(config),
-            requestTimeoutMs,
-            signal,
-            onToken
-          )
-        : await axios.post<OllamaNativeChatResponse>(ollamaNativeEndpoint, payload, {
-            headers: buildHeaders(config),
-            timeout: requestTimeoutMs,
-            signal
-          }).then(result => ({
-            assistant: ollamaResponseToAssistant(result.data),
-            thinking: String(result.data.message?.thinking ?? '').trim(),
-            usage: parseOllamaUsage(result.data)
-          }));
-      const usage = response.usage;
+    const attemptRequest = async (requestMessages: ChatMessage[]) => {
+      if (useOllamaNativeChat && ollamaNativeEndpoint) {
+        const payload = buildOllamaNativePayload(
+          { ...config, ollamaThink: options?.disableThinking ? false : config.ollamaThink },
+          normalizeForStrictSystemTemplates(ensureOllamaUserPrompt(requestMessages)),
+          []
+        );
+        const shouldStream = Boolean(config.ollamaStreaming ?? true) && !options?.disableThinking;
+        const response = shouldStream
+          ? await streamOllamaNativeChat(
+              ollamaNativeEndpoint,
+              payload,
+              buildHeaders(config),
+              requestTimeoutMs,
+              signal,
+              onToken
+            )
+          : await axios.post<OllamaNativeChatResponse>(ollamaNativeEndpoint, payload, {
+              headers: buildHeaders(config),
+              timeout: requestTimeoutMs,
+              signal
+            }).then(result => ({
+              assistant: ollamaResponseToAssistant(result.data),
+              thinking: String(result.data.message?.thinking ?? '').trim(),
+              usage: parseOllamaUsage(result.data)
+            }));
+        const usage = response.usage;
+        usageTotals.promptTokens += usage.promptTokens;
+        usageTotals.completionTokens += usage.completionTokens;
+        usageTotals.totalTokens += usage.totalTokens;
+        usageTotals.requests += 1;
+        const text = String(response.assistant?.content ?? '').trim();
+        if (!text) {
+          return null;
+        }
+        return options?.normalizeOutput ? normalizeThinkingSummaryOutput(text) : text;
+      }
+
+      const payload: Record<string, unknown> = {
+        ...payloadBase(config, requestMessages),
+        stream: false
+      };
+      const response = await axios.post<CompletionResponse>(config.endpoint, payload, {
+        headers: buildHeaders(config),
+        timeout: requestTimeoutMs,
+        signal
+      });
+      const usage = parseUsage(response.data.usage);
       usageTotals.promptTokens += usage.promptTokens;
       usageTotals.completionTokens += usage.completionTokens;
       usageTotals.totalTokens += usage.totalTokens;
       usageTotals.requests += 1;
-      const text = String(response.assistant?.content ?? '').trim();
+      const text = String(response.data.choices?.[0]?.message?.content ?? '').trim();
       if (!text) {
         return null;
       }
       return options?.normalizeOutput ? normalizeThinkingSummaryOutput(text) : text;
-    }
-
-    const payload: Record<string, unknown> = {
-      ...payloadBase(config, summaryMessages),
-      stream: false
     };
-    const response = await axios.post<CompletionResponse>(config.endpoint, payload, {
-      headers: buildHeaders(config),
-      timeout: requestTimeoutMs,
-      signal
-    });
-    const usage = parseUsage(response.data.usage);
-    usageTotals.promptTokens += usage.promptTokens;
-    usageTotals.completionTokens += usage.completionTokens;
-    usageTotals.totalTokens += usage.totalTokens;
-    usageTotals.requests += 1;
-    const text = String(response.data.choices?.[0]?.message?.content ?? '').trim();
-    if (!text) {
-      return null;
+
+    try {
+      return await attemptRequest(summaryMessages);
+    } catch (error) {
+      if (isContextOverflowError(error)) {
+        const compacted = compactMessagesForContext(summaryMessages, config.contextWindowTokens, 1024);
+        if (JSON.stringify(compacted) !== JSON.stringify(summaryMessages)) {
+          onEvent?.('context:compacted-after-exceeding-window');
+          return await attemptRequest(compacted);
+        }
+      }
+      throw error;
     }
-    return options?.normalizeOutput ? normalizeThinkingSummaryOutput(text) : text;
   }
 
   async function requestFinalSummary(reason: string): Promise<string | null> {
@@ -1396,8 +1530,10 @@ export async function chatWithTools(
     let assistantThinking = '';
     let usage: Omit<TokenUsage, 'requests'>;
 
+    const requestMessages = messages;
+
     if (useOllamaNativeChat && ollamaNativeEndpoint) {
-      const payload = buildOllamaNativePayload(config, normalizeForStrictSystemTemplates(messages), activeTools);
+      const payload = buildOllamaNativePayload(config, normalizeForStrictSystemTemplates(ensureOllamaUserPrompt(requestMessages)), activeTools);
       try {
         const shouldStream = Boolean(config.ollamaStreaming ?? true);
         if (shouldStream) {
@@ -1424,22 +1560,59 @@ export async function chatWithTools(
           usage = parseOllamaUsage(response.data);
         }
       } catch (error) {
-        if (handleProviderToolParseFailure(error, {
-          operation: 'Ollama native chat request',
-          endpoint: ollamaNativeEndpoint,
-          model: config.model
-        })) {
-          continue;
+        if (isContextOverflowError(error)) {
+          const compacted = compactMessagesForContext(messages, config.contextWindowTokens, 1024);
+          if (JSON.stringify(compacted) !== JSON.stringify(requestMessages)) {
+            onEvent?.('context:compacted-before-retry');
+            const retryPayload = buildOllamaNativePayload(config, normalizeForStrictSystemTemplates(ensureOllamaUserPrompt(compacted)), activeTools);
+            const retryStream = Boolean(config.ollamaStreaming ?? true);
+            if (retryStream) {
+              const streamed = await streamOllamaNativeChat(
+                ollamaNativeEndpoint,
+                retryPayload,
+                buildHeaders(config),
+                requestTimeoutMs,
+                signal,
+                onToken
+              );
+              assistant = streamed.assistant;
+              assistantThinking = String(streamed.thinking ?? '').trim();
+              usage = streamed.usage;
+            } else {
+              const response = await axios.post<OllamaNativeChatResponse>(ollamaNativeEndpoint, retryPayload, {
+                headers: buildHeaders(config),
+                timeout: requestTimeoutMs,
+                signal
+              });
+              assistant = ollamaResponseToAssistant(response.data);
+              assistantThinking = String(response.data.message?.thinking ?? '').trim();
+              usage = parseOllamaUsage(response.data);
+            }
+          } else {
+            throw formatAxiosFailure(error, {
+              operation: 'Ollama native chat request',
+              endpoint: ollamaNativeEndpoint,
+              model: config.model
+            });
+          }
+        } else {
+          if (handleProviderToolParseFailure(error, {
+            operation: 'Ollama native chat request',
+            endpoint: ollamaNativeEndpoint,
+            model: config.model
+          })) {
+            continue;
+          }
+          throw formatAxiosFailure(error, {
+            operation: 'Ollama native chat request',
+            endpoint: ollamaNativeEndpoint,
+            model: config.model
+          });
         }
-        throw formatAxiosFailure(error, {
-          operation: 'Ollama native chat request',
-          endpoint: ollamaNativeEndpoint,
-          model: config.model
-        });
       }
     } else {
       const payload: Record<string, unknown> = {
-        ...payloadBase(config, messages),
+        ...payloadBase(config, requestMessages),
         stream: false
       };
       if (activeTools.length > 0) {
@@ -1467,19 +1640,44 @@ export async function chatWithTools(
             assistantThinking = String(streamed.thinking ?? '').trim();
             usage = streamed.usage;
           } catch (streamError) {
-            if (streamedTokenCount > 0 || !isStreamTransportFailure(streamError)) {
-              throw streamError;
-            }
+            if (isContextOverflowError(streamError)) {
+              const compacted = compactMessagesForContext(messages, config.contextWindowTokens, 1024);
+              if (JSON.stringify(compacted) !== JSON.stringify(requestMessages)) {
+                onEvent?.('context:compacted-before-retry');
+                const retryPayload: Record<string, unknown> = {
+                  ...payloadBase(config, compacted),
+                  stream: false
+                };
+                if (activeTools.length > 0) {
+                  retryPayload.tools = activeTools;
+                  retryPayload.tool_choice = 'auto';
+                  retryPayload.parallel_tool_calls = false;
+                }
 
-            onEvent?.('provider:openai-compatible | streaming transport failed; retrying without stream for this turn.');
-            const response = await axios.post<CompletionResponse>(config.endpoint, payload, {
-              headers: buildHeaders(config),
-              timeout: requestTimeoutMs,
-              signal
-            });
-            assistant = response.data.choices?.[0]?.message;
-            assistantThinking = extractOpenAIReasoning(assistant);
-            usage = parseUsage(response.data.usage);
+                const response = await axios.post<CompletionResponse>(config.endpoint, retryPayload, {
+                  headers: buildHeaders(config),
+                  timeout: requestTimeoutMs,
+                  signal
+                });
+                assistant = response.data.choices?.[0]?.message;
+                assistantThinking = extractOpenAIReasoning(assistant);
+                usage = parseUsage(response.data.usage);
+              } else {
+                throw streamError;
+              }
+            } else if (streamedTokenCount > 0 || !shouldFallbackOpenAIStreamingFailure(streamError)) {
+              throw streamError;
+            } else {
+              onEvent?.('provider:openai-compatible | streaming request failed before any tokens; retrying without stream for this turn.');
+              const response = await axios.post<CompletionResponse>(config.endpoint, payload, {
+                headers: buildHeaders(config),
+                timeout: requestTimeoutMs,
+                signal
+              });
+              assistant = response.data.choices?.[0]?.message;
+              assistantThinking = extractOpenAIReasoning(assistant);
+              usage = parseUsage(response.data.usage);
+            }
           }
         } else {
           const response = await axios.post<CompletionResponse>(config.endpoint, payload, {
@@ -1493,18 +1691,55 @@ export async function chatWithTools(
           usage = parseUsage(response.data.usage);
         }
       } catch (error) {
-        if (handleProviderToolParseFailure(error, {
-          operation: 'Chat completion request',
-          endpoint: config.endpoint,
-          model: config.model
-        })) {
-          continue;
+        if (isContextOverflowError(error)) {
+          const compacted = compactMessagesForContext(messages, config.contextWindowTokens, 1024);
+          if (JSON.stringify(compacted) !== JSON.stringify(requestMessages)) {
+            onEvent?.('context:compacted-before-retry');
+            const retryPayload: Record<string, unknown> = {
+              ...payloadBase(config, compacted),
+              stream: false
+            };
+            if (activeTools.length > 0) {
+              retryPayload.tools = activeTools;
+              retryPayload.tool_choice = 'auto';
+              retryPayload.parallel_tool_calls = false;
+            }
+            const response = await axios.post<CompletionResponse>(config.endpoint, retryPayload, {
+              headers: buildHeaders(config),
+              timeout: requestTimeoutMs,
+              signal
+            });
+            assistant = response.data.choices?.[0]?.message;
+            assistantThinking = extractOpenAIReasoning(assistant);
+            usage = parseUsage(response.data.usage);
+          } else {
+            if (handleProviderToolParseFailure(error, {
+              operation: 'Chat completion request',
+              endpoint: config.endpoint,
+              model: config.model
+            })) {
+              continue;
+            }
+            throw formatAxiosFailure(error, {
+              operation: 'Chat completion request',
+              endpoint: config.endpoint,
+              model: config.model
+            });
+          }
+        } else {
+          if (handleProviderToolParseFailure(error, {
+            operation: 'Chat completion request',
+            endpoint: config.endpoint,
+            model: config.model
+          })) {
+            continue;
+          }
+          throw formatAxiosFailure(error, {
+            operation: 'Chat completion request',
+            endpoint: config.endpoint,
+            model: config.model
+          });
         }
-        throw formatAxiosFailure(error, {
-          operation: 'Chat completion request',
-          endpoint: config.endpoint,
-          model: config.model
-        });
       }
     }
 
