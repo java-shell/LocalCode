@@ -81,6 +81,40 @@ test('openai-compatible streaming emits assistant tokens and a thought event fro
   });
 });
 
+test('openai-compatible stream reports a user-aborted socket reset as cancellation', async () => {
+  const config: LLMConfig = {
+    provider: 'openai-compatible',
+    endpoint: 'http://localhost:1234/v1/chat/completions',
+    model: 'gpt-test',
+    temperature: 0.2
+  };
+  const stream = new EventEmitter();
+  const controller = new AbortController();
+
+  await withMockedOpenAIStreamPost(stream, async requests => {
+    const resultPromise = chatWithTools(
+      config,
+      [{ role: 'user', content: 'Wait for cancellation.' }],
+      [],
+      async () => ({ ok: true }),
+      undefined,
+      40,
+      controller.signal,
+      () => undefined
+    );
+
+    setImmediate(() => {
+      controller.abort();
+      const error = new Error('aborted') as Error & { code?: string };
+      error.code = 'ECONNRESET';
+      stream.emit('error', error);
+    });
+
+    await assert.rejects(resultPromise, /Chat request canceled/);
+    assert.equal(requests.length, 1);
+  });
+});
+
 test('openai-compatible non-stream fallback still returns assistant text', async () => {
   const config: LLMConfig = {
     provider: 'openai-compatible',
@@ -357,6 +391,66 @@ test('openai-compatible retries with compacted history only after context overfl
     assert.ok(firstSerialized.includes(longText.slice(0, 80)));
     assert.ok(!firstSerialized.includes('Earlier context summary:'));
     assert.ok(secondSerialized.length < firstSerialized.length);
+  } finally {
+    axiosRef.post = originalPost;
+  }
+});
+
+test('openai-compatible compaction retry fits the configured context budget', async () => {
+  const config: LLMConfig = {
+    provider: 'openai-compatible',
+    endpoint: 'http://localhost:1234/v1/chat/completions',
+    model: 'gpt-test',
+    temperature: 0.2,
+    contextWindowTokens: 1200
+  };
+  const longText = 'This transcript entry is intentionally oversized for a small retry context budget. '.repeat(120);
+  const history = Array.from({ length: 8 }, (_, index) => ({
+    role: index % 2 === 0 ? 'user' as const : 'assistant' as const,
+    content: `${index + 1}. ${longText}`
+  }));
+  const requests: Array<{ payload: Record<string, unknown> }> = [];
+  const axiosRef = axios as unknown as {
+    post: (url: string, payload: Record<string, unknown>) => Promise<{
+      data: {
+        choices: Array<{ message: { role: 'assistant'; content: string } }>;
+        usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+      };
+    }>;
+  };
+  const originalPost = axiosRef.post;
+  const overflowError = new Error('Request failed with status code 400') as Error & {
+    isAxiosError?: boolean;
+    response?: { status: number; statusText: string; data: unknown };
+  };
+  overflowError.isAxiosError = true;
+  overflowError.response = {
+    status: 400,
+    statusText: 'Bad Request',
+    data: { error: { message: 'context window exceeded' } }
+  };
+
+  axiosRef.post = async (_url, payload) => {
+    requests.push({ payload });
+    if (requests.length === 1) {
+      throw overflowError;
+    }
+
+    const retryMessages = payload.messages as Array<{ content?: string }>;
+    const retryCharacterCount = retryMessages.reduce((total, message) => total + String(message.content ?? '').length, 0);
+    assert.ok(retryCharacterCount <= 1024, `Expected compacted retry to fit 256 tokens; got ${retryCharacterCount} characters.`);
+    return {
+      data: {
+        choices: [{ message: { role: 'assistant', content: 'Compact reply.' } }],
+        usage: { prompt_tokens: 120, completion_tokens: 30, total_tokens: 150 }
+      }
+    };
+  };
+
+  try {
+    const result = await chatWithTools(config, history, [], async () => ({ ok: true }));
+    assert.equal(result.text, 'Compact reply.');
+    assert.equal(requests.length, 2);
   } finally {
     axiosRef.post = originalPost;
   }

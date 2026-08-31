@@ -677,6 +677,13 @@ function summarizeConversationForContext(messages: ChatMessage[]): string {
     .slice(0, 2000);
 }
 
+/**
+ * Reduce a conversation to the configured context budget while retaining its newest request.
+ *
+ * The fallback first removes older retained messages, then truncates the final message only
+ * when it alone exceeds the budget. This keeps overflow retries bounded instead of repeating
+ * the same context-window failure.
+ */
 function compactMessagesForContext(messages: ChatMessage[], contextWindowTokens?: number, safetyMarginTokens = 512): ChatMessage[] {
   const contextLimit = toPositiveInteger(contextWindowTokens);
   if (!contextLimit) {
@@ -714,7 +721,26 @@ function compactMessagesForContext(messages: ChatMessage[], contextWindowTokens?
     return aggressive;
   }
 
-  return aggressive.slice(-Math.min(aggressive.length, 4));
+  const bounded = aggressive.slice(-Math.min(aggressive.length, 4));
+  while (estimateMessagesTokens(bounded) > safeLimit && bounded.length > 1) {
+    bounded.shift();
+  }
+
+  if (estimateMessagesTokens(bounded) <= safeLimit) {
+    return bounded;
+  }
+
+  const latestMessage = bounded[0];
+  if (!latestMessage) {
+    return bounded;
+  }
+
+  const messageOverheadTokens = estimateMessageTokens({ ...latestMessage, content: '' });
+  const contentCharacterBudget = Math.max(0, (safeLimit - messageOverheadTokens) * 4);
+  return [{
+    ...latestMessage,
+    content: String(latestMessage.content ?? '').slice(0, contentCharacterBudget)
+  }];
 }
 
 function isContextOverflowError(error: unknown): boolean {
@@ -732,6 +758,9 @@ function isContextOverflowError(error: unknown): boolean {
     || summary.includes('prompt is too long')
     || summary.includes('requested tokens')
     || summary.includes('context window')
+    || summary.includes('context length')
+    || summary.includes('messages resulted in')
+    || summary.includes('reduce the length')
   );
 }
 
@@ -987,7 +1016,7 @@ async function streamOllamaNativeChat(
         return;
       }
       settled = true;
-      reject(err);
+      reject(signal?.aborted ? new Error('Chat request canceled') : err);
     });
   });
 }
@@ -1149,7 +1178,7 @@ async function streamOpenAICompatibleChat(
         return;
       }
       settled = true;
-      reject(err);
+      reject(signal?.aborted ? new Error('Chat request canceled') : err);
     });
   });
 }
