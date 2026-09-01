@@ -1392,6 +1392,11 @@ button.btn-danger:hover:not(:disabled) {
   border-left-color: rgba(255, 255, 255, 0.25);
 }
 
+.log-line-event-context {
+  border-left-color: rgba(167, 139, 250, 0.75);
+  color: #ddd6fe;
+}
+
 .log-line-assistant {
   border-left: 2px solid rgba(42, 195, 255, 0.7);
   padding-left: 8px;

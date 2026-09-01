@@ -2297,6 +2297,26 @@ async function initChat() {
       };
     }
 
+    if (raw.startsWith('context:')) {
+      const detail = raw.slice('context:'.length).trim();
+      const paren = detail.match(/\((.*)\)$/);
+      const parenText = paren ? ' ' + paren[1] : '';
+      let base;
+      if (detail.startsWith('compacted-proactively')) {
+        base = 'Context compacted proactively';
+      } else if (detail.startsWith('compacted-after-exceeding-window')) {
+        base = 'Context exceeded the model window; compacted and retrying';
+      } else if (detail.startsWith('compacted-before-retry')) {
+        base = 'Context compacted before retry';
+      } else {
+        base = detail;
+      }
+      return {
+        kind: 'context',
+        text: base + parenText
+      };
+    }
+
     return {
       kind: 'status',
       text: raw
