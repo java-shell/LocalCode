@@ -137,7 +137,7 @@ test('advanced routing tool exposes direct downstream stages with metadata and d
   });
 });
 
-test('advanced graph blocks upstream links from execution and routing tools', async () => {
+test('advanced graph allows backward edges, bounded by per-stage and global execution caps', async () => {
   const stageA = makeStage('stage-a', 'Stage A', 'model-a', 'Start stage.');
   const stageB = makeStage('stage-b', 'Stage B', 'model-b', 'Middle stage.');
 
@@ -151,8 +151,11 @@ test('advanced graph blocks upstream links from execution and routing tools', as
 
   await withMockedChatWithTools(async (config, _messages, tools) => {
     if (config.model === 'model-b') {
+      // Issue #1: backward edges are now exposed in the routing tool enum.
       const routingTool = tools.find(tool => tool.function.name === 'call_downstream_stage');
-      assert.equal(routingTool, undefined, 'Stage B should not receive upstream routing options.');
+      assert.ok(routingTool, 'Stage B should receive call_downstream_stage tool (backward edge exposed).');
+      const enumValues = ((routingTool?.function.parameters.properties as { stageId?: { enum?: string[] } }).stageId?.enum) ?? [];
+      assert.deepEqual(enumValues, ['stage-a']);
     }
 
     return {
@@ -161,7 +164,18 @@ test('advanced graph blocks upstream links from execution and routing tools', as
     };
   }, async () => {
     const result = await runOrchestration(plan, 'Run graph once');
-    assert.deepEqual(result.steps.map(step => step.id), ['stage-a', 'stage-b']);
-    assert.equal(result.steps.length, 2, 'Execution must not loop back upstream.');
+    // maxStageExecutions=10 with 2 stages -> perStageCap = ceil(10/2) = 5 each.
+    // The a<->b always/always cycle alternates until the global budget is hit.
+    assert.equal(result.steps.length, 10, 'Execution must be bounded by the global maxStageExecutions budget.');
+    const aRuns = result.steps.filter(step => step.id === 'stage-a').length;
+    const bRuns = result.steps.filter(step => step.id === 'stage-b').length;
+    assert.equal(aRuns, 5, 'Stage A must be bounded by the per-stage cap.');
+    assert.equal(bRuns, 5, 'Stage B must be bounded by the per-stage cap.');
+    assert.deepEqual(
+      result.steps.map(step => step.id),
+      ['stage-a', 'stage-b', 'stage-a', 'stage-b', 'stage-a', 'stage-b', 'stage-a', 'stage-b', 'stage-a', 'stage-b'],
+      'Backward edges must allow the graph to loop back.'
+    );
+    assert.equal(result.completed, true, 'All steps succeeded, so a non-loop plan is complete.');
   });
 });

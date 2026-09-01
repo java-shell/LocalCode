@@ -21,6 +21,13 @@ Status legend: `[ ]` open · `[~]` in progress · `[x]` fixed
   from impl-stage *errors*, never from QA failure.
 - **Fix:** Allow backward edges with proper cycle detection (visited-set per run) and a
   per-run execution cap so the intended QA↔recovery loop works.
+- **Test:** `orchestrationEngine.advanced.test.ts` — the stale
+  `advanced graph blocks upstream links...` test (which asserted the old forward-only
+  behavior) was replaced with `advanced graph allows backward edges, bounded by per-stage
+  and global execution caps`. It verifies the backward edge is exposed in the routing-tool
+  enum and that an `always`/`always` cycle runs until the global `maxStageExecutions`
+  budget is hit, with each stage bounded by the per-stage cap
+  (`perStageCap = ceil(maxStageExecutions / stages.length)`).
 
 ---
 
