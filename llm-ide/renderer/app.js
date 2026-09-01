@@ -2286,6 +2286,44 @@ async function initChat() {
     if (raw.startsWith('tool:')) {
       return {
         kind: 'tool',
+
+    // Expose read_file arguments to the user so they can see which file (and any
+    // offset/limit) the model is reading, even when it iterates through a file.
+    if (raw.startsWith('tool-args:')) {
+      const rest = raw.slice('tool-args:'.length).trim();
+      let parsed;
+      try {
+        const colonIndex = rest.indexOf(':');
+        const toolName = colonIndex >= 0 ? rest.slice(0, colonIndex) : rest;
+        const argsJson = colonIndex >= 0 ? rest.slice(colonIndex + 1) : '';
+        parsed = JSON.parse(argsJson);
+      } catch {
+        parsed = null;
+      }
+      if (parsed && typeof parsed === 'object' && parsed.path) {
+        const parts = [`read ${parsed.path}`];
+        if (typeof parsed.offset === 'number') parts.push(`offset=${parsed.offset}`);
+        if (typeof parsed.limit === 'number') parts.push(`limit=${parsed.limit}`);
+        return {
+          kind: 'tool-args',
+          text: parts.join(', ')
+        };
+      }
+      return {
+        kind: 'tool-args',
+        text: rest
+      };
+    }
+
+    // Direct-sequence repeat guard: the model called the same tool with identical
+    // arguments back-to-back. Surface it so the user sees the loop was caught.
+    if (raw.startsWith('tool-repeat:')) {
+      const toolName = raw.slice('tool-repeat:'.length).trim();
+      return {
+        kind: 'tool-repeat',
+        text: `Repeated ${toolName} with identical arguments; suppressed to break a potential loop`
+      };
+    }
         text: raw.slice('tool:'.length).trim()
       };
     }

@@ -1620,6 +1620,24 @@ export async function chatWithTools(
     return false;
   }
 
+  // Produce a stable, order-independent signature for a tool's arguments so we can
+  // detect when the exact same call is issued back-to-back. Used by the direct-
+  // sequence repeat guard. Pure: no side effects.
+  function stableSignature(args: Record<string, unknown>): string {
+    if (!args || typeof args !== 'object') return '';
+    const sortedKeys = Object.keys(args).sort();
+    const normalized: Record<string, unknown> = {};
+    for (const key of sortedKeys) {
+      const value = args[key];
+      normalized[key] = typeof value === 'string' ? value.trim() : value;
+    }
+    try {
+      return JSON.stringify(normalized);
+    } catch {
+      return String(args);
+    }
+  }
+
   function intentSummary(name: string, args: Record<string, unknown>): string {
     const spawnSubAgentPreviewChars = 320;
     switch (name) {
@@ -1671,6 +1689,13 @@ export async function chatWithTools(
         return 'execute requested operation';
     }
   }
+
+  // Track the last executed tool call so we can detect direct-sequence repeats —
+  // the same tool called with identical arguments back-to-back. Such a repeat is
+  // almost always a broken loop, so we stop re-executing and tell the model to
+  // proceed differently. Legitimate iteration (e.g. read_file with a changing
+  // offset/limit) uses different arguments each time and is unaffected.
+  let lastToolSignature = '';
 
   for (let i = 0; i < maxTurns; i += 1) {
     onEvent?.(`llm-turn:${i + 1}/${maxTurns}`);
@@ -1986,6 +2011,42 @@ export async function chatWithTools(
         ? (parsedArgs as Record<string, unknown>)
         : {};
       onEvent?.(`intent:${intentSummary(toolName, summarizedArgs)}`);
+
+      // Direct-sequence repeat guard: if the exact same tool call is issued
+      // back-to-back (same name + identical arguments), it is almost certainly a
+      // broken loop. Surface the read_file arguments to the user first (so
+      // legitimate iteration through a file stays visible), then stop re-executing
+      // and feed the model a hint to proceed differently. We only treat *consecutive*
+      // identical calls as a loop — a later re-read after other work is fine.
+      const signature = stableSignature(summarizedArgs);
+      if (signature && signature === lastToolSignature) {
+        onEvent?.(`tool-args:${toolName}:${JSON.stringify(summarizedArgs)}`);
+        onEvent?.(`tool-repeat:${toolName}`);
+        messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          content: clampToolResultForPrompt(safeJsonStringify({
+            ok: false,
+            error: `Tool ${toolName} was called with identical arguments immediately after a previous call. Do not repeat it; proceed to the next step or answer in plain text.`
+          }))
+        });
+        continue;
+      }
+      lastToolSignature = signature;
+
+      // Expose read_file arguments to the user so they can see which file (and any
+      // offset/limit) the model is reading, even when it iterates through a file.
+      if (toolName === 'read_file') {
+        const pathArg = String(summarizedArgs.path ?? '');
+        const offsetArg = summarizedArgs.offset;
+        const limitArg = summarizedArgs.limit;
+        onEvent?.(`tool-args:${toolName}:${JSON.stringify({
+          path: pathArg,
+          ...(offsetArg !== undefined ? { offset: Number(offsetArg) } : {}),
+          ...(limitArg !== undefined ? { limit: Number(limitArg) } : {})
+        })}`);
+      }
+
       onEvent?.(`tool:${toolName}`);
       let result: unknown;
       try {
