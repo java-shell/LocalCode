@@ -658,7 +658,7 @@ function estimateMessageTokens(message: ChatMessage): number {
   return Math.max(1, Math.ceil(tokenBudget / 4));
 }
 
-function estimateMessagesTokens(messages: ChatMessage[]): number {
+export function estimateMessagesTokens(messages: ChatMessage[]): number {
   return messages.reduce((total, message) => total + estimateMessageTokens(message), 0);
 }
 
@@ -684,14 +684,17 @@ function summarizeConversationForContext(messages: ChatMessage[]): string {
  * when it alone exceeds the budget. This keeps overflow retries bounded instead of repeating
  * the same context-window failure.
  */
-function compactMessagesForContext(messages: ChatMessage[], contextWindowTokens?: number, safetyMarginTokens = 512): ChatMessage[] {
+export function compactMessagesForContext(messages: ChatMessage[], contextWindowTokens?: number, safetyMarginTokens = 512, force = false): ChatMessage[] {
   const contextLimit = toPositiveInteger(contextWindowTokens);
   if (!contextLimit) {
     return messages;
   }
 
-  const safeLimit = Math.max(256, contextLimit - safetyMarginTokens);
-  if (estimateMessagesTokens(messages) <= safeLimit) {
+  const margin = force
+    ? Math.max(safetyMarginTokens, Math.round(contextLimit * 0.3))
+    : safetyMarginTokens;
+  const safeLimit = Math.max(256, contextLimit - margin);
+  if (!force && estimateMessagesTokens(messages) <= safeLimit) {
     return messages;
   }
 
@@ -762,6 +765,54 @@ function isContextOverflowError(error: unknown): boolean {
     || summary.includes('messages resulted in')
     || summary.includes('reduce the length')
   );
+}
+
+function extractContextLimitFromError(error: unknown): number | undefined {
+  if (!axios.isAxiosError(error)) {
+    return undefined;
+  }
+  const data = error.response?.data;
+  if (data && typeof data === 'object') {
+    const record = data as Record<string, unknown>;
+    const topNctx = toPositiveInteger(record.n_ctx);
+    if (topNctx) {
+      return topNctx;
+    }
+    const errorObj = record.error;
+    if (errorObj && typeof errorObj === 'object') {
+      const nested = errorObj as Record<string, unknown>;
+      const nestedNctx = toPositiveInteger(nested.n_ctx);
+      if (nestedNctx) {
+        return nestedNctx;
+      }
+    }
+  }
+  const summary = summarizeResponseData(data);
+  const patterns = [
+    /context size \((\d+)\s*tokens?\)/i,
+    /maximum context length is (\d+)/i,
+    /context window of (\d+)/i,
+    /context length of (\d+)/i
+  ];
+  for (const pattern of patterns) {
+    const match = summary.match(pattern);
+    if (match && match[1]) {
+      const value = toPositiveInteger(match[1]);
+      if (value) {
+        return value;
+      }
+    }
+  }
+  return undefined;
+}
+
+function resolveCompactionWindow(config: LLMConfig, error: unknown): number | undefined {
+  const configured = toPositiveInteger(config.contextWindowTokens);
+  const reported = extractContextLimitFromError(error);
+  if (configured && reported) {
+    return Math.min(configured, reported);
+  }
+  return configured ?? reported;
 }
 
 function toOllamaMessages(messages: ChatMessage[]): Array<Record<string, unknown>> {
@@ -1369,14 +1420,41 @@ export async function chatWithTools(
       }
     ];
 
-    const attemptRequest = async (requestMessages: ChatMessage[]) => {
+    // Proactive compaction: the final summary sends the full conversation in one
+    // request, so compact up front when the estimate reaches ~80% of the window.
+    // Only act while the estimate is still within the window (80%-100%); if it is
+    // already over 100%, the request will fail and the reactive path compacts
+    // using the server-reported limit, which is more accurate.
+    const proactiveWindow = toPositiveInteger(config.contextWindowTokens);
+    if (proactiveWindow) {
+      const proactiveThreshold = Math.round(proactiveWindow * 0.8);
+      const proactiveCeiling = proactiveWindow;
+      const proactiveEstimate = estimateMessagesTokens(summaryMessages);
+      if (proactiveEstimate > proactiveThreshold && proactiveEstimate <= proactiveCeiling) {
+        const compacted = compactMessagesForContext(summaryMessages, proactiveWindow, 1024, true);
+        if (JSON.stringify(compacted) !== JSON.stringify(summaryMessages)) {
+          summaryMessages.length = 0;
+          summaryMessages.push(...compacted);
+          onEvent?.(`context:compacted-proactively (final summary, estimate ${proactiveEstimate} tokens, threshold ${proactiveThreshold})`);
+        }
+      }
+    }
+
+    let streamedTokenCount = 0;
+
+    const attemptRequest = async (requestMessages: ChatMessage[], useStream: boolean) => {
+      streamedTokenCount = 0;
+      const countToken = () => {
+        streamedTokenCount += 1;
+      };
+
       if (useOllamaNativeChat && ollamaNativeEndpoint) {
         const payload = buildOllamaNativePayload(
           { ...config, ollamaThink: options?.disableThinking ? false : config.ollamaThink },
           normalizeForStrictSystemTemplates(ensureOllamaUserPrompt(requestMessages)),
           []
         );
-        const shouldStream = Boolean(config.ollamaStreaming ?? true) && !options?.disableThinking;
+        const shouldStream = useStream && Boolean(config.ollamaStreaming ?? true);
         const response = shouldStream
           ? await streamOllamaNativeChat(
               ollamaNativeEndpoint,
@@ -1384,7 +1462,7 @@ export async function chatWithTools(
               buildHeaders(config),
               requestTimeoutMs,
               signal,
-              onToken
+              countToken
             )
           : await axios.post<OllamaNativeChatResponse>(ollamaNativeEndpoint, payload, {
               headers: buildHeaders(config),
@@ -1401,6 +1479,27 @@ export async function chatWithTools(
         usageTotals.totalTokens += usage.totalTokens;
         usageTotals.requests += 1;
         const text = String(response.assistant?.content ?? '').trim();
+        if (!text) {
+          return null;
+        }
+        return options?.normalizeOutput ? normalizeThinkingSummaryOutput(text) : text;
+      }
+
+      if (useStream) {
+        const streamed = await streamOpenAICompatibleChat(
+          config.endpoint,
+          payloadBase(config, requestMessages),
+          buildHeaders(config),
+          requestTimeoutMs,
+          signal,
+          countToken
+        );
+        const usage = streamed.usage;
+        usageTotals.promptTokens += usage.promptTokens;
+        usageTotals.completionTokens += usage.completionTokens;
+        usageTotals.totalTokens += usage.totalTokens;
+        usageTotals.requests += 1;
+        const text = String(streamed.assistant?.content ?? '').trim();
         if (!text) {
           return null;
         }
@@ -1429,13 +1528,34 @@ export async function chatWithTools(
     };
 
     try {
-      return await attemptRequest(summaryMessages);
+      // Stream first so the connection stays active during long generations.
+      // The summary sends the full conversation context in one request; a
+      // non-streaming call leaves the socket idle while the model generates,
+      // which trips proxy/server idle timeouts ("socket hang up"). Streaming
+      // keeps bytes flowing and avoids that.
+      try {
+        return await attemptRequest(summaryMessages, true);
+      } catch (streamError) {
+        if (isContextOverflowError(streamError)) {
+          const compacted = compactMessagesForContext(summaryMessages, resolveCompactionWindow(config, streamError), 1024, true);
+          if (JSON.stringify(compacted) !== JSON.stringify(summaryMessages)) {
+            onEvent?.('context:compacted-after-exceeding-window');
+            return await attemptRequest(compacted, false);
+          }
+          throw streamError;
+        }
+        if (streamedTokenCount === 0 && shouldFallbackOpenAIStreamingFailure(streamError)) {
+          onEvent?.('final-summary:streaming-failed; retrying without stream');
+          return await attemptRequest(summaryMessages, false);
+        }
+        throw streamError;
+      }
     } catch (error) {
       if (isContextOverflowError(error)) {
-        const compacted = compactMessagesForContext(summaryMessages, config.contextWindowTokens, 1024);
+        const compacted = compactMessagesForContext(summaryMessages, resolveCompactionWindow(config, error), 1024, true);
         if (JSON.stringify(compacted) !== JSON.stringify(summaryMessages)) {
           onEvent?.('context:compacted-after-exceeding-window');
-          return await attemptRequest(compacted);
+          return await attemptRequest(compacted, false);
         }
       }
       throw error;
@@ -1559,6 +1679,28 @@ export async function chatWithTools(
     let assistantThinking = '';
     let usage: Omit<TokenUsage, 'requests'>;
 
+    // Proactive compaction: when the estimated context reaches ~80% of the
+    // configured window, compact before the request so we stay under the limit
+    // instead of waiting for the provider to reject the request. The character
+    // estimator undercounts real tokens, so 80% of the window leaves headroom.
+    // Only act while the estimate is still within the window (80%-100%); if it is
+    // already over 100%, the request will fail and the reactive path compacts
+    // using the server-reported limit, which is more accurate.
+    const proactiveWindow = toPositiveInteger(config.contextWindowTokens);
+    if (proactiveWindow) {
+      const proactiveThreshold = Math.round(proactiveWindow * 0.8);
+      const proactiveCeiling = proactiveWindow;
+      const proactiveEstimate = estimateMessagesTokens(messages);
+      if (proactiveEstimate > proactiveThreshold && proactiveEstimate <= proactiveCeiling) {
+        const compacted = compactMessagesForContext(messages, proactiveWindow, 1024, true);
+        if (JSON.stringify(compacted) !== JSON.stringify(messages)) {
+          messages.length = 0;
+          messages.push(...compacted);
+          onEvent?.(`context:compacted-proactively (estimate ${proactiveEstimate} tokens, threshold ${proactiveThreshold})`);
+        }
+      }
+    }
+
     const requestMessages = messages;
 
     if (useOllamaNativeChat && ollamaNativeEndpoint) {
@@ -1590,7 +1732,7 @@ export async function chatWithTools(
         }
       } catch (error) {
         if (isContextOverflowError(error)) {
-          const compacted = compactMessagesForContext(messages, config.contextWindowTokens, 1024);
+          const compacted = compactMessagesForContext(messages, resolveCompactionWindow(config, error), 1024, true);
           if (JSON.stringify(compacted) !== JSON.stringify(requestMessages)) {
             onEvent?.('context:compacted-before-retry');
             const retryPayload = buildOllamaNativePayload(config, normalizeForStrictSystemTemplates(ensureOllamaUserPrompt(compacted)), activeTools);
@@ -1670,7 +1812,7 @@ export async function chatWithTools(
             usage = streamed.usage;
           } catch (streamError) {
             if (isContextOverflowError(streamError)) {
-              const compacted = compactMessagesForContext(messages, config.contextWindowTokens, 1024);
+              const compacted = compactMessagesForContext(messages, resolveCompactionWindow(config, streamError), 1024, true);
               if (JSON.stringify(compacted) !== JSON.stringify(requestMessages)) {
                 onEvent?.('context:compacted-before-retry');
                 const retryPayload: Record<string, unknown> = {
@@ -1721,7 +1863,7 @@ export async function chatWithTools(
         }
       } catch (error) {
         if (isContextOverflowError(error)) {
-          const compacted = compactMessagesForContext(messages, config.contextWindowTokens, 1024);
+          const compacted = compactMessagesForContext(messages, resolveCompactionWindow(config, error), 1024, true);
           if (JSON.stringify(compacted) !== JSON.stringify(requestMessages)) {
             onEvent?.('context:compacted-before-retry');
             const retryPayload: Record<string, unknown> = {

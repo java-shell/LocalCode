@@ -75,7 +75,10 @@ function containsCompletionMarker(output: string, marker: string): boolean {
   for (const candidate of markers) {
     const escaped = escapeRegex(candidate);
     const flexible = escaped.replace(/[\s_-]+/g, '[\\s_-]*');
-    const regex = new RegExp(flexible, 'i');
+    // Issue #3: word-boundary lookarounds so the marker must stand alone
+    // (prevents TASK_COMPLETE from matching TASK_COMPLETELY, etc.).
+    const bounded = `(?<![A-Za-z0-9_])${flexible}(?![A-Za-z0-9_])`;
+    const regex = new RegExp(bounded, 'i');
     if (regex.test(normalizedOutput)) {
       return true;
     }
@@ -264,6 +267,9 @@ interface StepExecutionResult {
   status: 'success' | 'error';
   errorDetail?: string;
   selectedDownstreamStageId?: string;
+  // Issue #7: the LLM config this step used, so the caller can reuse it for a
+  // consistent terminal-output memory store (same embedding model as the run).
+  config?: LLMConfig;
 }
 
 interface DownstreamStageOption {
@@ -325,6 +331,7 @@ async function runStepWithRetries(
   runtimeContext?: RuntimeContext,
   memoryAdapter?: OrchestrationMemoryAdapter,
   signal?: AbortSignal,
+  storeIntermediateOutputs?: boolean,
 ): Promise<StepExecutionResult> {
   const originalPromptForModel = truncateText(originalPrompt, 4000);
   const COMPLETION_TOOL = 'complete_orchestration_task';
@@ -506,7 +513,11 @@ async function runStepWithRetries(
           )
         : truncateText(rawOutput, 12000);
 
-      if (memoryAdapter) {
+      // Issue #7: by default, intermediate step outputs are NOT stored to
+      // memory (they accumulate noise and bloat). Only the terminal output is
+      // stored (see runOrchestration). Opt in to per-step storage with
+      // plan.storeIntermediateOutputs.
+      if (memoryAdapter && storeIntermediateOutputs) {
         await memoryAdapter.store(config, rawOutput, step.name);
       }
 
@@ -535,7 +546,8 @@ async function runStepWithRetries(
         completionSummary,
         handoffText: effectiveHandoffText,
         status: 'success',
-        selectedDownstreamStageId: selectedDownstreamStageId || undefined
+        selectedDownstreamStageId: selectedDownstreamStageId || undefined,
+        config
       };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
@@ -546,6 +558,12 @@ async function runStepWithRetries(
       lastErrorDetail = detail;
       if (attempt < maxRetries) {
         onEvent?.(`step:retry:${step.name}:iteration:${iteration}:${attempt + 1}/${maxRetries} | ${truncateText(detail, 400)}`);
+        // Issue #6: exponential backoff with jitter before retrying, so
+        // transient failures (network, rate limits) get a chance to recover
+        // instead of hammering the endpoint.
+        const backoffMs = Math.min(8000, 500 * Math.pow(2, attempt)) + Math.floor(Math.random() * 250);
+        await new Promise(resolve => setTimeout(resolve, backoffMs));
+
         attempt += 1;
         continue;
       }
@@ -576,19 +594,15 @@ async function runStepWithRetries(
         completionSummary: '',
         handoffText: truncateText(errorText, 12000),
         status: 'error',
-        errorDetail: detail
+        errorDetail: detail,
+        config
       };
     }
   }
 
-  return {
-    stepRecords: [],
-    taskCompleted: false,
-    completionSummary: '',
-    handoffText: truncateText(stepInput, 12000),
-    status: 'error',
-    errorDetail: 'Unexpected orchestration retry state.'
-  };
+  // Issue #10: the retry loop above always returns internally (maxRetries >= 0
+  // guarantees at least one iteration), so this is a defensive terminal.
+  throw new Error(`Unexpected orchestration retry state in step ${step.name}.`);
 }
 
 async function runSingleIteration(
@@ -600,10 +614,12 @@ async function runSingleIteration(
   onEvent?: (event: string) => void,
   runtimeContext?: RuntimeContext,
   memoryAdapter?: OrchestrationMemoryAdapter,
-  signal?: AbortSignal
-): Promise<{ steps: OrchestrationRunStep[]; taskCompleted: boolean; completionSummary: string }> {
+  signal?: AbortSignal,
+  storeIntermediateOutputs?: boolean
+): Promise<{ steps: OrchestrationRunStep[]; taskCompleted: boolean; completionSummary: string; lastSuccessfulConfig?: LLMConfig }> {
   let priorOutput = iterationPrompt;
   const iterationSteps: OrchestrationRunStep[] = [];
+  let lastSuccessfulConfig: LLMConfig | undefined;
 
   for (const step of plan.steps) {
     onEvent?.(`step:start:${step.name}:iteration:${iteration}`);
@@ -618,22 +634,29 @@ async function runSingleIteration(
       onEvent,
       runtimeContext,
       memoryAdapter,
-      signal
+      signal,
+      storeIntermediateOutputs
     );
 
     iterationSteps.push(...outcome.stepRecords);
     onEvent?.(`step:end:${step.name}:iteration:${iteration}`);
-
-    if (outcome.taskCompleted) {
-      return { steps: iterationSteps, taskCompleted: true, completionSummary: outcome.completionSummary };
+    if (outcome.status === 'success' && outcome.config) {
+      lastSuccessfulConfig = outcome.config;
     }
 
-    if (step.passOutputToNext || outcome.status === 'error' || outcome.stepRecords.some(s => s.toolBudgetExhausted)) {
+    if (outcome.taskCompleted) {
+      return { steps: iterationSteps, taskCompleted: true, completionSummary: outcome.completionSummary, lastSuccessfulConfig };
+    }
+
+    // Issue #5: default to chaining. Only skip passing output forward when the
+    // step explicitly opts out (passOutputToNext === false). This prevents a
+    // forgotten flag from silently feeding the original prompt to every step.
+    if (step.passOutputToNext !== false || outcome.status === 'error' || outcome.stepRecords.some(s => s.toolBudgetExhausted)) {
       priorOutput = truncateText(outcome.handoffText, 12000);
     }
   }
 
-  return { steps: iterationSteps, taskCompleted: false, completionSummary: '' };
+  return { steps: iterationSteps, taskCompleted: false, completionSummary: '', lastSuccessfulConfig };
 }
 
 async function runAdvancedIteration(
@@ -645,8 +668,10 @@ async function runAdvancedIteration(
   onEvent?: (event: string) => void,
   runtimeContext?: RuntimeContext,
   memoryAdapter?: OrchestrationMemoryAdapter,
-  signal?: AbortSignal
-): Promise<{ steps: OrchestrationRunStep[]; taskCompleted: boolean; completionSummary: string }> {
+  signal?: AbortSignal,
+  priorExecutions?: number,
+  storeIntermediateOutputs?: boolean
+): Promise<{ steps: OrchestrationRunStep[]; taskCompleted: boolean; completionSummary: string; lastSuccessfulConfig?: LLMConfig }> {
   const advanced = plan.advanced;
   if (!advanced?.enabled || !Array.isArray(advanced.stages) || advanced.stages.length === 0) {
     return runSingleIteration(
@@ -658,13 +683,15 @@ async function runAdvancedIteration(
       onEvent,
       runtimeContext,
       memoryAdapter,
-      signal
+      signal,
+      storeIntermediateOutputs
     );
   }
 
   const stages = advanced.stages.map(normalizeAdvancedStage);
   const stageById = new Map(stages.map(stage => [stage.id, stage]));
-  const stageIndexById = new Map(stages.map((stage, index) => [stage.id, index]));
+  // NOTE: stageIndexById removed (Issue #1) — the forward-only index filter it
+  // powered silently dropped backward edges (e.g. qa_final -> impl_recovery).
   const links = Array.isArray(advanced.links) ? advanced.links : [];
   const entryStageId = (advanced.entryStageId && stageById.has(advanced.entryStageId)) ? advanced.entryStageId : stages[0].id;
   const maxStageExecutions = Math.max(1, Math.min(300, Math.floor(Number(advanced.maxStageExecutions ?? 100) || 100)));
@@ -675,7 +702,15 @@ async function runAdvancedIteration(
   stageInputs.set(entryStageId, [iterationPrompt]);
 
   const runSteps: OrchestrationRunStep[] = [];
-  let stageExecutions = 0;
+  let lastSuccessfulConfig: LLMConfig | undefined;
+  // Issue #11: seed the execution counter with prior iterations' executions so
+  // the budget is enforced per-run (across loop iterations), not per-iteration.
+  let stageExecutions = Math.max(0, Math.floor(Number(priorExecutions ?? 0) || 0));
+  // Issue #1: per-stage execution cap so a single stage (e.g. a QA/recovery
+  // feedback loop) cannot monopolize the whole budget. The global
+  // `stageExecutions < maxStageExecutions` check still bounds total runs.
+  const stageRunCounts = new Map<string, number>();
+  const perStageCap = Math.max(1, Math.ceil(maxStageExecutions / Math.max(1, stages.length)));
 
   while (queue.length > 0 && stageExecutions < maxStageExecutions) {
     const stageId = String(queue.shift() ?? '');
@@ -684,12 +719,26 @@ async function runAdvancedIteration(
     if (!stage) {
       continue;
     }
+    // Issue #1: enforce per-stage execution cap to bound feedback loops.
+    const stageRuns = Number(stageRunCounts.get(stageId) ?? 0);
+    if (stageRuns >= perStageCap) {
+      onEvent?.(`graph:stage-cap:${stage.name}:${stageRuns}/${perStageCap}`);
+      continue;
+    }
+
 
     const pendingInputs = stageInputs.get(stageId) ?? [iterationPrompt];
     stageInputs.delete(stageId);
-    const mergedInput = truncateText(pendingInputs.join('\n\n---\n\n'), 12000);
+    // Issue #8: per-source budget so one large upstream output cannot starve
+    // the others (a single global cut would drop later sources entirely).
+    const FAN_IN_BUDGET = 12000;
+    const perSourceBudget = Math.max(800, Math.floor(FAN_IN_BUDGET / Math.max(1, pendingInputs.length)));
+    const mergedInput = truncateText(
+      pendingInputs.map(input => truncateText(input, perSourceBudget)).join('\n\n---\n\n'),
+      FAN_IN_BUDGET
+    );
 
-    const currentStageIndex = Number(stageIndexById.get(stageId));
+    // Issue #1: allow backward edges (feedback loops) — no forward-only index filter.
     const directDownstreamLinks = links.filter(link => {
       if (link.fromStageId !== stageId) {
         return false;
@@ -697,8 +746,8 @@ async function runAdvancedIteration(
       if (!stageById.has(link.toStageId)) {
         return false;
       }
-      const targetIndex = Number(stageIndexById.get(link.toStageId));
-      return Number.isFinite(targetIndex) && targetIndex > currentStageIndex;
+      // (forward-only index check removed — see Issue #1)
+      return stageById.has(link.toStageId);
     });
 
     const directDownstreamStageOptions: DownstreamStageOption[] = [];
@@ -720,7 +769,9 @@ async function runAdvancedIteration(
       });
     }
 
-    onEvent?.(`graph:stage:start:${stage.name}:iteration:${iteration}`);
+    // Issue #12: unified event naming — advanced mode now emits the same
+    // `step:*` scheme as basic mode so UI consumers handle one format.
+    onEvent?.(`step:start:${stage.name}:iteration:${iteration}`);
     const outcome = await runStepWithRetries(
       stage,
       originalPrompt,
@@ -732,17 +783,24 @@ async function runAdvancedIteration(
       onEvent,
       runtimeContext,
       memoryAdapter,
-      signal
+      signal,
+      storeIntermediateOutputs
     );
     runSteps.push(...outcome.stepRecords);
     stageExecutions += 1;
-    onEvent?.(`graph:stage:end:${stage.name}:iteration:${iteration}:${outcome.status}`);
+    stageRunCounts.set(stageId, stageRuns + 1);
+    if (outcome.status === 'success' && outcome.config) {
+      lastSuccessfulConfig = outcome.config;
+    }
+
+    onEvent?.(`step:end:${stage.name}:iteration:${iteration}:${outcome.status}`);
 
     if (outcome.taskCompleted) {
       return {
         steps: runSteps,
         taskCompleted: true,
-        completionSummary: outcome.completionSummary
+        completionSummary: outcome.completionSummary,
+        lastSuccessfulConfig
       };
     }
 
@@ -787,7 +845,8 @@ async function runAdvancedIteration(
   return {
     steps: runSteps,
     taskCompleted: false,
-    completionSummary: ''
+    completionSummary: '',
+    lastSuccessfulConfig
   };
 }
 
@@ -808,14 +867,21 @@ export async function runOrchestration(
   const allSteps: OrchestrationRunStep[] = [];
   let iterationPrompt = userPrompt;
   let finalOutput = '';
-  let completed = !loopUntilComplete;
+  // Issue #2: `completed` now reflects actual success, not loop configuration.
+  // It is set true when the completion tool/marker fires (below); otherwise it
+  // is derived from step success after the loop.
+  let completed = false;
   let iterations = 0;
+  // Issue #7: track the last successful step's LLM config so the terminal
+  // output can be stored to memory with the same embedding model as the run.
+  let lastSuccessfulConfig: LLMConfig | undefined;
+  const storeIntermediateOutputs = Boolean(plan.storeIntermediateOutputs);
 
   for (let iteration = 1; iteration <= loopLimit; iteration += 1) {
     onEvent?.(`loop:start:${iteration}`);
 
     const useAdvancedGraph = Boolean(plan.advanced?.enabled && Array.isArray(plan.advanced?.stages) && plan.advanced.stages.length > 0);
-    const { steps: iterationSteps, taskCompleted, completionSummary } = useAdvancedGraph
+    const { steps: iterationSteps, taskCompleted, completionSummary, lastSuccessfulConfig: iterationLastConfig } = useAdvancedGraph
       ? await runAdvancedIteration(
           plan,
           userPrompt,
@@ -825,7 +891,9 @@ export async function runOrchestration(
           onEvent,
           runtimeContext,
           memoryAdapter,
-          signal
+          signal,
+          allSteps.length,
+          storeIntermediateOutputs
         )
       : await runSingleIteration(
           plan,
@@ -836,10 +904,14 @@ export async function runOrchestration(
           onEvent,
           runtimeContext,
           memoryAdapter,
-          signal
+          signal,
+          storeIntermediateOutputs
         );
 
     allSteps.push(...iterationSteps);
+    if (iterationLastConfig) {
+      lastSuccessfulConfig = iterationLastConfig;
+    }
     finalOutput = iterationSteps.length ? iterationSteps[iterationSteps.length - 1].output : '';
     const iterationOutput = iterationSteps.map(step => step.output || '').join('\n\n');
     iterations = iteration;
@@ -871,6 +943,30 @@ export async function runOrchestration(
       'Continue from this output. When the task is fully complete, call the complete_orchestration_task tool with a brief summary of what was accomplished.',
       'Do not signal completion by emitting text — use the tool call.'
     ].join('\n'), 12000);
+  }
+
+  // Issue #2: derive `completed` from actual step success when no explicit
+  // completion signal fired. Non-loop plans succeed only if every step
+  // succeeded; loop plans that exhaust maxLoops without a completion signal
+  // are not considered complete.
+  if (!completed) {
+    if (!loopUntilComplete) {
+      completed = allSteps.length > 0 && allSteps.every(step => step.success);
+    }
+  }
+
+
+  // Issue #7: by default, store only the terminal output to memory (not every
+  // intermediate step). Use the last successful step's config so the embedding
+  // model matches the run. Skipped when per-step storage is opted in (the
+  // terminal output was already stored as a step) or when the run failed.
+  if (!storeIntermediateOutputs && memoryAdapter && lastSuccessfulConfig && finalOutput.trim()) {
+    try {
+      await memoryAdapter.store(lastSuccessfulConfig, finalOutput, 'orchestration-final');
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      onEvent?.(`memory:store-failed:${truncateText(detail, 200)}`);
+    }
   }
 
   return {

@@ -168,6 +168,12 @@ export interface OrchestrationPlan {
   loopUntilComplete?: boolean;
   maxLoops?: number;
   completionMarker?: string;
+  /**
+   * Issue #7: when true, every successful step's raw output is stored to the
+   * memory adapter. Default (false/omitted) stores only the terminal output,
+   * avoiding intermediate-output noise and bloat across multi-stage runs.
+   */
+  storeIntermediateOutputs?: boolean;
   steps: OrchestrationStep[];
   advanced?: AdvancedOrchestrationConfig;
 }
