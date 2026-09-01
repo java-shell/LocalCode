@@ -35,6 +35,7 @@ const settingsState = {
   orchestrationMemoryGlobalNamespace: '',
   chatDebugDumpsEnabled: true,
   chatSettingsCollapsed: true,
+  contextUsageCollapsed: false,
   lockedNamespaces: []
 };
 
@@ -658,6 +659,29 @@ function renderContextUsageGraph() {
   }
 }
 
+function applyContextUsageVisibility() {
+  const panel = document.getElementById('contextUsagePanel');
+  const toggle = document.getElementById('contextUsageToggle');
+  if (!panel || !toggle) {
+    return;
+  }
+  panel.classList.toggle('collapsed', settingsState.contextUsageCollapsed);
+  toggle.setAttribute('aria-expanded', String(!settingsState.contextUsageCollapsed));
+}
+
+function initContextUsageToggle() {
+  const toggle = document.getElementById('contextUsageToggle');
+  if (!toggle) {
+    return;
+  }
+  toggle.addEventListener('click', () => {
+    settingsState.contextUsageCollapsed = !settingsState.contextUsageCollapsed;
+    saveSettings();
+    applyContextUsageVisibility();
+  });
+  applyContextUsageVisibility();
+}
+
 function loadSettings() {
   try {
     const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
@@ -720,6 +744,7 @@ function loadSettings() {
       String(parsed.orchestrationMemoryGlobalNamespace ?? settingsState.orchestrationMemoryGlobalNamespace).trim();
     settingsState.chatDebugDumpsEnabled = Boolean(parsed.chatDebugDumpsEnabled ?? true);
     settingsState.chatSettingsCollapsed = Boolean(parsed.chatSettingsCollapsed ?? settingsState.chatSettingsCollapsed);
+    settingsState.contextUsageCollapsed = Boolean(parsed.contextUsageCollapsed ?? settingsState.contextUsageCollapsed);
     settingsState.lockedNamespaces = Array.isArray(parsed.lockedNamespaces) ? parsed.lockedNamespaces : [];
   } catch {
     settingsState.maxToolTurns = 40;
@@ -743,6 +768,7 @@ function loadSettings() {
     settingsState.orchestrationMemoryGlobalNamespace = '';
     settingsState.chatDebugDumpsEnabled = true;
     settingsState.chatSettingsCollapsed = true;
+    settingsState.contextUsageCollapsed = false;
     settingsState.lockedNamespaces = [];
   }
 
@@ -2286,6 +2312,9 @@ async function initChat() {
     if (raw.startsWith('tool:')) {
       return {
         kind: 'tool',
+        text: raw.slice('tool:'.length).trim()
+      };
+    }
 
     // Expose read_file arguments to the user so they can see which file (and any
     // offset/limit) the model is reading, even when it iterates through a file.
@@ -2322,9 +2351,6 @@ async function initChat() {
       return {
         kind: 'tool-repeat',
         text: `Repeated ${toolName} with identical arguments; suppressed to break a potential loop`
-      };
-    }
-        text: raw.slice('tool:'.length).trim()
       };
     }
 
@@ -5783,6 +5809,7 @@ async function initDiagnostics() {
 async function main() {
   loadSettings();
   renderContextUsageGraph();
+  initContextUsageToggle();
   document.getElementById('chatTab').addEventListener('click', () => setActiveTab('chat'));
   document.getElementById('orchTab').addEventListener('click', () => setActiveTab('orchestration'));
   document.getElementById('orchAdvancedTab').addEventListener('click', () => setActiveTab('orchestration-advanced'));

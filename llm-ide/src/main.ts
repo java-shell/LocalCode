@@ -25,6 +25,7 @@ import {
 import { executeTool, getAllowedToolDefinitions, runTerminalCommand, toolDefinitions } from './backend/toolRuntime';
 import { buildWorkspaceTree, readWorkspaceFile, writeWorkspaceFile } from './backend/workspaceFs';
 import { TurboVecMemory, computeAdaptiveInjectionLimits } from './backend/turboVecMemory';
+import { formatEnvironmentGuidance } from './shared/environment';
 
 let mainWindow: BrowserWindow | null = null;
 let selectedWorkspaceDir = process.cwd();
@@ -789,6 +790,11 @@ ipcMain.handle(
       const toolGuidance = formatToolAvailabilityGuidance(requestedToolNames);
       if (toolGuidance) {
         systemPromptSections.push(toolGuidance);
+      }
+
+      const environmentGuidance = formatEnvironmentGuidance(selectedWorkspaceDir);
+      if (environmentGuidance) {
+        systemPromptSections.push(environmentGuidance);
       }
 
       if (referenceWorkspaces.length > 0) {

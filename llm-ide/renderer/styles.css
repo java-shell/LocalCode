@@ -393,14 +393,61 @@ body.advanced-fullscreen-active #orchAdvancedView.view.active {
 
 .context-usage-header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
+  width: 100%;
+  padding: 4px 6px;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.context-usage-header:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.context-usage-header:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.context-usage-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.context-usage-chevron {
+  display: inline-block;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  transition: transform var(--transition);
+}
+
+.context-usage-panel.collapsed .context-usage-chevron {
+  transform: rotate(-90deg);
+}
+
+.context-usage-panel.collapsed .context-usage-list {
+  display: none;
+}
+
+.context-usage-panel.collapsed {
+  padding-bottom: 4px;
 }
 
 .context-usage-stamp {
   color: var(--muted);
   font-size: 11px;
+  white-space: nowrap;
 }
 
 .context-usage-list {

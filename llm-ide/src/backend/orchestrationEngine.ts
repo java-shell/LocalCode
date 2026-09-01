@@ -14,6 +14,7 @@ import {
   TokenUsage
 } from '../shared/types';
 import { RetrievedMemoryItem, computeAdaptiveInjectionLimits } from './turboVecMemory';
+import { formatEnvironmentGuidance } from '../shared/environment';
 
 export interface RuntimeContext {
   workspaceDir: string;
@@ -365,6 +366,13 @@ async function runStepWithRetries(
     const messages: ChatMessage[] = [];
     if (step.systemPrompt?.trim()) {
       messages.push({ role: 'system', content: step.systemPrompt });
+    }
+
+    // Tell the model which OS it is running on so it emits correct shell
+    // commands from the first attempt (Windows vs Linux/macOS).
+    const environmentGuidance = formatEnvironmentGuidance(runtimeContext?.workspaceDir);
+    if (environmentGuidance) {
+      messages.push({ role: 'system', content: environmentGuidance });
     }
 
     if (lastErrorDetail) {

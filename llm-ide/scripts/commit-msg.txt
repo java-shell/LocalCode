@@ -1,0 +1,21 @@
+fix(read_file): add direct-sequence repeat guard + expose args to chatpane
+
+Backend:
+- Add stableSignature() helper for order-independent tool-argument comparison.
+- Add direct-sequence repeat guard in the tool-execution loop: if the exact
+  same tool call (same name + identical arguments) is issued back-to-back,
+  surface the read_file arguments via a tool-args event, emit a tool-repeat
+  event, push a tool result telling the model not to repeat it, and continue.
+  Only consecutive identical calls are treated as a loop; a later re-read
+  after other work resets lastToolSignature and is not flagged.
+- Legitimate iteration (offset/limit changing each call) keeps a distinct
+  signature, so it is never suppressed.
+
+Renderer:
+- app.js: parse tool-args events to show which file + offset/limit the model
+  is reading; handle tool-repeat events so iteration-through-a-file is not
+  seen as a broken state.
+- styles.css: add .log-line-event-tool-args and .log-line-event-tool-repeat
+  styles for visual distinction.
+
+Verified: tsc --noEmit clean; all llmClient tests pass.
