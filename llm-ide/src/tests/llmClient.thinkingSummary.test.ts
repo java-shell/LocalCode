@@ -10,6 +10,13 @@ interface MockOllamaResponse {
       role: 'assistant';
       content: string;
       thinking?: string;
+      tool_calls?: Array<{
+        id?: string;
+        function?: {
+          name?: string;
+          arguments?: unknown;
+        };
+      }>;
     };
     prompt_eval_count: number;
     eval_count: number;
@@ -181,5 +188,146 @@ test('missing assistant message triggers final-summary recovery', async () => {
     assert.equal(requests.length, 2);
     assert.equal(requests[1].payload.think, false);
     assert.ok(events.includes('final-summary:received:missing-assistant-message'));
+  });
+});
+
+test('repeated identical tool calls stop session and request final summary with thinking disabled', async () => {
+  const config: LLMConfig = {
+    provider: 'ollama',
+    endpoint: 'http://localhost:11434/v1/chat/completions',
+    model: 'qwen3',
+    temperature: 0.2,
+    ollamaThink: true,
+    ollamaStreaming: false
+  };
+
+  const events: string[] = [];
+  const executedTools: Array<{ name: string; args: unknown }> = [];
+
+  await withMockedAxiosPost([
+    {
+      data: {
+        message: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [
+            {
+              id: 'tool-1',
+              function: {
+                name: 'read_file',
+                arguments: { path: 'README.md', startLine: 1, endLine: 50 }
+              }
+            }
+          ]
+        },
+        prompt_eval_count: 10,
+        eval_count: 5
+      }
+    },
+    {
+      data: {
+        message: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [
+            {
+              id: 'tool-2',
+              function: {
+                name: 'read_file',
+                arguments: { path: 'README.md', startLine: 1, endLine: 50 }
+              }
+            }
+          ]
+        },
+        prompt_eval_count: 10,
+        eval_count: 5
+      }
+    },
+    {
+      data: {
+        message: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [
+            {
+              id: 'tool-3',
+              function: {
+                name: 'read_file',
+                arguments: { path: 'README.md', startLine: 1, endLine: 50 }
+              }
+            }
+          ]
+        },
+        prompt_eval_count: 10,
+        eval_count: 5
+      }
+    },
+    {
+      data: {
+        message: {
+          role: 'assistant',
+          content: '',
+          tool_calls: [
+            {
+              id: 'tool-4',
+              function: {
+                name: 'read_file',
+                arguments: { path: 'README.md', startLine: 1, endLine: 50 }
+              }
+            }
+          ]
+        },
+        prompt_eval_count: 10,
+        eval_count: 5
+      }
+    },
+    {
+      data: {
+        message: {
+          role: 'assistant',
+          content: 'Stopped loop. Completed: initial file read. Remaining: apply fix after user confirmation. Next: choose a different tool or update arguments.'
+        },
+        prompt_eval_count: 12,
+        eval_count: 8
+      }
+    }
+  ], async requests => {
+    const result = await chatWithTools(
+      config,
+      [{ role: 'user', content: 'Inspect README and continue.' }],
+      [
+        {
+          type: 'function',
+          function: {
+            name: 'read_file',
+            description: 'Read a file',
+            parameters: {
+              type: 'object',
+              properties: {
+                path: { type: 'string' },
+                startLine: { type: 'number' },
+                endLine: { type: 'number' }
+              }
+            }
+          }
+        }
+      ],
+      async (name, args) => {
+        executedTools.push({ name, args });
+        return { ok: true, content: 'file chunk' };
+      },
+      event => events.push(event),
+      40
+    );
+
+    assert.equal(executedTools.length, 1);
+    assert.equal(requests.length, 5);
+    assert.equal(requests[4]?.payload.think, false);
+    assert.equal(requests[4]?.payload.tools, undefined);
+    assert.ok(events.some(event => event.startsWith('tool-repeat-threshold:read_file:4')));
+    assert.ok(events.includes('final-summary:received:tool-repeat-threshold'));
+    assert.match(result.text, /Stopped loop\./i);
+    assert.match(result.text, /Completed:/i);
+    assert.equal(result.continuationSummary?.length ? true : false, true);
   });
 });

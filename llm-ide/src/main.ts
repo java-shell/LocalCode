@@ -14,6 +14,7 @@ import {
   ChatMessage,
   ChatStreamRequest,
   LLMConfig,
+  PromptSpecVersion,
   SubAgentConfigProfile,
   OrchestrationExportResult,
   OrchestrationImportResult,
@@ -36,6 +37,7 @@ let activeOrchestrationAbortController: AbortController | null = null;
 const fileWatchRefs = new Map<string, { count: number; listener: (curr: fs.Stats, prev: fs.Stats) => void }>();
 let turboMemory: TurboVecMemory | null = null;
 const MAIN_STATE_FILE = 'localcode-main-state.json';
+const DEFAULT_PROMPT_SPEC_VERSION: PromptSpecVersion = 'v2';
 
 // Pending query_user promise for awaiting user response
 let pendingQueryUserResolve: ((response: import('./backend/toolRuntime').QueryUserResponse) => void) | null = null;
@@ -113,6 +115,14 @@ function formatToolAvailabilityGuidance(toolNames: string[]): string {
     return '';
   }
 
+  const antiLoopGuidance = [
+    'Loop prevention policy:',
+    '- Track prior actions and outcomes; do not repeat the same failed action without a meaningful change.',
+    '- If a tool call fails, analyze the error and modify arguments, tool choice, or approach before retrying.',
+    '- Never retry a failed tool call with identical arguments.',
+    '- If progress stalls after a few attempts, stop tool-calling, summarize the blocker, and ask the user for direction.'
+  ].join('\n');
+
   const hasSubAgentTool = toolNames.includes('spawn_sub_agent');
   const subAgentGuidance = hasSubAgentTool
     ? [
@@ -131,8 +141,82 @@ function formatToolAvailabilityGuidance(toolNames: string[]): string {
     'Tools are enabled for this turn.',
     'Use the exact function name and valid JSON arguments only.',
     `Enabled tools: ${toolNames.join(', ')}`,
+    antiLoopGuidance,
     subAgentGuidance
   ].filter(Boolean).join('\n');
+}
+
+function normalizePromptSpecVersion(value: unknown): PromptSpecVersion {
+  return String(value ?? '').trim().toLowerCase() === 'v2' ? 'v2' : 'v1';
+}
+
+function formatToolDecisionPolicyV2(toolNames: string[]): string {
+  if (!Array.isArray(toolNames) || toolNames.length === 0) {
+    return '';
+  }
+
+  return [
+    'Tool decision policy:',
+    '- Tools are optional, not mandatory.',
+    '- Use tools when external evidence or state mutation is required.',
+    '- For conceptual-only requests, respond directly without tool calls.',
+    '- If a tool is needed, choose the least risky tool first and use exact function names with valid JSON arguments.',
+    `Enabled tools: ${toolNames.join(', ')}`
+  ].join('\n');
+}
+
+function formatLoopRetryPolicyV2(): string {
+  return [
+    'Loop and retry policy:',
+    '- Never retry a failed tool call with identical arguments.',
+    '- For bugs, test failures, or unexpected behavior, investigate root cause first before proposing or applying fixes.',
+    '- On failure, modify arguments, tool choice, sequence, or overall strategy before retrying.',
+    '- If no new evidence appears after two investigation steps, summarize the best hypothesis and next action, then ask the user whether to continue deeper.',
+    '- If two attempts on the same objective fail to make progress, stop and ask the user for direction with a blocker summary.'
+  ].join('\n');
+}
+
+function formatChatV2CorePromptSections(toolNames: string[]): string[] {
+  const sections: string[] = [
+    [
+      'Identity and mission:',
+      '- You are an agentic coding assistant for a local IDE runtime.',
+      '- Solve the user request end-to-end while preserving safety and correctness.',
+      '- Be concise, evidence-driven, and avoid speculation.'
+    ].join('\n'),
+    [
+      'Behavioral policy:',
+      '- Prefer the smallest sufficient change.',
+      '- Preserve existing behavior unless the user explicitly requests a breaking change.',
+      '- Use additive approaches first (flags, adapters, optional parameters) before replacing stable paths.',
+      '- Keep solutions simple (KISS/YAGNI) and avoid unnecessary dependencies.',
+      '- Surface blockers clearly when they occur.'
+    ].join('\n')
+  ];
+
+  const toolDecisionPolicy = formatToolDecisionPolicyV2(toolNames);
+  if (toolDecisionPolicy) {
+    sections.push(toolDecisionPolicy);
+  }
+
+  sections.push(
+    formatLoopRetryPolicyV2(),
+    [
+      'Ambiguity and escalation policy:',
+      '- If required parameters are missing, ask one targeted clarification question.',
+      '- If assumptions are low-risk and reversible, proceed and state assumptions explicitly.',
+      '- Request explicit confirmation before destructive or high-impact actions.'
+    ].join('\n'),
+    [
+      'Output contract:',
+      '- Final response should include what was done, current state, and next step when unresolved.',
+      '- Keep output concise unless the user asks for more depth.',
+      '- Before declaring completion, verify relevant changes with appropriate checks/tests and report what was verified.',
+      '- Provide decision summaries and avoid exposing hidden reasoning.'
+    ].join('\n')
+  );
+
+  return sections;
 }
 
 function truncateText(value: string, maxChars: number): string {
@@ -347,11 +431,18 @@ function memoryNamespace(mode: 'chat' | 'orchestration', workspaceDir: string, s
   return trimmedSuffix ? `${mode}:${workspaceDir}:${trimmedSuffix}` : `${mode}:${workspaceDir}`;
 }
 
-function runtimeContext(sender?: Electron.WebContents, eventChannel: 'chat:event' | 'orch:event' = 'chat:event') {
+function runtimeContext(
+  sender?: Electron.WebContents,
+  eventChannel: 'chat:event' | 'orch:event' = 'chat:event',
+  abortSignal?: AbortSignal,
+  promptSpecVersion: PromptSpecVersion = DEFAULT_PROMPT_SPEC_VERSION
+) {
   return {
     workspaceDir: selectedWorkspaceDir,
     rootDir: selectedWorkspaceDir,
     referenceWorkspaces,
+    abortSignal,
+    promptSpecVersion,
     onTerminalOutput: sender
       ? (payload: { source: 'stdout' | 'stderr'; text: string }) => {
           sender.send('terminal:output', payload);
@@ -437,7 +528,8 @@ function workspaceState(): WorkspaceState {
   return {
     workspaceDir: selectedWorkspaceDir,
     rootDir: selectedWorkspaceDir,
-    referenceWorkspaces
+    referenceWorkspaces,
+    promptSpecVersion: DEFAULT_PROMPT_SPEC_VERSION
   };
 }
 
@@ -740,6 +832,8 @@ ipcMain.handle(
     
     const messages: ChatMessage[] = [];
     const systemPromptSections: string[] = [];
+    const promptSpecVersion = normalizePromptSpecVersion(payload.promptSpecVersion);
+    let recalledMemorySystemSection = '';
     let recalledPromptTokens = 0;
 
     try {
@@ -762,10 +856,14 @@ ipcMain.handle(
           );
           const memoryLines = formatMemoryInjection(recalled, injectionLimits);
           recalledPromptTokens = estimateTokensFromText(memoryLines);
-          systemPromptSections.push(
+          const memorySection =
             'Relevant long-term memory from prior interactions is available below. Use it only when useful and ignore stale items.\n\n' +
-            memoryLines
-          );
+            memoryLines;
+          if (promptSpecVersion === 'v2') {
+            recalledMemorySystemSection = memorySection;
+          } else {
+            systemPromptSections.push(memorySection);
+          }
           event.sender.send('chat:event', `[memory] injected ${recalled.length} memory item(s).`);
         }
       }
@@ -787,9 +885,13 @@ ipcMain.handle(
         ? payload.toolNames
         : availableToolNames.filter(name => name !== 'delete_path' && name !== 'git_commit');
 
-      const toolGuidance = formatToolAvailabilityGuidance(requestedToolNames);
-      if (toolGuidance) {
-        systemPromptSections.push(toolGuidance);
+      if (promptSpecVersion === 'v2') {
+        systemPromptSections.push(...formatChatV2CorePromptSections(requestedToolNames));
+      } else {
+        const toolGuidance = formatToolAvailabilityGuidance(requestedToolNames);
+        if (toolGuidance) {
+          systemPromptSections.push(toolGuidance);
+        }
       }
 
       const environmentGuidance = formatEnvironmentGuidance(selectedWorkspaceDir);
@@ -799,6 +901,10 @@ ipcMain.handle(
 
       if (referenceWorkspaces.length > 0) {
         systemPromptSections.push(formatReferenceWorkspaceGuidance(referenceWorkspaces));
+      }
+
+      if (promptSpecVersion === 'v2' && recalledMemorySystemSection) {
+        systemPromptSections.push(recalledMemorySystemSection);
       }
 
       if (systemPromptSections.length > 0) {
@@ -815,7 +921,7 @@ ipcMain.handle(
 
       // Build runtime context with memory access for this request
       const chatRuntimeContext = {
-        ...runtimeContext(event.sender, 'chat:event'),
+        ...runtimeContext(event.sender, 'chat:event', abortController.signal, promptSpecVersion),
         turboMemory: turboMemory ?? undefined,
         llmConfig: config,
         subAgentConfig: subAgentProfiles[0]?.config,
@@ -834,6 +940,8 @@ ipcMain.handle(
           });
         }
       };
+
+      event.sender.send('chat:event', `[prompt] using ${promptSpecVersion} prompt policy.`);
 
       const toolDefs = getAllowedToolDefinitions(requestedToolNames, chatRuntimeContext);
 
@@ -971,12 +1079,30 @@ ipcMain.handle(
 );
 
 ipcMain.handle('chat:stop', async () => {
-  if (!activeChatAbortController) {
+  let stopped = false;
+
+  if (activeChatAbortController) {
+    activeChatAbortController.abort();
+    activeChatAbortController = null;
+    stopped = true;
+  }
+
+  if (pendingQueryUserResolve) {
+    const resolve = pendingQueryUserResolve;
+    pendingQueryUserResolve = null;
+    resolve({ cancelled: true, answer: '[interrupted by user]' });
+    stopped = true;
+  }
+
+  if (activeTerminalProcess) {
+    activeTerminalProcess.kill('SIGINT');
+    stopped = true;
+  }
+
+  if (!stopped) {
     return { stopped: false, reason: 'no_active_chat' };
   }
 
-  activeChatAbortController.abort();
-  activeChatAbortController = null;
   return { stopped: true };
 });
 
@@ -1345,6 +1471,7 @@ ipcMain.handle(
       fallbackConfig,
       legacySubAgentConfig
     );
+    const promptSpecVersion = normalizePromptSpecVersion(payload.promptSpecVersion);
     const subAgentActiveCounts: Record<string, number> = {};
     
     // Build list of namespaces to retrieve from (global + workspace)
@@ -1361,7 +1488,7 @@ ipcMain.handle(
 
     // Build runtime context with memory access for orchestration
     const orchRuntimeContext = {
-      ...runtimeContext(event.sender, 'orch:event'),
+      ...runtimeContext(event.sender, 'orch:event', abortController.signal, promptSpecVersion),
       turboMemory: turboMemory ?? undefined,
       llmConfig: normalizedPlan?.steps?.[0]
         ? {
@@ -1377,8 +1504,11 @@ ipcMain.handle(
       subAgentConfig: subAgentProfiles[0]?.config,
       subAgentProfiles,
       subAgentActiveCounts,
-      activeNamespaces: orchestrationNamespaces.length > 0 ? orchestrationNamespaces : undefined
+      activeNamespaces: orchestrationNamespaces.length > 0 ? orchestrationNamespaces : undefined,
+      promptSpecVersion
     };
+
+    event.sender.send('orch:event', `[prompt] using ${promptSpecVersion} prompt policy.`);
 
     try {
       const run = await runOrchestration(normalizedPlan, payload.prompt, {

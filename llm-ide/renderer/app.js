@@ -34,6 +34,7 @@ const settingsState = {
   orchestrationMemoryNamespace: '',
   orchestrationMemoryGlobalNamespace: '',
   chatDebugDumpsEnabled: true,
+  promptSpecVersion: 'v2',
   chatSettingsCollapsed: true,
   contextUsageCollapsed: false,
   lockedNamespaces: []
@@ -111,6 +112,10 @@ function clampContextWindowTokens(value) {
 
 function normalizeProvider(value) {
   return String(value || '').trim().toLowerCase() === 'ollama' ? 'ollama' : 'openai-compatible';
+}
+
+function normalizePromptSpecVersion(value) {
+  return String(value || '').trim().toLowerCase() === 'v2' ? 'v2' : 'v1';
 }
 
 function clampSubAgentSpawnLimit(value) {
@@ -743,6 +748,7 @@ function loadSettings() {
     settingsState.orchestrationMemoryGlobalNamespace =
       String(parsed.orchestrationMemoryGlobalNamespace ?? settingsState.orchestrationMemoryGlobalNamespace).trim();
     settingsState.chatDebugDumpsEnabled = Boolean(parsed.chatDebugDumpsEnabled ?? true);
+    settingsState.promptSpecVersion = normalizePromptSpecVersion(parsed.promptSpecVersion ?? settingsState.promptSpecVersion);
     settingsState.chatSettingsCollapsed = Boolean(parsed.chatSettingsCollapsed ?? settingsState.chatSettingsCollapsed);
     settingsState.contextUsageCollapsed = Boolean(parsed.contextUsageCollapsed ?? settingsState.contextUsageCollapsed);
     settingsState.lockedNamespaces = Array.isArray(parsed.lockedNamespaces) ? parsed.lockedNamespaces : [];
@@ -767,6 +773,7 @@ function loadSettings() {
     settingsState.orchestrationMemoryNamespace = '';
     settingsState.orchestrationMemoryGlobalNamespace = '';
     settingsState.chatDebugDumpsEnabled = true;
+    settingsState.promptSpecVersion = 'v2';
     settingsState.chatSettingsCollapsed = true;
     settingsState.contextUsageCollapsed = false;
     settingsState.lockedNamespaces = [];
@@ -1581,6 +1588,7 @@ function initSettingsMenu() {
   const subAgentProfilesEditor = document.getElementById('settingSubAgentProfilesEditor');
   const addSubAgentProfileButton = document.getElementById('settingAddSubAgentProfile');
   const chatDebugDumpsInput = document.getElementById('settingChatDebugDumpsEnabled');
+  const promptSpecVersionInput = document.getElementById('settingPromptSpecVersion');
   const cancel = document.getElementById('settingsCancel');
   const save = document.getElementById('settingsSave');
 
@@ -1759,6 +1767,7 @@ function initSettingsMenu() {
     }
     renderSubAgentProfilesEditor();
     chatDebugDumpsInput.checked = settingsState.chatDebugDumpsEnabled;
+    promptSpecVersionInput.value = normalizePromptSpecVersion(settingsState.promptSpecVersion);
     modal.classList.add('open');
     modal.setAttribute('aria-hidden', 'false');
     input.focus();
@@ -1794,6 +1803,7 @@ function initSettingsMenu() {
     settingsState.subAgentApiKey = settingsState.subAgentProfiles[0].apiKey;
     settingsState.subAgentContextWindowTokens = settingsState.subAgentProfiles[0].contextWindowTokens;
     settingsState.chatDebugDumpsEnabled = Boolean(chatDebugDumpsInput.checked);
+    settingsState.promptSpecVersion = normalizePromptSpecVersion(promptSpecVersionInput.value);
 
     chatProvider.value = settingsState.provider;
     chatEndpoint.value = settingsState.endpoint;
@@ -2316,8 +2326,8 @@ async function initChat() {
       };
     }
 
-    // Expose read_file arguments to the user so they can see which file (and any
-    // offset/limit) the model is reading, even when it iterates through a file.
+    // Expose read_file arguments to the user so they can see which file and
+    // chunk bounds the model is reading, even when it iterates through a file.
     if (raw.startsWith('tool-args:')) {
       const rest = raw.slice('tool-args:'.length).trim();
       let parsed;
@@ -2331,6 +2341,16 @@ async function initChat() {
       }
       if (parsed && typeof parsed === 'object' && parsed.path) {
         const parts = [`read ${parsed.path}`];
+        if (typeof parsed.startLine === 'number' && typeof parsed.endLine === 'number') {
+          parts.push(`lines=${parsed.startLine}-${parsed.endLine}`);
+        } else if (typeof parsed.startLine === 'number') {
+          parts.push(`startLine=${parsed.startLine}`);
+        } else if (typeof parsed.endLine === 'number') {
+          parts.push(`endLine=${parsed.endLine}`);
+        }
+        if (typeof parsed.maxChars === 'number') parts.push(`maxChars=${parsed.maxChars}`);
+        if (typeof parsed.scope === 'string' && parsed.scope) parts.push(`scope=${parsed.scope}`);
+        // Keep legacy fields visible if present in older event payloads.
         if (typeof parsed.offset === 'number') parts.push(`offset=${parsed.offset}`);
         if (typeof parsed.limit === 'number') parts.push(`limit=${parsed.limit}`);
         return {
@@ -2993,6 +3013,7 @@ async function initChat() {
         memoryNamespace: selectedChatMemoryNamespace() || undefined,
         memoryGlobalNamespace: selectedChatMemoryGlobalNamespace() || undefined,
         chatDebugDumpsEnabled: settingsState.chatDebugDumpsEnabled,
+        promptSpecVersion: normalizePromptSpecVersion(settingsState.promptSpecVersion),
         maxToolTurns: settingsState.maxToolTurns,
         toolNames: [
           'list_reference_workspaces',
@@ -3045,9 +3066,12 @@ async function initChat() {
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       appendLog(conversation, `[error] ${errorMsg}`);
+      const isCanceled = /canceled/i.test(errorMsg);
+      if (isCanceled && assistantMarkdownRaw.trim()) {
+        activeChatMessages.push({ role: 'assistant', content: assistantMarkdownRaw });
+      }
       await persistActiveChatSession();
       await refreshChatSessions();
-      const isCanceled = /canceled/i.test(errorMsg);
       status.textContent = isCanceled ? 'Chat stopped' : 'Error';
       if (!isCanceled) {
         showToast({ type: 'error', title: 'Prompt Failed', message: errorMsg });
@@ -4064,7 +4088,8 @@ async function initOrchestration() {
         subAgentConfigs: buildSubAgentConfigs(),
         memoryNamespace: selectedOrchestrationMemoryNamespace() || undefined,
         memoryGlobalNamespace: selectedOrchestrationMemoryGlobalNamespace() || undefined,
-        requestTimeoutMs: settingsState.requestTimeoutMs
+        requestTimeoutMs: settingsState.requestTimeoutMs,
+        promptSpecVersion: normalizePromptSpecVersion(settingsState.promptSpecVersion)
       });
       renderOrchestrationOutput(result, promptText, parsed);
       renderOutputLogEntry(result, promptText, parsed);

@@ -4,7 +4,7 @@ import simpleGit from 'simple-git';
 import axios from 'axios';
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import { chatWithTools } from './llmClient';
-import { ToolDefinition, LLMConfig, ReferenceWorkspace, ChatMessage } from '../shared/types';
+import { ToolDefinition, LLMConfig, PromptSpecVersion, ReferenceWorkspace, ChatMessage } from '../shared/types';
 import type { TurboVecMemory, TurboVecNamespaceDiagnostics } from './turboVecMemory';
 
 interface RuntimeSubAgentProfile {
@@ -32,6 +32,8 @@ type QueryUserCallback = (request: QueryUserRequest) => Promise<QueryUserRespons
 interface RuntimeContext {
   workspaceDir: string;
   rootDir: string;
+  abortSignal?: AbortSignal;
+  promptSpecVersion?: PromptSpecVersion;
   referenceWorkspaces?: ReferenceWorkspace[];
   onTerminalOutput?: (payload: { source: 'stdout' | 'stderr'; text: string }) => void;
   onTerminalEvent?: (payload: { type: 'start' | 'end'; command: string; cwd: string; code?: number | null; signal?: string | null }) => void;
@@ -99,6 +101,10 @@ function isScopeWritable(scope: ToolScope, context?: RuntimeContext): boolean {
 
 function defaultRootDir(): string {
   return process.cwd();
+}
+
+function normalizePromptSpecVersion(value: unknown): PromptSpecVersion {
+  return String(value ?? '').trim().toLowerCase() === 'v2' ? 'v2' : 'v1';
 }
 
 function effectiveContext(context?: RuntimeContext): RuntimeContext {
@@ -1606,6 +1612,26 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
     let stderrTruncated = false;
     let completed = false;
 
+    const handleAbort = () => {
+      if (completed) {
+        return;
+      }
+      child.kill('SIGINT');
+      setTimeout(() => {
+        if (!completed) {
+          child.kill('SIGTERM');
+        }
+      }, 500);
+    };
+
+    if (context?.abortSignal) {
+      if (context.abortSignal.aborted) {
+        handleAbort();
+      } else {
+        context.abortSignal.addEventListener('abort', handleAbort, { once: true });
+      }
+    }
+
     const finish = (result: {
       success: boolean;
       code: number | null;
@@ -1616,6 +1642,7 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
         return;
       }
       completed = true;
+      context?.abortSignal?.removeEventListener('abort', handleAbort);
 
       if (result.stderrExtra) {
         stderr += result.stderrExtra;
@@ -2062,14 +2089,34 @@ async function spawnSubAgent(
   const childToolDefs = getAllowedToolDefinitions(childToolNames, context);
   const childAllowed = new Set(childToolNames);
   const maxToolTurns = Math.max(1, Math.min(50, Math.floor(Number(args.maxToolTurns ?? 8) || 8)));
+  const promptSpecVersion = normalizePromptSpecVersion(context?.promptSpecVersion);
 
   const messages: ChatMessage[] = [
     {
       role: 'system',
-      content:
-        'You are a focused sub-agent. Complete only the scoped task below. ' +
-        'Do not expand scope. Use tools only when necessary. ' +
-        'Return concise findings the parent model can immediately act on.'
+      content: promptSpecVersion === 'v2'
+        ? 'Identity and mission:\n' +
+          '- You are a focused sub-agent for an agentic coding workflow.\n' +
+          '- Complete only the scoped task and produce handoff-ready findings.\n\n' +
+          'Behavioral and tool policy:\n' +
+          '- Do not expand scope.\n' +
+          '- Keep the approach simple and avoid unnecessary dependencies.\n' +
+          '- Preserve stable behavior by default; prefer additive or reversible changes when possible.\n' +
+          '- Tools are optional; use them only when needed for evidence or state changes.\n' +
+          '- Never retry a failed tool call with identical arguments.\n' +
+          '- For bugs, test failures, or unexpected behavior, investigate root cause first before applying fixes.\n' +
+          '- On failure, change arguments, tool choice, sequence, or strategy.\n' +
+          '- If no new evidence appears after two investigation steps, summarize the best hypothesis and next action, then ask whether to continue deeper.\n' +
+          '- If confidence is low or progress stalls, stop early and report blocker plus best partial findings.\n\n' +
+          'Output contract:\n' +
+          '- Before declaring completion, verify relevant changes with appropriate checks/tests and report what was verified.\n' +
+          '- Return concise findings with key observations, evidence, and recommended next step.'
+        :
+          'You are a focused sub-agent. Complete only the scoped task below. ' +
+          'Do not expand scope. Use tools only when necessary. ' +
+          'Never retry a failed tool call with identical arguments; read the error and change the call or approach. ' +
+          'If progress stalls, stop and report the blocker to the parent model. ' +
+          'Return concise findings the parent model can immediately act on.'
     },
     {
       role: 'user',
@@ -2090,6 +2137,7 @@ async function spawnSubAgent(
     turboMemory: context?.turboMemory,
     llmConfig: parentConfig,
     subAgentConfig,
+    promptSpecVersion,
     subAgentProfiles: profiles,
     subAgentActiveCounts: activeCounts,
     activeNamespaces: context?.activeNamespaces,
@@ -2273,11 +2321,37 @@ async function queryUser(
   }
 
   try {
-    return await context.onQueryUser({
+    const request: QueryUserRequest = {
       question,
       responseType,
       options,
       allowMultiple
+    };
+
+    if (!context.abortSignal) {
+      return await context.onQueryUser(request);
+    }
+
+    if (context.abortSignal.aborted) {
+      return { cancelled: true };
+    }
+
+    return await new Promise<QueryUserResponse>(resolve => {
+      const onAbort = () => {
+        context.abortSignal?.removeEventListener('abort', onAbort);
+        resolve({ cancelled: true });
+      };
+
+      context.abortSignal?.addEventListener('abort', onAbort, { once: true });
+      context.onQueryUser?.(request)
+        .then(response => {
+          context.abortSignal?.removeEventListener('abort', onAbort);
+          resolve(response);
+        })
+        .catch(() => {
+          context.abortSignal?.removeEventListener('abort', onAbort);
+          resolve({ cancelled: true });
+        });
     });
   } catch (error) {
     return {

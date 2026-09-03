@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LocalCode LLM IDE</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="./styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <img src="../build/icons/LocalCode.png" alt="LocalCode" class="brand-logo" />
+        <span>LocalCode</span>
+      </div>
+      <div class="topbar-actions">
+        <div class="meta">Standalone LLM IDE Platform</div>
+        <button id="openSettings" type="button">Settings</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="filetree-panel">
+        <div class="filetree-header">
+          <strong>Workspace</strong>
+          <div class="filetree-actions">
+            <button id="workspaceSelect">Select</button>
+            <button id="workspaceRefresh">Refresh</button>
+          </div>
+        </div>
+        <div id="workspacePath" class="workspace-path"></div>
+        <div id="filetree" class="filetree"></div>
+      </section>
+
+      <div id="filetreeResizeHandle" class="workspace-resizer workspace-resizer-left" role="separator" aria-label="Resize workspace file tree" tabindex="0"></div>
+
+      <section class="editor-panel">
+        <div class="editor-header">
+          <span>Monaco Editor</span>
+          <div class="editor-actions">
+            <button id="saveFile">Save File</button>
+            <button id="saveAllFiles">Save All</button>
+            <button id="openSample">Load Sample</button>
+          </div>
+        </div>
+        <div id="editorTabs" class="editor-tabs"></div>
+        <div id="editor"></div>
+        <div id="terminalResizeHandle" class="terminal-resizer" role="separator" aria-label="Resize terminal panel" tabindex="0"></div>
+        <div class="terminal-panel">
+          <div class="terminal-header">
+            <span>Model Terminal</span>
+            <button id="terminalClear" type="button">Clear</button>
+          </div>
+          <pre id="terminalOutput" class="terminal-output"></pre>
+          <div class="terminal-input-row">
+            <input id="terminalInput" placeholder="Type a command, terminal input, or (ctrl+c)" />
+            <button id="terminalSend" type="button">Send</button>
+          </div>
+        </div>
+      </section>
+
+      <div id="sidePanelResizeHandle" class="workspace-resizer workspace-resizer-right" role="separator" aria-label="Resize right side panel" tabindex="0"></div>
+
+      <aside class="side-panel">
+        <div class="tabs">
+          <button id="chatTab" class="tab active">Chat</button>
+          <button id="orchTab" class="tab">Orchestration</button>
+          <button id="diagTab" class="tab">Diagnostics</button>
+        </div>
+
+        <section id="contextUsagePanel" class="context-usage-panel">
+          <div class="context-usage-header">
+            <strong>Model Context Usage</strong>
+            <span id="contextUsageStamp" class="context-usage-stamp">No usage yet</span>
+          </div>
+          <div id="contextUsageList" class="context-usage-list"></div>
+        </section>
+
+        <section id="chatView" class="view active">
+          <div class="chat-session-header">
+            <label class="label" for="chatSessionList">Chat History</label>
+            <div class="chat-session-actions">
+              <button id="chatNewSession" type="button">New Chat</button>
+              <button id="chatDeleteSession" type="button">Delete Chat</button>
+            </div>
+          </div>
+          <select id="chatSessionList"></select>
+          <div id="chatSessionWorkspace" class="status chat-session-workspace"></div>
+          <div id="chatStatus" class="status">Idle</div>
+          <div id="chatConversation" class="log chat-log"></div>
+          <button id="chatSettingsToggle" type="button" class="chat-settings-toggle">Model Settings</button>
+          <div id="chatSettingsPanel" class="chat-settings-panel">
+            <label class="label">Provider</label>
+            <select id="chatProvider">
+              <option value="openai-compatible">openai-compatible</option>
+              <option value="ollama">ollama</option>
+            </select>
+            <label class="label">Endpoint</label>
+            <input id="chatEndpoint" value="http://localhost:11434/v1/chat/completions" />
+            <label class="label">Model</label>
+            <div class="row-inline">
+              <select id="chatModel"></select>
+              <button id="chatRefreshModels" type="button">Refresh Models</button>
+            </div>
+            <label class="label">Context Window Tokens</label>
+            <input id="chatContextWindowTokens" type="number" min="1" step="1" placeholder="Auto-detect by model" />
+            <label class="label">API Key (optional)</label>
+            <input id="chatApiKey" type="password" placeholder="sk-..." />
+            <label class="label">Memory Namespace (optional)</label>
+            <select id="chatMemoryNamespace"></select>
+            <input id="chatNewMemoryNamespace" class="chat-new-namespace" placeholder="New namespace for this session" />
+          </div>
+          <label class="label">Prompt</label>
+          <textarea id="chatPrompt" placeholder="Ask for code, analysis, or generation..."></textarea>
+          <div class="actions actions-two">
+            <button id="chatSend">Send</button>
+            <button id="chatStop" type="button" disabled>Stop</button>
+          </div>
+        </section>
+
+        <section id="orchView" class="view">
+          <div id="orchStatus" class="status">Plan ready</div>
+          <label class="label" for="orchMemoryNamespace">Memory Namespace (optional)</label>
+          <select id="orchMemoryNamespace"></select>
+          <input id="orchNewMemoryNamespace" class="chat-new-namespace" placeholder="New namespace for this workflow" />
+          <label class="label">Orchestration Prompt</label>
+          <textarea id="orchPrompt" placeholder="What should this orchestration accomplish?"></textarea>
+          <div class="actions">
+            <button id="orchLoad">Load</button>
+            <button id="orchImport">Import JSON</button>
+            <button id="orchExport">Export JSON</button>
+            <button id="orchValidate">Validate</button>
+            <button id="orchSave">Save</button>
+            <button id="orchRun">Run</button>
+            <button id="orchStop" type="button" disabled>Stop</button>
+          </div>
+          <label class="label" for="orchPlanName">Workflow Name</label>
+          <input id="orchPlanName" placeholder="Planner -> Coder" />
+          <label class="label" for="orchPlanDescription">Workflow Description</label>
+          <textarea id="orchPlanDescription" placeholder="Describe what this workflow does"></textarea>
+          <div class="row-inline">
+            <label class="orch-tool-item">
+              <input id="orchLoopUntilComplete" type="checkbox" />
+              Loop Until Complete
+            </label>
+            <input id="orchMaxLoops" type="number" min="1" max="20" step="1" value="3" placeholder="Max loops" />
+          </div>
+          <label class="label" for="orchCompletionMarker">Completion Marker</label>
+          <input id="orchCompletionMarker" placeholder="TASK_COMPLETE" />
+          <div class="orch-workflow-header">
+            <span class="label">Workflow Steps</span>
+            <button id="orchAddStep" type="button">Add Step</button>
+          </div>
+          <div id="orchWorkflow" class="orch-workflow"></div>
+          <textarea id="orchPlan" class="plan orch-plan-hidden"></textarea>
+          <label class="label">Run Events</label>
+          <div id="orchEvents" class="log"></div>
+          <label class="label">Run Output</label>
+          <div id="orchOutput" class="log"></div>
+          <div class="actions actions-two">
+            <button id="orchClearOutputLog" type="button">Clear Output Log</button>
+            <button id="orchPopoutOutputLog" type="button">Popout Markdown Log</button>
+          </div>
+          <label class="label">Orchestration Output Log</label>
+          <div id="orchOutputLog" class="log"></div>
+        </section>
+
+        <section id="diagView" class="view">
+          <div id="diagStatus" class="status">TurboVec diagnostics not loaded.</div>
+          <div class="actions actions-two">
+            <button id="diagRefresh" type="button">Refresh</button>
+            <button id="diagCopy" type="button">Copy JSON</button>
+          </div>
+          <label class="label" for="diagNamespaceSelect">Clear Namespace</label>
+          <div class="row-inline">
+            <select id="diagNamespaceSelect"></select>
+            <button id="diagClearNamespace" type="button">Clear</button>
+          </div>
+          <div id="diagSummary" class="diag-summary"></div>
+          <label class="label">GraphRAG Retrieval Diagnostics</label>
+          <pre id="diagGraphRag" class="diag-raw"></pre>
+          <label class="label">Namespace Details</label>
+          <div id="diagNamespaces" class="log"></div>
+          <label class="label">Raw Diagnostics</label>
+          <pre id="diagRaw" class="diag-raw"></pre>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <div id="orchLogModal" class="settings-modal orchestration-log-modal" aria-hidden="true">
+    <div class="settings-card orchestration-log-card">
+      <div class="settings-header orchestration-log-header">
+        <strong>Orchestration Output Log</strong>
+        <div class="settings-actions">
+          <button id="orchLogExpandAll" type="button">Expand All</button>
+          <button id="orchLogCollapseAll" type="button">Collapse All</button>
+          <button id="orchLogClose" type="button">Close</button>
+        </div>
+      </div>
+      <div id="orchLogMarkdown" class="orchestration-log-markdown"></div>
+    </div>
+  </div>
+
+  <div id="settingsModal" class="settings-modal" aria-hidden="true">
+    <div class="settings-card">
+      <div class="settings-header">
+        <strong>Settings</strong>
+      </div>
+      <label class="label" for="settingMaxToolTurns">Max Tool Turns (Chat)</label>
+      <input id="settingMaxToolTurns" type="number" min="1" max="200" step="1" />
+      <label class="label" for="settingRequestTimeoutMs">LLM Request Timeout (ms)</label>
+      <input id="settingRequestTimeoutMs" type="number" min="1000" max="600000" step="1000" />
+      <label class="label" for="settingEndpoint">Default Endpoint</label>
+      <input id="settingEndpoint" placeholder="http://localhost:11434/v1/chat/completions" />
+      <label class="label" for="settingProvider">Default Provider</label>
+      <select id="settingProvider">
+        <option value="openai-compatible">openai-compatible</option>
+        <option value="ollama">ollama</option>
+      </select>
+      <label class="label" for="settingModel">Default Model</label>
+      <input id="settingModel" placeholder="llama3" />
+      <label class="label" for="settingApiKey">Default API Key (optional)</label>
+      <input id="settingApiKey" type="password" placeholder="sk-..." />
+      <div class="settings-help">Defaults: max tool turns 40, timeout 180000 ms (3 minutes).</div>
+      <div class="settings-actions">
+        <button id="settingsCancel" type="button">Cancel</button>
+        <button id="settingsSave" type="button">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="./app.js"></script>
+</body>
+</html>

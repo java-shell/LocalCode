@@ -42,6 +42,8 @@ export interface LLMConfig {
   requestTimeoutMs?: number;
 }
 
+export type PromptSpecVersion = 'v1' | 'v2';
+
 export interface SubAgentConfigProfile extends LLMConfig {
   id: string;
   label?: string;
@@ -62,6 +64,7 @@ export interface ChatStreamRequest {
   memoryGlobalNamespace?: string;
   contextWindowTokens?: number;
   chatDebugDumpsEnabled?: boolean;
+  promptSpecVersion?: PromptSpecVersion;
 }
 
 export interface OrchestrationRunRequest {
@@ -72,6 +75,7 @@ export interface OrchestrationRunRequest {
   memoryNamespace?: string;
   memoryGlobalNamespace?: string;
   requestTimeoutMs?: number;
+  promptSpecVersion?: PromptSpecVersion;
 }
 
 export interface TokenUsage {
@@ -263,6 +267,7 @@ export interface WorkspaceState {
   workspaceDir: string;
   rootDir: string;
   referenceWorkspaces?: ReferenceWorkspace[];
+  promptSpecVersion?: PromptSpecVersion;
 }
 
 

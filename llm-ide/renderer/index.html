@@ -313,6 +313,11 @@
             <input id="settingMaxToolTurns" type="number" min="1" max="200" step="1" />
             <label class="label" for="settingRequestTimeoutMs">Request Timeout (ms)</label>
             <input id="settingRequestTimeoutMs" type="number" min="1000" max="3600000" step="1000" />
+            <label class="label" for="settingPromptSpecVersion">Prompt Policy Version</label>
+            <select id="settingPromptSpecVersion">
+              <option value="v1">v1 (legacy)</option>
+              <option value="v2">v2 (revised)</option>
+            </select>
           </div>
           <div class="settings-help">Defaults: 40 tool turns, 180000 ms (3 minutes).</div>
           <label class="orch-tool-item settings-checkbox" for="settingChatDebugDumpsEnabled">

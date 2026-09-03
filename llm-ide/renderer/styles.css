@@ -172,6 +172,8 @@ body.advanced-fullscreen-active #orchAdvancedView.view.active {
   grid-template-rows: auto auto 1fr;
   min-height: 0;
   background: rgba(8, 18, 31, 0.6);
+  position: relative;
+  z-index: 2;
 }
 
 .filetree-header {
@@ -223,10 +225,29 @@ body.advanced-fullscreen-active #orchAdvancedView.view.active {
 
 .editor-panel {
   min-width: 0;
+  max-width: 100%;
   border-right: 1px solid var(--border);
   display: grid;
   grid-template-rows: 48px 40px minmax(180px, 1fr) 6px minmax(120px, var(--terminal-height));
   overflow: hidden;
+  contain: layout style paint;
+  position: relative;
+  z-index: 1;
+}
+
+/* Prevent Monaco Editor internal overlays from escaping their grid cell */
+.editor-panel .monaco-editor,
+.editor-panel .monaco-editor * {
+  max-width: 100% !important;
+}
+
+/* Clamp Monaco context menus and widgets to the editor surface bounds */
+.editor-panel .contextview,
+.editor-panel .suggest-widget,
+.editor-panel .hover-widget,
+.editor-panel .message-overlay {
+  position: absolute !important;
+  max-width: 100% !important;
 }
 
 .terminal-resizer {
@@ -268,6 +289,7 @@ body.advanced-fullscreen-active #orchAdvancedView.view.active {
 .editor-surface {
   position: relative;
   min-height: 0;
+  overflow: hidden;
 }
 
 #editor.editor-hidden {
@@ -277,6 +299,8 @@ body.advanced-fullscreen-active #orchAdvancedView.view.active {
 .markdown-preview {
   height: 100%;
   width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
   overflow: auto;
   padding: 14px;
   border-top: 1px solid var(--border);
@@ -1563,12 +1587,28 @@ button.btn-danger:hover:not(:disabled) {
   border-radius: 8px;
   padding: 10px;
   overflow: auto;
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .assistant-markdown pre code {
   background: transparent;
   border: none;
   padding: 0;
+  max-width: 100%;
+  word-break: break-word;
+  overflow-wrap: break-word;
+}
+
+.assistant-markdown code {
+  max-width: 100%;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.assistant-markdown img {
+  max-width: 100%;
+  height: auto;
 }
 
 .assistant-markdown blockquote {

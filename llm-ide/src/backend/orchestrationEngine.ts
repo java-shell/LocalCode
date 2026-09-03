@@ -10,6 +10,7 @@ import {
   OrchestrationRunResult,
   OrchestrationRunStep,
   OrchestrationStep,
+  PromptSpecVersion,
   ReferenceWorkspace,
   TokenUsage
 } from '../shared/types';
@@ -19,6 +20,7 @@ import { formatEnvironmentGuidance } from '../shared/environment';
 export interface RuntimeContext {
   workspaceDir: string;
   rootDir: string;
+  promptSpecVersion?: PromptSpecVersion;
   referenceWorkspaces?: ReferenceWorkspace[];
   turboMemory?: any; // TurboVecMemory instance for memory tools
   activeNamespaces?: string[]; // Namespaces to search by default
@@ -190,8 +192,83 @@ function formatStageToolAvailabilityGuidance(toolNames: string[]): string {
   return [
     'Tools are enabled for this stage.',
     'Use exact function names with valid JSON arguments.',
+    `Enabled tools: ${toolNames.join(', ')}`,
+    'Loop prevention policy:',
+    '- Do not repeat a failed tool call with identical arguments.',
+    '- Read tool error output and adjust arguments, tool choice, or sequence before retrying.',
+    '- If repeated attempts do not make progress, stop and report the blocker instead of looping.'
+  ].join('\n');
+}
+
+function normalizePromptSpecVersion(value: unknown): PromptSpecVersion {
+  return String(value ?? '').trim().toLowerCase() === 'v2' ? 'v2' : 'v1';
+}
+
+function formatStageToolDecisionPolicyV2(toolNames: string[]): string {
+  if (!Array.isArray(toolNames) || toolNames.length === 0) {
+    return '';
+  }
+
+  return [
+    'Tool decision policy:',
+    '- Tools are optional, not mandatory.',
+    '- Use tools when external evidence or state mutation is required.',
+    '- If no external verification or mutation is needed, respond directly.',
+    '- Choose the least risky tool first and provide valid JSON arguments.',
     `Enabled tools: ${toolNames.join(', ')}`
   ].join('\n');
+}
+
+function formatStageLoopRetryPolicyV2(): string {
+  return [
+    'Loop and retry policy:',
+    '- Never retry a failed tool call with identical arguments.',
+    '- For bugs, test failures, or unexpected behavior, investigate root cause first before proposing or applying fixes.',
+    '- After failure, change arguments, tool choice, sequence, or strategy before retrying.',
+    '- If no new evidence appears after two investigation steps, summarize the best hypothesis and next action, then ask whether to continue deeper.',
+    '- If two attempts on the same objective fail to make progress, stop and report a blocker.'
+  ].join('\n');
+}
+
+function formatStageV2CorePromptSections(toolNames: string[]): string[] {
+  const sections: string[] = [
+    [
+      'Identity and mission:',
+      '- You are an agentic coding assistant operating inside an orchestration stage.',
+      '- Complete this stage safely and produce handoff-ready output.'
+    ].join('\n'),
+    [
+      'Behavioral policy:',
+      '- Prefer the smallest sufficient change for this stage objective.',
+      '- Preserve existing behavior unless explicitly asked to break it.',
+      '- Prefer additive, reversible changes (flags/adapters) over replacing stable behavior.',
+      '- Keep solutions simple and avoid unnecessary dependencies.',
+      '- Surface blockers clearly when they occur.'
+    ].join('\n')
+  ];
+
+  const toolDecisionPolicy = formatStageToolDecisionPolicyV2(toolNames);
+  if (toolDecisionPolicy) {
+    sections.push(toolDecisionPolicy);
+  }
+
+  sections.push(
+    formatStageLoopRetryPolicyV2(),
+    [
+      'Ambiguity and escalation policy:',
+      '- Ask a targeted clarification when required parameters are missing.',
+      '- If assumptions are low-risk and reversible, proceed and state assumptions.',
+      '- Request confirmation before destructive or high-impact actions.'
+    ].join('\n'),
+    [
+      'Output contract:',
+      '- Include what was done, current stage state, and next handoff step if unresolved.',
+      '- Verify relevant changes using appropriate checks/tests and report what was verified.',
+      '- Keep output concise and stage-completion oriented.'
+    ].join('\n')
+  );
+
+  return sections;
 }
 
 function matchesBranchPattern(matchPattern: string | undefined, value: string): boolean {
@@ -361,9 +438,21 @@ async function runStepWithRetries(
   let recalledPromptTokens = 0;
   let completionSummary = '';
   let taskCompleted = false;
+  const promptSpecVersion = normalizePromptSpecVersion(runtimeContext?.promptSpecVersion);
 
   while (attempt <= maxRetries) {
     const messages: ChatMessage[] = [];
+
+    if (promptSpecVersion === 'v2') {
+      for (const section of formatStageV2CorePromptSections(allowedToolNames)) {
+        messages.push({ role: 'system', content: section });
+      }
+      messages.push({
+        role: 'system',
+        content: 'Orchestration stage overlay: honor stage objective and constraints, and emit completion-oriented handoff output.'
+      });
+    }
+
     if (step.systemPrompt?.trim()) {
       messages.push({ role: 'system', content: step.systemPrompt });
     }
@@ -405,9 +494,11 @@ async function runStepWithRetries(
       runtimeContext?.referenceWorkspaces,
       allowedToolNames.includes('list_reference_workspaces')
     );
-    const stageToolGuidance = formatStageToolAvailabilityGuidance(allowedToolNames);
-    if (stageToolGuidance) {
-      messages.push({ role: 'system', content: stageToolGuidance });
+    if (promptSpecVersion === 'v1') {
+      const stageToolGuidance = formatStageToolAvailabilityGuidance(allowedToolNames);
+      if (stageToolGuidance) {
+        messages.push({ role: 'system', content: stageToolGuidance });
+      }
     }
     if (referenceGuidance) {
       messages.push({ role: 'system', content: referenceGuidance });
@@ -444,6 +535,7 @@ async function runStepWithRetries(
           const stepRuntimeContext: RuntimeContext = {
             workspaceDir: runtimeContext?.workspaceDir ?? process.cwd(),
             rootDir: runtimeContext?.rootDir ?? process.cwd(),
+            promptSpecVersion,
             referenceWorkspaces: runtimeContext?.referenceWorkspaces,
             turboMemory: runtimeContext?.turboMemory,
             activeNamespaces: runtimeContext?.activeNamespaces,

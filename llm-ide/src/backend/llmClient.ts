@@ -105,6 +105,7 @@ export interface ChatWithToolsResult {
 
 type ChatWithToolsDebug = NonNullable<ChatWithToolsResult['debug']>;
 const MAX_TOOL_RESULT_MESSAGE_CHARS = 16000;
+const MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS = 3;
 
 function clampToolResultForPrompt(raw: string): string {
   if (raw.length <= MAX_TOOL_RESULT_MESSAGE_CHARS) {
@@ -1690,12 +1691,13 @@ export async function chatWithTools(
     }
   }
 
-  // Track the last executed tool call so we can detect direct-sequence repeats —
+  // Track the last requested tool call so we can detect direct-sequence repeats —
   // the same tool called with identical arguments back-to-back. Such a repeat is
-  // almost always a broken loop, so we stop re-executing and tell the model to
-  // proceed differently. Legitimate iteration (e.g. read_file with a changing
-  // offset/limit) uses different arguments each time and is unaffected.
-  let lastToolSignature = '';
+  // almost always a broken loop. We first block individual repeats, then hard-stop
+  // the session when the same call is requested more than the configured threshold.
+  // Legitimate iteration (e.g. read_file with changing bounds) has different args.
+  let lastToolCallKey = '';
+  let consecutiveIdenticalToolCallCount = 0;
 
   for (let i = 0; i < maxTurns; i += 1) {
     onEvent?.(`llm-turn:${i + 1}/${maxTurns}`);
@@ -2019,7 +2021,74 @@ export async function chatWithTools(
       // and feed the model a hint to proceed differently. We only treat *consecutive*
       // identical calls as a loop — a later re-read after other work is fine.
       const signature = stableSignature(summarizedArgs);
-      if (signature && signature === lastToolSignature) {
+      const currentToolCallKey = signature ? `${toolName}:${signature}` : '';
+      const isConsecutiveRepeat = Boolean(currentToolCallKey) && currentToolCallKey === lastToolCallKey;
+      if (isConsecutiveRepeat) {
+        consecutiveIdenticalToolCallCount += 1;
+      } else if (currentToolCallKey) {
+        lastToolCallKey = currentToolCallKey;
+        consecutiveIdenticalToolCallCount = 1;
+      } else {
+        lastToolCallKey = '';
+        consecutiveIdenticalToolCallCount = 0;
+      }
+
+      if (isConsecutiveRepeat && consecutiveIdenticalToolCallCount > MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS) {
+        const repeatError =
+          `Tool ${toolName} was requested ${consecutiveIdenticalToolCallCount} times in a row with identical arguments. ` +
+          'Ending this session to prevent a loop and requesting a final summary.';
+
+        onEvent?.(`tool-repeat-threshold:${toolName}:${consecutiveIdenticalToolCallCount}`);
+        messages.push({
+          role: 'tool',
+          tool_call_id: call.id,
+          content: clampToolResultForPrompt(safeJsonStringify({
+            ok: false,
+            error: repeatError
+          }))
+        });
+
+        let summaryText = '';
+        try {
+          const summary = await requestAssistantWithoutTools(
+            'A repeated identical tool-call loop was detected and the tool session was stopped. ' +
+            'Do not call tools or include internal reasoning. ' +
+            'Provide a concise Markdown final summary with: (1) what was completed, (2) what remains, and (3) the best next user action.',
+            {
+              disableThinking: true,
+              normalizeOutput: true
+            }
+          );
+          if (summary) {
+            summaryText = summary;
+            onEvent?.('final-summary:received:tool-repeat-threshold');
+          } else {
+            onEvent?.('final-summary:empty:tool-repeat-threshold');
+          }
+        } catch (error) {
+          onEvent?.(`final-summary:failed:tool-repeat-threshold:${error instanceof Error ? error.message : String(error)}`);
+        }
+
+        debugTurns.push({
+          turn: i + 1,
+          promptTokens: usage.promptTokens,
+          completionTokens: usage.completionTokens,
+          totalTokens: usage.totalTokens,
+          messageCountBefore,
+          messageCountAfter: messages.length,
+          assistantToolCalls
+        });
+
+        return {
+          text: summaryText ||
+            'Session stopped due to repeated identical tool calls. Summary unavailable. Please adjust strategy and continue.',
+          usage: usageTotals,
+          continuationSummary: summaryText || undefined,
+          debug: buildDebug()
+        };
+      }
+
+      if (isConsecutiveRepeat && signature) {
         onEvent?.(`tool-args:${toolName}:${JSON.stringify(summarizedArgs)}`);
         onEvent?.(`tool-repeat:${toolName}`);
         messages.push({
@@ -2032,18 +2101,51 @@ export async function chatWithTools(
         });
         continue;
       }
-      lastToolSignature = signature;
 
-      // Expose read_file arguments to the user so they can see which file (and any
-      // offset/limit) the model is reading, even when it iterates through a file.
+      // Expose read_file arguments to the user so they can see which file and
+      // chunk bounds the model is reading, even when it iterates through a file.
       if (toolName === 'read_file') {
         const pathArg = String(summarizedArgs.path ?? '');
+        const startLineArg = summarizedArgs.startLine;
+        const endLineArg = summarizedArgs.endLine;
+        const maxCharsArg = summarizedArgs.maxChars;
+        const scopeArg = summarizedArgs.scope;
         const offsetArg = summarizedArgs.offset;
         const limitArg = summarizedArgs.limit;
+        const toolArgsForEvent: Record<string, unknown> = { path: pathArg };
+
+        const startLineNumber = Number(startLineArg);
+        if (startLineArg !== undefined && Number.isFinite(startLineNumber)) {
+          toolArgsForEvent.startLine = Math.trunc(startLineNumber);
+        }
+
+        const endLineNumber = Number(endLineArg);
+        if (endLineArg !== undefined && Number.isFinite(endLineNumber)) {
+          toolArgsForEvent.endLine = Math.trunc(endLineNumber);
+        }
+
+        const maxCharsNumber = Number(maxCharsArg);
+        if (maxCharsArg !== undefined && Number.isFinite(maxCharsNumber)) {
+          toolArgsForEvent.maxChars = Math.trunc(maxCharsNumber);
+        }
+
+        if (scopeArg !== undefined) {
+          toolArgsForEvent.scope = String(scopeArg);
+        }
+
+        // Keep legacy fields visible for compatibility with older prompts/tool schemas.
+        const offsetNumber = Number(offsetArg);
+        if (offsetArg !== undefined && Number.isFinite(offsetNumber)) {
+          toolArgsForEvent.offset = Math.trunc(offsetNumber);
+        }
+
+        const limitNumber = Number(limitArg);
+        if (limitArg !== undefined && Number.isFinite(limitNumber)) {
+          toolArgsForEvent.limit = Math.trunc(limitNumber);
+        }
+
         onEvent?.(`tool-args:${toolName}:${JSON.stringify({
-          path: pathArg,
-          ...(offsetArg !== undefined ? { offset: Number(offsetArg) } : {}),
-          ...(limitArg !== undefined ? { limit: Number(limitArg) } : {})
+          ...toolArgsForEvent
         })}`);
       }
 
