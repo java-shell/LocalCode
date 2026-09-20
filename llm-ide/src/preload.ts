@@ -12,6 +12,8 @@ import {
   OrchestrationImportResult,
   OrchestrationPlan,
   OrchestrationRunResult,
+  NotifySettings,
+  NotifyTestResult,
   WorkspaceState,
   WorkspaceTreeNode,
   QueryUserRequest,
@@ -134,6 +136,9 @@ const api = {
   },
   stopOrchestration: async (): Promise<{ stopped: boolean; reason?: string }> => {
     return ipcRenderer.invoke('orch:stop');
+  },
+  testNotification: async (payload: NotifySettings): Promise<NotifyTestResult> => {
+    return ipcRenderer.invoke('notify:test', payload);
   },
   getWorkspaceState: async (): Promise<WorkspaceState> => ipcRenderer.invoke('workspace:get-state'),
   selectWorkspaceDirectory: async (): Promise<WorkspaceState> =>

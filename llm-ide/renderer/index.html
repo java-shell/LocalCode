@@ -327,6 +327,39 @@
         </section>
 
         <section class="settings-section">
+          <div class="settings-section-title">External Notifications (ntfy)</div>
+          <label class="orch-tool-item settings-checkbox" for="settingNotifyEnabled">
+            <input id="settingNotifyEnabled" type="checkbox" />
+            Send notifications to my ntfy topic
+          </label>
+          <div class="settings-grid">
+            <label class="label" for="settingNotifyNtfyTopic">Topic (or full URL)</label>
+            <input id="settingNotifyNtfyTopic" placeholder="my-localcode-alerts" />
+            <label class="label" for="settingNotifyNtfyServer">Server</label>
+            <input id="settingNotifyNtfyServer" placeholder="https://ntfy.sh" />
+            <label class="label" for="settingNotifyRateLimitSeconds">Repeat suppression (s)</label>
+            <input id="settingNotifyRateLimitSeconds" type="number" min="0" max="3600" step="5" />
+          </div>
+          <div class="settings-help">
+            Events to send (leave none checked to send all):
+          </div>
+          <div id="settingNotifyEvents" class="notify-event-list"></div>
+          <label class="orch-tool-item settings-checkbox" for="settingNotifyIncludeExcerpt">
+            <input id="settingNotifyIncludeExcerpt" type="checkbox" />
+            Include a response excerpt (sends model output off this machine)
+          </label>
+          <div class="settings-actions">
+            <button id="settingNotifyTest" type="button">Send Test Notification</button>
+          </div>
+          <div id="settingNotifyStatus" class="settings-help"></div>
+          <div class="settings-help">
+            Sent from the main process, so they arrive even when this window is minimized.
+            The topic name is a secret &mdash; anyone who knows it can read your notifications.
+            See <code>NTFY.md</code> for setup.
+          </div>
+        </section>
+
+        <section class="settings-section">
           <div class="settings-section-title">Default Model Connection</div>
           <div class="settings-grid">
             <label class="label" for="settingProvider">Provider</label>

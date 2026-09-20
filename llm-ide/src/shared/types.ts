@@ -52,6 +52,35 @@ export interface SubAgentConfigProfile extends LLMConfig {
   maxSpawnsPerRun?: number;
 }
 
+/**
+ * Outbound notification settings (ntfy only). Mirrors `NotifyConfig` in
+ * `src/backend/notify.ts`; kept here so it can travel over IPC.
+ */
+export interface NotifySettings {
+  notifyEnabled?: boolean;
+  notifyNtfyTopic?: string;
+  notifyNtfyServer?: string;
+  notifyEvents?: string[];
+  notifyIncludeExcerpt?: boolean;
+  notifyPriority?: number;
+  notifyRateLimitSeconds?: number;
+  notifyTimeoutMs?: number;
+}
+
+export type NotifyEventKind =
+  | 'chat.completed'
+  | 'chat.input_needed'
+  | 'chat.error'
+  | 'orchestration.completed';
+
+export interface NotifyTestResult {
+  ok: boolean;
+  skipped?: boolean;
+  reason?: string;
+  status?: number;
+}
+
+
 export interface ChatStreamRequest {
   config: LLMConfig;
   subAgentConfig?: LLMConfig;
@@ -65,6 +94,7 @@ export interface ChatStreamRequest {
   contextWindowTokens?: number;
   chatDebugDumpsEnabled?: boolean;
   promptSpecVersion?: PromptSpecVersion;
+  notify?: NotifySettings;
 }
 
 export interface OrchestrationRunRequest {
@@ -76,6 +106,7 @@ export interface OrchestrationRunRequest {
   memoryGlobalNamespace?: string;
   requestTimeoutMs?: number;
   promptSpecVersion?: PromptSpecVersion;
+  notify?: NotifySettings;
 }
 
 export interface TokenUsage {

@@ -35,6 +35,13 @@ const settingsState = {
   orchestrationMemoryGlobalNamespace: '',
   chatDebugDumpsEnabled: true,
   promptSpecVersion: 'v2',
+  notifyEnabled: false,
+  notifyNtfyTopic: '',
+  notifyNtfyServer: 'https://ntfy.sh',
+  notifyEvents: ['chat.completed', 'chat.input_needed', 'chat.error'],
+  notifyIncludeExcerpt: false,
+  notifyPriority: 0,
+  notifyRateLimitSeconds: 15,
   chatSettingsCollapsed: true,
   contextUsageCollapsed: false,
   lockedNamespaces: []
@@ -749,6 +756,16 @@ function loadSettings() {
       String(parsed.orchestrationMemoryGlobalNamespace ?? settingsState.orchestrationMemoryGlobalNamespace).trim();
     settingsState.chatDebugDumpsEnabled = Boolean(parsed.chatDebugDumpsEnabled ?? true);
     settingsState.promptSpecVersion = normalizePromptSpecVersion(parsed.promptSpecVersion ?? settingsState.promptSpecVersion);
+    settingsState.notifyEnabled = Boolean(parsed.notifyEnabled ?? false);
+    settingsState.notifyNtfyTopic = String(parsed.notifyNtfyTopic ?? settingsState.notifyNtfyTopic).trim();
+    settingsState.notifyNtfyServer =
+      String(parsed.notifyNtfyServer ?? settingsState.notifyNtfyServer).trim() || 'https://ntfy.sh';
+    settingsState.notifyEvents = Array.isArray(parsed.notifyEvents)
+      ? normalizeNotifyEvents(parsed.notifyEvents)
+      : settingsState.notifyEvents;
+    settingsState.notifyIncludeExcerpt = Boolean(parsed.notifyIncludeExcerpt ?? false);
+    settingsState.notifyPriority = Math.max(0, Math.min(5, Number(parsed.notifyPriority ?? 0) || 0));
+    settingsState.notifyRateLimitSeconds = clampNotifySeconds(parsed.notifyRateLimitSeconds ?? 15);
     settingsState.chatSettingsCollapsed = Boolean(parsed.chatSettingsCollapsed ?? settingsState.chatSettingsCollapsed);
     settingsState.contextUsageCollapsed = Boolean(parsed.contextUsageCollapsed ?? settingsState.contextUsageCollapsed);
     settingsState.lockedNamespaces = Array.isArray(parsed.lockedNamespaces) ? parsed.lockedNamespaces : [];
@@ -774,6 +791,13 @@ function loadSettings() {
     settingsState.orchestrationMemoryGlobalNamespace = '';
     settingsState.chatDebugDumpsEnabled = true;
     settingsState.promptSpecVersion = 'v2';
+    settingsState.notifyEnabled = false;
+    settingsState.notifyNtfyTopic = '';
+    settingsState.notifyNtfyServer = 'https://ntfy.sh';
+    settingsState.notifyEvents = ['chat.completed', 'chat.input_needed', 'chat.error'];
+    settingsState.notifyIncludeExcerpt = false;
+    settingsState.notifyPriority = 0;
+    settingsState.notifyRateLimitSeconds = 15;
     settingsState.chatSettingsCollapsed = true;
     settingsState.contextUsageCollapsed = false;
     settingsState.lockedNamespaces = [];
@@ -809,6 +833,56 @@ function basename(filePath) {
   if (!filePath) return '';
   const parts = filePath.replace(/\\/g, '/').split('/');
   return parts[parts.length - 1] || filePath;
+}
+
+const NOTIFY_EVENT_CHOICES = [
+  { id: 'chat.completed', label: 'Chat complete' },
+  { id: 'chat.input_needed', label: 'Model asks a question' },
+  { id: 'chat.error', label: 'Chat / orchestration error' },
+  { id: 'orchestration.completed', label: 'Orchestration complete' }
+];
+
+function normalizeNotifyEvents(value) {
+  const allowed = new Set(NOTIFY_EVENT_CHOICES.map(choice => choice.id));
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const unique = [];
+  for (const entry of value) {
+    const id = String(entry ?? '').trim();
+    if (allowed.has(id) && !unique.includes(id)) {
+      unique.push(id);
+    }
+  }
+  return unique;
+}
+
+function clampNotifySeconds(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num) || num <= 0) return 0;
+  return Math.min(3600, Math.round(num));
+}
+
+// Shape the settings into the payload the main process expects. Sent with every
+// chat/orchestration request so notifications work even when the window is
+// backgrounded. The topic is a bearer secret and is never logged.
+function buildNotifyPayload() {
+  if (!settingsState.notifyEnabled) {
+    return undefined;
+  }
+  const topic = String(settingsState.notifyNtfyTopic || '').trim();
+  if (!topic) {
+    return undefined;
+  }
+  return {
+    notifyEnabled: true,
+    notifyNtfyTopic: topic,
+    notifyNtfyServer: String(settingsState.notifyNtfyServer || 'https://ntfy.sh').trim() || 'https://ntfy.sh',
+    notifyEvents: normalizeNotifyEvents(settingsState.notifyEvents),
+    notifyIncludeExcerpt: Boolean(settingsState.notifyIncludeExcerpt),
+    notifyPriority: Math.max(0, Math.min(5, Number(settingsState.notifyPriority || 0))),
+    notifyRateLimitSeconds: clampNotifySeconds(settingsState.notifyRateLimitSeconds)
+  };
 }
 
 function inferLanguageFromMonacoRegistry(filePath) {
@@ -1589,6 +1663,14 @@ function initSettingsMenu() {
   const addSubAgentProfileButton = document.getElementById('settingAddSubAgentProfile');
   const chatDebugDumpsInput = document.getElementById('settingChatDebugDumpsEnabled');
   const promptSpecVersionInput = document.getElementById('settingPromptSpecVersion');
+  const notifyEnabledInput = document.getElementById('settingNotifyEnabled');
+  const notifyTopicInput = document.getElementById('settingNotifyNtfyTopic');
+  const notifyServerInput = document.getElementById('settingNotifyNtfyServer');
+  const notifyRateInput = document.getElementById('settingNotifyRateLimitSeconds');
+  const notifyEventsContainer = document.getElementById('settingNotifyEvents');
+  const notifyExcerptInput = document.getElementById('settingNotifyIncludeExcerpt');
+  const notifyTestButton = document.getElementById('settingNotifyTest');
+  const notifyStatusEl = document.getElementById('settingNotifyStatus');
   const cancel = document.getElementById('settingsCancel');
   const save = document.getElementById('settingsSave');
 
@@ -1754,6 +1836,37 @@ function initSettingsMenu() {
     refreshSubAgentProfileActivityIndicators();
   }
 
+  function renderNotifyEventCheckboxes() {
+    if (!notifyEventsContainer) return;
+    notifyEventsContainer.innerHTML = '';
+    for (const choice of NOTIFY_EVENT_CHOICES) {
+      const label = document.createElement('label');
+      label.className = 'orch-tool-item settings-checkbox';
+
+      const checkbox = document.createElement('input');
+      checkbox.type = 'checkbox';
+      checkbox.value = choice.id;
+      checkbox.checked = settingsState.notifyEvents.includes(choice.id);
+
+      label.appendChild(checkbox);
+      label.appendChild(document.createTextNode(` ${choice.label}`));
+      notifyEventsContainer.appendChild(label);
+    }
+  }
+
+  function readNotifyEventsFromUi() {
+    if (!notifyEventsContainer) return [];
+    return [...notifyEventsContainer.querySelectorAll('input[type="checkbox"]:checked')].map(
+      input => input.value
+    );
+  }
+
+  function setNotifyStatus(message, isError) {
+    if (!notifyStatusEl) return;
+    notifyStatusEl.textContent = message;
+    notifyStatusEl.classList.toggle('notify-status-error', Boolean(isError));
+  }
+
   function openModal() {
     input.value = String(settingsState.maxToolTurns);
     timeoutInput.value = String(settingsState.requestTimeoutMs);
@@ -1768,6 +1881,13 @@ function initSettingsMenu() {
     renderSubAgentProfilesEditor();
     chatDebugDumpsInput.checked = settingsState.chatDebugDumpsEnabled;
     promptSpecVersionInput.value = normalizePromptSpecVersion(settingsState.promptSpecVersion);
+    notifyEnabledInput.checked = settingsState.notifyEnabled;
+    notifyTopicInput.value = settingsState.notifyNtfyTopic;
+    notifyServerInput.value = settingsState.notifyNtfyServer;
+    notifyRateInput.value = String(settingsState.notifyRateLimitSeconds);
+    notifyExcerptInput.checked = settingsState.notifyIncludeExcerpt;
+    renderNotifyEventCheckboxes();
+    setNotifyStatus('');
     modal.classList.add('open');
     modal.setAttribute('aria-hidden', 'false');
     input.focus();
@@ -1804,6 +1924,12 @@ function initSettingsMenu() {
     settingsState.subAgentContextWindowTokens = settingsState.subAgentProfiles[0].contextWindowTokens;
     settingsState.chatDebugDumpsEnabled = Boolean(chatDebugDumpsInput.checked);
     settingsState.promptSpecVersion = normalizePromptSpecVersion(promptSpecVersionInput.value);
+    settingsState.notifyEnabled = Boolean(notifyEnabledInput.checked);
+    settingsState.notifyNtfyTopic = notifyTopicInput.value.trim();
+    settingsState.notifyNtfyServer = notifyServerInput.value.trim() || 'https://ntfy.sh';
+    settingsState.notifyEvents = normalizeNotifyEvents(readNotifyEventsFromUi());
+    settingsState.notifyIncludeExcerpt = Boolean(notifyExcerptInput.checked);
+    settingsState.notifyRateLimitSeconds = clampNotifySeconds(notifyRateInput.value);
 
     chatProvider.value = settingsState.provider;
     chatEndpoint.value = settingsState.endpoint;
@@ -1818,6 +1944,37 @@ function initSettingsMenu() {
 
     saveSettings();
     closeModal();
+  });
+
+  notifyTestButton.addEventListener('click', async () => {
+    const topic = notifyTopicInput.value.trim();
+    if (!topic) {
+      setNotifyStatus('Enter a topic (or full https:// URL) before sending a test.', true);
+      return;
+    }
+
+    setNotifyStatus('Sending test notification…');
+    notifyTestButton.disabled = true;
+    try {
+      const result = await window.llmIde.testNotification({
+        notifyEnabled: true,
+        notifyNtfyTopic: topic,
+        notifyNtfyServer: notifyServerInput.value.trim() || 'https://ntfy.sh',
+        notifyIncludeExcerpt: Boolean(notifyExcerptInput.checked),
+        notifyPriority: 0,
+        notifyTimeoutMs: 8000
+      });
+      if (result?.ok) {
+        setNotifyStatus('Sent. Check your phone / ntfy web subscription.');
+      } else {
+        setNotifyStatus(result?.reason || 'Send failed for an unknown reason.', true);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setNotifyStatus(`Send failed: ${message}`, true);
+    } finally {
+      notifyTestButton.disabled = false;
+    }
   });
 
   modal.addEventListener('click', event => {
@@ -3013,6 +3170,7 @@ async function initChat() {
         memoryNamespace: selectedChatMemoryNamespace() || undefined,
         memoryGlobalNamespace: selectedChatMemoryGlobalNamespace() || undefined,
         chatDebugDumpsEnabled: settingsState.chatDebugDumpsEnabled,
+        notify: buildNotifyPayload(),
         promptSpecVersion: normalizePromptSpecVersion(settingsState.promptSpecVersion),
         maxToolTurns: settingsState.maxToolTurns,
         toolNames: [
@@ -4089,6 +4247,7 @@ async function initOrchestration() {
         memoryNamespace: selectedOrchestrationMemoryNamespace() || undefined,
         memoryGlobalNamespace: selectedOrchestrationMemoryGlobalNamespace() || undefined,
         requestTimeoutMs: settingsState.requestTimeoutMs,
+        notify: buildNotifyPayload(),
         promptSpecVersion: normalizePromptSpecVersion(settingsState.promptSpecVersion)
       });
       renderOrchestrationOutput(result, promptText, parsed);
@@ -5349,7 +5508,8 @@ async function initAdvancedOrchestration() {
         plan,
         prompt: promptText,
         subAgentConfigs: buildSubAgentConfigs(),
-        requestTimeoutMs: settingsState.requestTimeoutMs
+        requestTimeoutMs: settingsState.requestTimeoutMs,
+        notify: buildNotifyPayload()
       });
       renderOutput(result);
       recordOutputLog(result, promptText);

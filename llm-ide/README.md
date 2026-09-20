@@ -77,6 +77,21 @@ It is not a VS Code extension.
 | Error (non-cancelled) | ❌ Error toast + "Buzz" | Subtle buzz |
 | Model asks question | ℹ️ Info toast + "Blip" | Soft blip |
 
+### External Notifications (ntfy)
+
+Optional outbound notifications published from the main process, so they arrive even when
+this window is minimized or hidden.
+
+| Event | Notification |
+| --- | --- |
+| Chat complete | `chat.completed` (priority 3) |
+| Model asks question | `chat.input_needed` (priority 4) |
+| Error (non-cancelled) | `chat.error` (priority 4) |
+| Orchestration complete | `orchestration.completed` (priority 3) |
+
+Configure under **Settings → External Notifications (ntfy)**. Model output is excluded
+unless **Include a response excerpt** is enabled. Full guide: [NTFY.md](../NTFY.md).
+
 ### TurboVec Memory
 
 The Diagnostics tab supports managing vector memory namespaces:
@@ -177,6 +192,7 @@ Line-oriented file tools use 1-based numbering consistently:
 - [src/backend/orchestrationEngine.ts](src/backend/orchestrationEngine.ts) Step runner
 - [src/backend/toolRuntime.ts](src/backend/toolRuntime.ts) Local tool implementations
 - [src/backend/schema.ts](src/backend/schema.ts) Plan schema, validation, and presets
+- [src/backend/notify.ts](src/backend/notify.ts) Outbound ntfy notifications
 - [renderer/index.html](renderer/index.html) Desktop UI shell
 - [renderer/app.js](renderer/app.js) UI logic + Monaco wiring
 

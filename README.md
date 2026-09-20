@@ -51,6 +51,22 @@ It brings an editor, chat, workflow runner, and live terminal output into one lo
 - Send stdin to the active process.
 - Interrupt the active process from the terminal input with `(ctrl+c)`.
 
+### External Notifications (ntfy)
+
+Optional outbound notifications, sent from the Electron main process so they arrive even
+when the window is minimized. No account, no API key, and no new dependencies.
+
+| Event | When it fires |
+| --- | --- |
+| `chat.completed` | A chat prompt finished successfully |
+| `chat.input_needed` | The model called `query_user` and is waiting for you |
+| `chat.error` | A chat or orchestration run failed |
+| `orchestration.completed` | An orchestration run finished |
+
+Enable it under **Settings → External Notifications (ntfy)** and click **Send Test
+Notification** to verify delivery. Model output is never included unless you explicitly
+opt in. See [NTFY.md](NTFY.md) for setup, privacy notes, and troubleshooting.
+
 ## Runtime Tools
 
 The tool runtime supports scoped operations, either `workspace` or `root`, with guardrails.
@@ -255,6 +271,25 @@ Configure the provider from the Chat tab.
 
 Model discovery uses `GET /v1/models`, derived from the chat endpoint.
 
+## External Notifications
+
+Optional push notifications to [ntfy](https://ntfy.sh) on chat completion, model
+questions, errors, and orchestration completion.
+
+```
+Settings → External Notifications (ntfy) → Topic → Send Test Notification
+```
+
+| Field | Example |
+| --- | --- |
+| Topic | `my-localcode-alerts` |
+| Server | `https://ntfy.sh` |
+| Repeat suppression | `15` seconds |
+| Include response excerpt | Off (off keeps model output on this machine) |
+
+Full setup, event semantics, privacy guarantees, self-hosting, and troubleshooting are in
+[NTFY.md](NTFY.md).
+
 ## Default Orchestration Plan
 
 The default workflow is a two-step pipeline:
@@ -269,6 +304,9 @@ Schema validation is implemented in [llm-ide/src/backend/schema.ts](llm-ide/src/
 - Electron renderer runs with `contextIsolation: true` and `nodeIntegration: false`.
 - Renderer access to system APIs is routed through whitelisted preload bridge methods.
 - Path resolution enforces scope boundaries for filesystem operations.
+- Outbound notifications are configured only by the user and are never exposed as a
+  model-callable tool, so a prompt-injected model cannot retarget them. The ntfy topic is
+  treated as a secret and redacted from logs. See [NTFY.md](NTFY.md).
 
 ## Build Artifacts + Ignored Paths
 
@@ -284,6 +322,7 @@ The root [.gitignore](.gitignore) excludes generated and dependency-heavy direct
 | App does not launch | Ensure dependencies are installed in [llm-ide](llm-ide), then rebuild with `cd llm-ide && npm run build`. |
 | No models appear in dropdown | Verify the endpoint is reachable, exposes `/v1/models`, and has any required API key configured. |
 | Tool execution appears stalled | Inspect Model Terminal output, send required interactive input, or use `(ctrl+c)` to interrupt. |
+| ntfy notifications do not arrive | Re-run **Settings → Send Test Notification** and compare the topic name on the subscribing device. See [NTFY.md](NTFY.md#troubleshooting). |
 
 ## Development Notes
 

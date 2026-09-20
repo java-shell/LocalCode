@@ -1194,6 +1194,17 @@ button.btn-danger:hover:not(:disabled) {
   font-size: 12px;
 }
 
+.notify-event-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 6px 0;
+}
+
+.notify-status-error {
+  color: #ff8a8a;
+}
+
 .settings-actions {
   display: flex;
   justify-content: flex-end;

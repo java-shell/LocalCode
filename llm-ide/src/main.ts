@@ -8,12 +8,14 @@ import { deleteChatSession, listChatSessions, loadChatSession, saveChatSession }
 import { defaultPlan, normalizeAdvancedStageIds, validatePlan, planPresets } from './backend/schema';
 import { loadPlan, savePlan } from './backend/planStore';
 import { pruneChatContextDumps } from './backend/chatDebugDumps';
+import { dispatchNotification, sendTestNotification, type NotifyConfig } from './backend/notify';
 import {
   ChatSession,
   ChatStreamResult,
   ChatMessage,
   ChatStreamRequest,
   LLMConfig,
+  NotifySettings,
   PromptSpecVersion,
   SubAgentConfigProfile,
   OrchestrationExportResult,
@@ -237,6 +239,34 @@ function isInternalServerRetryableError(detail: string): boolean {
   }
   return /\bstatus=500\b/.test(normalized) || normalized.includes('internal server error');
 }
+
+// Outbound notifications are user-configured only (Settings dialog). They are
+// never exposed as a model-callable tool, so a prompt-injected model cannot
+// redirect them to an attacker-controlled endpoint.
+type NotifyConfigCarrier = { notify?: NotifyConfig } | NotifyConfig | null | undefined;
+
+function notifyConfigFrom(carrier: NotifyConfigCarrier): NotifyConfig | null {
+  if (!carrier || typeof carrier !== 'object') {
+    return null;
+  }
+  // Chat/orchestration requests carry the settings under `notify`; the
+  // notify:test handler passes the settings object directly.
+  if ('notify' in carrier) {
+    const wrapped = (carrier as { notify?: NotifyConfig }).notify;
+    return wrapped && typeof wrapped === 'object' ? wrapped : null;
+  }
+  return carrier as NotifyConfig;
+}
+
+function sumTotalTokens(usage: { totalTokens?: number }[] | undefined): number | undefined {
+  if (!Array.isArray(usage) || usage.length === 0) {
+    return undefined;
+  }
+  const total = usage.reduce((sum, entry) => sum + Math.max(0, Number(entry?.totalTokens ?? 0)), 0);
+  return total > 0 ? total : undefined;
+}
+
+
 
 interface RuntimeSubAgentProfile {
   id: string;
@@ -815,6 +845,8 @@ ipcMain.handle(
     const subAgentActiveCounts: Record<string, number> = {};
     const abortController = new AbortController();
     activeChatAbortController = abortController;
+    const chatStartedAt = Date.now();
+    const notifyCfg = notifyConfigFrom(payload);
     const requestedChatNamespace = String(payload.memoryNamespace ?? '').trim();
     const requestedGlobalNamespace = String(payload.memoryGlobalNamespace ?? '').trim();
     
@@ -935,6 +967,15 @@ ipcMain.handle(
         onQueryUser: async (request: import('./backend/toolRuntime').QueryUserRequest) => {
           // Send query to renderer and wait for user response
           event.sender.send('chat:query-user', request);
+          // This is the case where the user is most likely away from the keyboard.
+          dispatchNotification(notifyCfg, {
+            kind: 'chat.input_needed',
+            title: 'Model is waiting for your answer',
+            detail: request.question,
+            model: config.model,
+            workspaceDir: selectedWorkspaceDir,
+            durationMs: Date.now() - chatStartedAt
+          });
           return new Promise<import('./backend/toolRuntime').QueryUserResponse>(resolve => {
             pendingQueryUserResolve = resolve;
           });
@@ -1061,15 +1102,41 @@ ipcMain.handle(
         }
       }
 
+      const usageByModel = [{
+        model: config.model,
+        ...result.usage,
+        recalledPromptTokens,
+        contextWindowTokens: Math.max(0, Number(payload.contextWindowTokens ?? 0)) || undefined
+      }];
+
+      dispatchNotification(notifyCfg, {
+        kind: 'chat.completed',
+        title: 'Chat complete',
+        excerpt: text,
+        model: config.model,
+        workspaceDir: selectedWorkspaceDir,
+        durationMs: Date.now() - chatStartedAt,
+        totalTokens: sumTotalTokens(usageByModel)
+      });
+
       return {
         text,
-        usageByModel: [{
-          model: config.model,
-          ...result.usage,
-          recalledPromptTokens,
-          contextWindowTokens: Math.max(0, Number(payload.contextWindowTokens ?? 0)) || undefined
-        }]
+        usageByModel
       };
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      // User-initiated stops are not failures; do not notify for them.
+      if (!/canceled/i.test(detail) && !/stopped by user/i.test(detail)) {
+        dispatchNotification(notifyCfg, {
+          kind: 'chat.error',
+          title: 'Chat failed',
+          detail,
+          model: config.model,
+          workspaceDir: selectedWorkspaceDir,
+          durationMs: Date.now() - chatStartedAt
+        });
+      }
+      throw error;
     } finally {
       if (activeChatAbortController === abortController) {
         activeChatAbortController = null;
@@ -1437,6 +1504,8 @@ ipcMain.handle(
 
     const abortController = new AbortController();
     activeOrchestrationAbortController = abortController;
+    const orchStartedAt = Date.now();
+    const notifyCfg = notifyConfigFrom(payload);
 
     const requestedNamespace = String(payload.memoryNamespace ?? '').trim();
     const requestedGlobalNamespace = String(payload.memoryGlobalNamespace ?? '').trim();
@@ -1558,7 +1627,31 @@ ipcMain.handle(
         }
       }, abortController.signal);
 
+      dispatchNotification(notifyCfg, {
+        kind: 'orchestration.completed',
+        title: run?.completed
+          ? `Orchestration complete: ${normalizedPlan?.name ?? 'plan'}`
+          : `Orchestration stopped early: ${normalizedPlan?.name ?? 'plan'}`,
+        excerpt: run?.output,
+        workspaceDir: selectedWorkspaceDir,
+        durationMs: Date.now() - orchStartedAt,
+        detail: `${run?.steps?.length ?? 0} step(s) across ${run?.iterations ?? 0} iteration(s)`,
+        totalTokens: sumTotalTokens(run?.usageByModel)
+      });
+
       return run;
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      if (!/canceled/i.test(detail) && !/stopped by user/i.test(detail)) {
+        dispatchNotification(notifyCfg, {
+          kind: 'chat.error',
+          title: `Orchestration failed: ${normalizedPlan?.name ?? 'plan'}`,
+          detail,
+          workspaceDir: selectedWorkspaceDir,
+          durationMs: Date.now() - orchStartedAt
+        });
+      }
+      throw error;
     } finally {
       if (activeOrchestrationAbortController === abortController) {
         activeOrchestrationAbortController = null;
@@ -1635,3 +1728,8 @@ ipcMain.handle('workspace:update-reference-workspace', async (_event, payload: {
   return { ok: true, referenceWorkspace: ref };
 });
 
+// Outbound notification test (Settings dialog). Awaiting on purpose so the UI
+// can surface the real failure reason; `dispatchNotification` is fire-and-forget.
+ipcMain.handle('notify:test', async (_event, payload: NotifySettings) => {
+  return sendTestNotification(notifyConfigFrom(payload) ?? {});
+});
