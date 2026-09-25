@@ -7,6 +7,8 @@ import { runOrchestration } from './backend/orchestrationEngine';
 import { deleteChatSession, listChatSessions, loadChatSession, saveChatSession } from './backend/chatSessionStore';
 import { defaultPlan, normalizeAdvancedStageIds, validatePlan, planPresets } from './backend/schema';
 import { loadPlan, savePlan } from './backend/planStore';
+import { listMcpServers, listMcpServersForTarget, saveMcpServers } from './backend/mcpServerStore';
+import { MCPServerManager } from './backend/mcpServerManager';
 import { pruneChatContextDumps } from './backend/chatDebugDumps';
 import { dispatchNotification, sendTestNotification, type NotifyConfig } from './backend/notify';
 import {
@@ -15,7 +17,9 @@ import {
   ChatMessage,
   ChatStreamRequest,
   LLMConfig,
+  MCPServerRuntimeStatus,
   NotifySettings,
+  MCPServerConfig,
   PromptSpecVersion,
   SubAgentConfigProfile,
   OrchestrationExportResult,
@@ -38,6 +42,7 @@ let activeChatAbortController: AbortController | null = null;
 let activeOrchestrationAbortController: AbortController | null = null;
 const fileWatchRefs = new Map<string, { count: number; listener: (curr: fs.Stats, prev: fs.Stats) => void }>();
 let turboMemory: TurboVecMemory | null = null;
+const mcpServerManager = new MCPServerManager();
 const MAIN_STATE_FILE = 'localcode-main-state.json';
 const DEFAULT_PROMPT_SPEC_VERSION: PromptSpecVersion = 'v2';
 
@@ -109,6 +114,40 @@ function formatReferenceWorkspaceGuidance(
     'Reference workspaces are available for scoped tools.',
     'When a tool supports scope, set scope to one of these ref IDs:',
     ...lines
+  ].join('\n');
+}
+
+function formatMcpServerGuidance(
+  statuses: MCPServerRuntimeStatus[],
+  discoveredToolNames: string[],
+  target: 'chat' | 'orchestration'
+): string {
+  if (!Array.isArray(statuses) || statuses.length === 0) {
+    return '';
+  }
+
+  const title = target === 'chat'
+    ? 'MCP servers available for this chat run:'
+    : 'MCP servers available for this orchestration run:';
+
+  const lines = statuses.map(status => {
+    const health = status.healthy ? 'healthy' : 'unhealthy';
+    const base = `- ${status.serverId} (${status.label}) [${status.transport}] ${status.lifecycle}/${health}`;
+    if (status.lastError) {
+      return `${base} - last error: ${status.lastError}`;
+    }
+    return `${base} - tools: ${status.discoveredToolCount}`;
+  });
+
+  const toolLine = discoveredToolNames.length > 0
+    ? `Discovered MCP tools enabled for this run: ${discoveredToolNames.join(', ')}`
+    : 'No MCP tools are currently discoverable for this run.';
+
+  return [
+    title,
+    ...lines,
+    toolLine,
+    'Use list_mcp_servers to inspect these at runtime before making assumptions.'
   ].join('\n');
 }
 
@@ -793,8 +832,16 @@ function createWindow() {
   mainWindow.loadFile(appResourcePath('renderer', 'index.html'));
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   restoreLastWorkspaceSelection();
+
+  try {
+    const persistedMcpServers = await listMcpServers();
+    await mcpServerManager.configure(persistedMcpServers);
+    await mcpServerManager.refreshAll();
+  } catch {
+    // MCP lifecycle bootstrap failures should not block app startup.
+  }
 
   const memoryRoot = path.join(app.getPath('userData'), 'turbovec-memory');
   const globalMemoryRoot = path.join(app.getPath('userData'), 'turbovec-global-memory');
@@ -813,6 +860,7 @@ app.whenReady().then(() => {
 });
 
 app.on('window-all-closed', () => {
+  void mcpServerManager.dispose();
   if (process.platform !== 'darwin') {
     app.quit();
   }
@@ -865,6 +913,13 @@ ipcMain.handle(
     const messages: ChatMessage[] = [];
     const systemPromptSections: string[] = [];
     const promptSpecVersion = normalizePromptSpecVersion(payload.promptSpecVersion);
+    const enabledMcpServers = await listMcpServersForTarget('chat');
+    const enabledMcpToolDefs = mcpServerManager.getToolDefinitionsForTarget('chat');
+    const enabledMcpToolNames = enabledMcpToolDefs.map(tool => tool.function.name);
+    const enabledMcpServerIds = new Set(enabledMcpServers.map(server => server.id));
+    const mcpRuntimeStatuses = mcpServerManager
+      .getRuntimeStatus()
+      .filter(status => enabledMcpServerIds.has(status.serverId));
     let recalledMemorySystemSection = '';
     let recalledPromptTokens = 0;
 
@@ -916,11 +971,12 @@ ipcMain.handle(
       const requestedToolNames = Array.isArray(payload.toolNames) && payload.toolNames.length > 0
         ? payload.toolNames
         : availableToolNames.filter(name => name !== 'delete_path' && name !== 'git_commit');
+      const mergedToolNames = Array.from(new Set([...requestedToolNames, ...enabledMcpToolNames]));
 
       if (promptSpecVersion === 'v2') {
-        systemPromptSections.push(...formatChatV2CorePromptSections(requestedToolNames));
+        systemPromptSections.push(...formatChatV2CorePromptSections(mergedToolNames));
       } else {
-        const toolGuidance = formatToolAvailabilityGuidance(requestedToolNames);
+        const toolGuidance = formatToolAvailabilityGuidance(mergedToolNames);
         if (toolGuidance) {
           systemPromptSections.push(toolGuidance);
         }
@@ -933,6 +989,11 @@ ipcMain.handle(
 
       if (referenceWorkspaces.length > 0) {
         systemPromptSections.push(formatReferenceWorkspaceGuidance(referenceWorkspaces));
+      }
+
+      const mcpGuidance = formatMcpServerGuidance(mcpRuntimeStatuses, enabledMcpToolNames, 'chat');
+      if (mcpGuidance) {
+        systemPromptSections.push(mcpGuidance);
       }
 
       if (promptSpecVersion === 'v2' && recalledMemorySystemSection) {
@@ -949,7 +1010,10 @@ ipcMain.handle(
 
       messages.push({ role: 'user', content: payload.prompt });
 
-      event.sender.send('chat:event', `[tools] enabled ${requestedToolNames.length} tool(s): ${requestedToolNames.join(', ')}`);
+      event.sender.send('chat:event', `[tools] enabled ${mergedToolNames.length} tool(s): ${mergedToolNames.join(', ')}`);
+      if (enabledMcpToolNames.length > 0) {
+        event.sender.send('chat:event', `[mcp] discovered ${enabledMcpToolNames.length} MCP tool(s).`);
+      }
 
       // Build runtime context with memory access for this request
       const chatRuntimeContext = {
@@ -959,8 +1023,14 @@ ipcMain.handle(
         subAgentConfig: subAgentProfiles[0]?.config,
         subAgentProfiles,
         subAgentActiveCounts,
+        mcpServers: enabledMcpServers,
+        mcpServerStatuses: mcpRuntimeStatuses,
+        mcpToolDefinitions: enabledMcpToolDefs,
+        invokeMcpTool: async (toolName: string, toolArgs: Record<string, unknown>) => {
+          return mcpServerManager.invokeTool(toolName, toolArgs);
+        },
         activeNamespaces: chatNamespaces.length > 0 ? chatNamespaces : undefined,
-        allowedToolNames: requestedToolNames,
+        allowedToolNames: mergedToolNames,
         onAgentEvent: (message: string) => {
           event.sender.send('chat:event', message);
         },
@@ -984,7 +1054,7 @@ ipcMain.handle(
 
       event.sender.send('chat:event', `[prompt] using ${promptSpecVersion} prompt policy.`);
 
-      const toolDefs = getAllowedToolDefinitions(requestedToolNames, chatRuntimeContext);
+      const toolDefs = getAllowedToolDefinitions(mergedToolNames, chatRuntimeContext);
 
       const chatMaxRetries = 1;
       let attempt = 0;
@@ -1016,7 +1086,7 @@ ipcMain.handle(
             attemptMessages,
             toolDefs,
             async (name, args) => {
-              if (!requestedToolNames.includes(name)) {
+              if (!mergedToolNames.includes(name)) {
                 throw new Error(`Tool ${name} is not enabled for chat.`);
               }
               return executeTool(name, args, chatRuntimeContext);
@@ -1540,6 +1610,13 @@ ipcMain.handle(
       fallbackConfig,
       legacySubAgentConfig
     );
+    const enabledMcpServers = await listMcpServersForTarget('orchestration');
+    const enabledMcpToolDefs = mcpServerManager.getToolDefinitionsForTarget('orchestration');
+    const enabledMcpToolNames = enabledMcpToolDefs.map(tool => tool.function.name);
+    const enabledMcpServerIds = new Set(enabledMcpServers.map(server => server.id));
+    const mcpRuntimeStatuses = mcpServerManager
+      .getRuntimeStatus()
+      .filter(status => enabledMcpServerIds.has(status.serverId));
     const promptSpecVersion = normalizePromptSpecVersion(payload.promptSpecVersion);
     const subAgentActiveCounts: Record<string, number> = {};
     
@@ -1573,11 +1650,20 @@ ipcMain.handle(
       subAgentConfig: subAgentProfiles[0]?.config,
       subAgentProfiles,
       subAgentActiveCounts,
+      mcpServers: enabledMcpServers,
+      mcpServerStatuses: mcpRuntimeStatuses,
+      mcpToolDefinitions: enabledMcpToolDefs,
+      invokeMcpTool: async (toolName: string, toolArgs: Record<string, unknown>) => {
+        return mcpServerManager.invokeTool(toolName, toolArgs);
+      },
       activeNamespaces: orchestrationNamespaces.length > 0 ? orchestrationNamespaces : undefined,
       promptSpecVersion
     };
 
     event.sender.send('orch:event', `[prompt] using ${promptSpecVersion} prompt policy.`);
+    if (enabledMcpToolNames.length > 0) {
+      event.sender.send('orch:event', `[mcp] discovered ${enabledMcpToolNames.length} MCP tool(s).`);
+    }
 
     try {
       const run = await runOrchestration(normalizedPlan, payload.prompt, {
@@ -1663,6 +1749,29 @@ ipcMain.handle(
 // Reference workspace management IPC handlers
 ipcMain.handle('workspace:list-reference-workspaces', async () => {
   return { referenceWorkspaces };
+});
+
+ipcMain.handle('mcp:list-servers', async () => {
+  const servers = await listMcpServers();
+  const runtime = mcpServerManager.getRuntimeStatus();
+  return { servers, runtime };
+});
+
+ipcMain.handle('mcp:save-servers', async (_event, payload: { servers?: MCPServerConfig[] }) => {
+  const servers = await saveMcpServers(Array.isArray(payload?.servers) ? payload.servers : []);
+  await mcpServerManager.configure(servers);
+  await mcpServerManager.refreshAll();
+  const runtime = mcpServerManager.getRuntimeStatus();
+  return { servers, runtime };
+});
+
+ipcMain.handle('mcp:get-runtime-status', async () => {
+  return { runtime: mcpServerManager.getRuntimeStatus() };
+});
+
+ipcMain.handle('mcp:refresh-runtime', async () => {
+  await mcpServerManager.refreshAll();
+  return { runtime: mcpServerManager.getRuntimeStatus() };
 });
 
 ipcMain.handle('workspace:add-reference-workspace', async (_event, payload: { label?: string; path?: string; allowWrite?: boolean }) => {

@@ -6,12 +6,15 @@ import {
   ChatMessage,
   LLMConfig,
   ModelUsage,
+  MCPServerConfig,
+  MCPServerRuntimeStatus,
   OrchestrationPlan,
   OrchestrationRunResult,
   OrchestrationRunStep,
   OrchestrationStep,
   PromptSpecVersion,
   ReferenceWorkspace,
+  ToolDefinition,
   TokenUsage
 } from '../shared/types';
 import { RetrievedMemoryItem, computeAdaptiveInjectionLimits } from './turboVecMemory';
@@ -33,6 +36,10 @@ export interface RuntimeContext {
     config: LLMConfig;
   }>;
   subAgentActiveCounts?: Record<string, number>;
+  mcpServers?: MCPServerConfig[];
+  mcpServerStatuses?: MCPServerRuntimeStatus[];
+  mcpToolDefinitions?: ToolDefinition[];
+  invokeMcpTool?: (toolName: string, args: Record<string, unknown>) => Promise<unknown>;
   allowedToolNames?: string[];
   onAgentEvent?: (message: string) => void;
 }
@@ -197,6 +204,27 @@ function formatStageToolAvailabilityGuidance(toolNames: string[]): string {
     '- Do not repeat a failed tool call with identical arguments.',
     '- Read tool error output and adjust arguments, tool choice, or sequence before retrying.',
     '- If repeated attempts do not make progress, stop and report the blocker instead of looping.'
+  ].join('\n');
+}
+
+function formatStageMcpServerGuidance(servers?: MCPServerConfig[]): string {
+  const items = Array.isArray(servers) ? servers : [];
+  if (items.length === 0) {
+    return '';
+  }
+
+  const lines = items.map(server => {
+    if (server.transport === 'stdio') {
+      const args = Array.isArray(server.args) && server.args.length > 0 ? ` ${server.args.join(' ')}` : '';
+      return `- ${server.id} (${server.label}) via stdio: ${server.command ?? ''}${args}`.trim();
+    }
+    return `- ${server.id} (${server.label}) via ${server.transport}: ${server.endpoint ?? ''}`.trim();
+  });
+
+  return [
+    'MCP servers are enabled for this orchestration run:',
+    ...lines,
+    'Call list_mcp_servers when you need the exact runtime mapping before using MCP-dependent strategies.'
   ].join('\n');
 }
 
@@ -417,7 +445,11 @@ async function runStepWithRetries(
   const stepToolCalls: Array<{ name: string; intent: string; timestamp: string }> = [];
   const stepMaxToolTurns = Math.max(1, Math.min(200, Math.floor(Number(step.maxToolTurns ?? 40) || 40)));
   const maxRetries = clampMaxRetries(step.maxRetries);
-  const allowedToolNames = step.tools.filter(tool => tool.enabled).map(tool => tool.name);
+  const staticAllowedToolNames = step.tools.filter(tool => tool.enabled).map(tool => tool.name);
+  const discoveredMcpToolNames = Array.isArray(runtimeContext?.mcpToolDefinitions)
+    ? runtimeContext.mcpToolDefinitions.map(tool => tool.function.name)
+    : [];
+  const allowedToolNames = Array.from(new Set([...staticAllowedToolNames, ...discoveredMcpToolNames]));
   const allowCompletionTool = Boolean(step.allowCompletionTool);
   let selectedDownstreamStageId = '';
   let selectedDownstreamHandoff = '';
@@ -504,6 +536,11 @@ async function runStepWithRetries(
       messages.push({ role: 'system', content: referenceGuidance });
     }
 
+    const mcpGuidance = formatStageMcpServerGuidance(runtimeContext?.mcpServers);
+    if (mcpGuidance) {
+      messages.push({ role: 'system', content: mcpGuidance });
+    }
+
     messages.push({
       role: 'user',
       content: `Original request:\n${originalPromptForModel}\n\nStep input:\n${truncateText(stepInput, 12000)}`
@@ -543,6 +580,10 @@ async function runStepWithRetries(
             subAgentConfig: runtimeContext?.subAgentConfig,
             subAgentProfiles: runtimeContext?.subAgentProfiles,
             subAgentActiveCounts: runtimeContext?.subAgentActiveCounts,
+            mcpServers: runtimeContext?.mcpServers,
+            mcpServerStatuses: runtimeContext?.mcpServerStatuses,
+            mcpToolDefinitions: runtimeContext?.mcpToolDefinitions,
+            invokeMcpTool: runtimeContext?.invokeMcpTool,
             allowedToolNames,
             onAgentEvent: (message: string) => {
               onEvent?.(`${step.name}:iteration:${iteration}:${message}`);

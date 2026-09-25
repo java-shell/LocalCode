@@ -14,6 +14,8 @@ import {
   OrchestrationRunResult,
   NotifySettings,
   NotifyTestResult,
+  MCPServerConfig,
+  MCPServerRuntimeStatus,
   WorkspaceState,
   WorkspaceTreeNode,
   QueryUserRequest,
@@ -169,7 +171,15 @@ const api = {
   removeReferenceWorkspace: async (payload: { id: string }): Promise<{ ok: boolean; reason?: string }> =>
     ipcRenderer.invoke('workspace:remove-reference-workspace', payload),
   updateReferenceWorkspace: async (payload: { id: string; allowWrite?: boolean; label?: string }): Promise<unknown> =>
-    ipcRenderer.invoke('workspace:update-reference-workspace', payload)
+    ipcRenderer.invoke('workspace:update-reference-workspace', payload),
+  listMcpServers: async (): Promise<{ servers: MCPServerConfig[]; runtime?: MCPServerRuntimeStatus[] }> =>
+    ipcRenderer.invoke('mcp:list-servers'),
+  saveMcpServers: async (payload: { servers: MCPServerConfig[] }): Promise<{ servers: MCPServerConfig[]; runtime?: MCPServerRuntimeStatus[] }> =>
+    ipcRenderer.invoke('mcp:save-servers', payload),
+  getMcpRuntimeStatus: async (): Promise<{ runtime: MCPServerRuntimeStatus[] }> =>
+    ipcRenderer.invoke('mcp:get-runtime-status'),
+  refreshMcpRuntime: async (): Promise<{ runtime: MCPServerRuntimeStatus[] }> =>
+    ipcRenderer.invoke('mcp:refresh-runtime')
 };
 
 contextBridge.exposeInMainWorld('llmIde', api);

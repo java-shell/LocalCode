@@ -18,7 +18,7 @@ It is not a VS Code extension.
 | Feature | Description |
 | --- | --- |
 | **Streaming Responses** | Token-by-token display of model output in markdown |
-| **Tool Calling** | 22+ tools available (filesystem, git, web, memory, interaction, delegation) |
+| **Tool Calling** | 23+ tools available (filesystem, git, web, memory, interaction, delegation, MCP introspection) |
 | **Session Management** | Create, switch, and delete chat sessions with full history |
 | **TurboVec Memory** | Inject recalled memories from workspace or global namespaces |
 | **Context Windows** | Per-model context window configuration with auto-detection hints; overflow retries compact history to the configured safe budget |
@@ -26,6 +26,8 @@ It is not a VS Code extension.
 | **Model Discovery** | Auto-discover available models via `/v1/models` endpoint |
 | **Ollama Thinking** | Display native thinking separately; if a thinking response ends without final content, automatically request one concise Markdown summary with thinking and tools disabled, normalizing JSON-only replies for readability |
 | **Sub-Agent Model Settings** | Configure multiple sub-agent profiles (provider/endpoint/model/API key) with per-profile max concurrent spawn limits and optional parallel `spawn_sub_agent` fan-out |
+| **MCP Server Settings** | Add/remove MCP servers in Settings and enable each server for chat, orchestration, or both; persisted in app user data |
+| **MCP Runtime Lifecycle** | Refresh/connect MCP servers from Settings, view per-server health/lifecycle status, discovered tool count, and last runtime error |
 | **Prompt Policy Version** | Switch between `v1` legacy system-prompt assembly and `v2` revised policy sections without removing the fallback path |
 | **Presets** | Quick-apply common configurations (Ollama, OpenAI-compatible, etc.) |
 
@@ -169,7 +171,8 @@ Each step can enable these tools:
 - `replace_in_file`, `insert_in_file`, `create_directory`, `move_path`, `delete_path`
 - `grep_search`, `git_status`, `git_diff`, `git_add`, `git_commit`
 - `run_terminal_command`, `browser_fetch`, `web_search`
-- `list_namespaces`, `query_memory`, `query_user`, `spawn_sub_agent`
+- `list_namespaces`, `query_memory`, `query_user`, `spawn_sub_agent`, `list_mcp_servers`
+- plus dynamically discovered MCP tools namespaced as `mcp_<serverId>__<toolName>` when a server is connected
 
 Tool execution is restricted to workspace paths and only to tools enabled on that step.
 

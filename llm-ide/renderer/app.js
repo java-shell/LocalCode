@@ -49,6 +49,11 @@ const settingsState = {
 
 const usageByModel = new Map();
 const subAgentActivityByProfile = new Map();
+const mcpServerState = {
+  loaded: false,
+  servers: [],
+  runtimeById: {}
+};
 let refreshSubAgentProfileActivityIndicators = () => {};
 
 function parseSubAgentActivityEvent(rawEvent) {
@@ -174,6 +179,119 @@ function normalizeSubAgentProfiles(rawProfiles) {
   }
 
   return normalized;
+}
+
+function createDefaultMcpServer(index = 0) {
+  const id = `mcp-server-${index + 1}`;
+  return {
+    id,
+    label: `MCP Server ${index + 1}`,
+    transport: 'stdio',
+    enabledForChat: true,
+    enabledForOrchestration: true,
+    command: '',
+    args: [],
+    endpoint: '',
+    env: {}
+  };
+}
+
+function normalizeMcpTransport(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  if (raw === 'http') return 'http';
+  if (raw === 'sse') return 'sse';
+  return 'stdio';
+}
+
+function normalizeMcpServerList(rawServers) {
+  const source = Array.isArray(rawServers) ? rawServers : [];
+  const normalized = [];
+  const seen = new Set();
+
+  for (let i = 0; i < source.length; i += 1) {
+    const item = source[i] && typeof source[i] === 'object' ? source[i] : {};
+    const transport = normalizeMcpTransport(item.transport);
+    const command = String(item.command ?? '').trim();
+    const endpoint = String(item.endpoint ?? '').trim();
+
+    if (transport === 'stdio' && !command) {
+      continue;
+    }
+    if ((transport === 'http' || transport === 'sse') && !endpoint) {
+      continue;
+    }
+
+    const rawId = String(item.id ?? '').trim() || `mcp-server-${i + 1}`;
+    const id = seen.has(rawId) ? `${rawId}-${i + 1}` : rawId;
+    seen.add(id);
+
+    const args = Array.isArray(item.args)
+      ? item.args.map(value => String(value ?? '').trim()).filter(Boolean)
+      : String(item.args ?? '')
+          .split(/\s+/)
+          .map(value => value.trim())
+          .filter(Boolean);
+
+    const env = {};
+    if (item.env && typeof item.env === 'object') {
+      for (const [key, value] of Object.entries(item.env)) {
+        const safeKey = String(key || '').trim();
+        if (!safeKey) continue;
+        env[safeKey] = String(value ?? '');
+      }
+    }
+
+    normalized.push({
+      id,
+      label: String(item.label ?? '').trim() || id,
+      transport,
+      enabledForChat: Boolean(item.enabledForChat ?? true),
+      enabledForOrchestration: Boolean(item.enabledForOrchestration ?? true),
+      command,
+      args,
+      endpoint,
+      env
+    });
+  }
+
+  return normalized;
+}
+
+async function loadMcpServersFromMain() {
+  try {
+    const result = await window.llmIde.listMcpServers();
+    mcpServerState.servers = normalizeMcpServerList(result?.servers);
+    const runtimeEntries = Array.isArray(result?.runtime) ? result.runtime : [];
+    mcpServerState.runtimeById = Object.fromEntries(
+      runtimeEntries.map(entry => [String(entry.serverId || ''), entry]).filter(entry => entry[0])
+    );
+    mcpServerState.loaded = true;
+  } catch {
+    mcpServerState.servers = [];
+    mcpServerState.runtimeById = {};
+    mcpServerState.loaded = false;
+  }
+}
+
+async function saveMcpServersToMain(servers) {
+  const normalized = normalizeMcpServerList(servers);
+  const result = await window.llmIde.saveMcpServers({ servers: normalized });
+  mcpServerState.servers = normalizeMcpServerList(result?.servers);
+  const runtimeEntries = Array.isArray(result?.runtime) ? result.runtime : [];
+  mcpServerState.runtimeById = Object.fromEntries(
+    runtimeEntries.map(entry => [String(entry.serverId || ''), entry]).filter(entry => entry[0])
+  );
+  mcpServerState.loaded = true;
+  return mcpServerState.servers;
+}
+
+async function refreshMcpRuntimeFromMain() {
+  const result = await window.llmIde.refreshMcpRuntime();
+  const runtimeEntries = Array.isArray(result?.runtime) ? result.runtime : [];
+  mcpServerState.runtimeById = Object.fromEntries(
+    runtimeEntries.map(entry => [String(entry.serverId || ''), entry]).filter(entry => entry[0])
+  );
+  return mcpServerState.runtimeById;
 }
 
 /* ========================================
@@ -1661,6 +1779,10 @@ function initSettingsMenu() {
   const apiKeyInput = document.getElementById('settingApiKey');
   const subAgentProfilesEditor = document.getElementById('settingSubAgentProfilesEditor');
   const addSubAgentProfileButton = document.getElementById('settingAddSubAgentProfile');
+  const mcpServersEditor = document.getElementById('settingMcpServersEditor');
+  const addMcpServerButton = document.getElementById('settingAddMcpServer');
+  const refreshMcpRuntimeButton = document.getElementById('settingRefreshMcpRuntime');
+  const mcpStatusEl = document.getElementById('settingMcpStatus');
   const chatDebugDumpsInput = document.getElementById('settingChatDebugDumpsEnabled');
   const promptSpecVersionInput = document.getElementById('settingPromptSpecVersion');
   const notifyEnabledInput = document.getElementById('settingNotifyEnabled');
@@ -1679,6 +1801,7 @@ function initSettingsMenu() {
   const chatModel = document.getElementById('chatModel');
   const chatApiKey = document.getElementById('chatApiKey');
   let modalSubAgentProfiles = [];
+  let modalMcpServers = [];
 
   function renderSubAgentProfilesEditor() {
     subAgentProfilesEditor.innerHTML = '';
@@ -1836,6 +1959,176 @@ function initSettingsMenu() {
     refreshSubAgentProfileActivityIndicators();
   }
 
+  function setMcpStatus(message, isError) {
+    if (!mcpStatusEl) return;
+    mcpStatusEl.textContent = message;
+    mcpStatusEl.classList.toggle('notify-status-error', Boolean(isError));
+  }
+
+  function renderMcpServersEditor() {
+    if (!mcpServersEditor) return;
+    mcpServersEditor.innerHTML = '';
+
+    for (const [index, server] of modalMcpServers.entries()) {
+      const card = document.createElement('div');
+      card.className = 'sub-agent-profile-card';
+
+      const titleRow = document.createElement('div');
+      titleRow.className = 'sub-agent-profile-title-row';
+
+      const title = document.createElement('div');
+      title.className = 'sub-agent-profile-title';
+      title.textContent = `MCP Server ${index + 1}`;
+
+      const runtime = mcpServerState.runtimeById[server.id];
+      const runtimeBadge = document.createElement('span');
+      runtimeBadge.className = 'sub-agent-profile-activity';
+      if (runtime) {
+        const healthyLabel = runtime.healthy ? 'healthy' : 'unhealthy';
+        runtimeBadge.textContent = `${runtime.lifecycle}/${healthyLabel} | tools=${Number(runtime.discoveredToolCount || 0)}`;
+      } else {
+        runtimeBadge.textContent = 'disconnected';
+      }
+
+      titleRow.appendChild(title);
+      titleRow.appendChild(runtimeBadge);
+
+      const idLabel = document.createElement('label');
+      idLabel.className = 'label';
+      idLabel.textContent = 'Server ID';
+
+      const idInput = document.createElement('input');
+      idInput.value = server.id;
+      idInput.placeholder = `mcp-server-${index + 1}`;
+      idInput.addEventListener('input', () => {
+        server.id = idInput.value.trim() || `mcp-server-${index + 1}`;
+      });
+
+      const labelLabel = document.createElement('label');
+      labelLabel.className = 'label';
+      labelLabel.textContent = 'Label';
+
+      const labelInput = document.createElement('input');
+      labelInput.value = server.label;
+      labelInput.placeholder = `MCP Server ${index + 1}`;
+      labelInput.addEventListener('input', () => {
+        server.label = labelInput.value.trim() || `MCP Server ${index + 1}`;
+      });
+
+      const transportLabel = document.createElement('label');
+      transportLabel.className = 'label';
+      transportLabel.textContent = 'Transport';
+
+      const transportSelect = document.createElement('select');
+      transportSelect.innerHTML = '<option value="stdio">stdio</option><option value="http">http</option><option value="sse">sse</option>';
+      transportSelect.value = normalizeMcpTransport(server.transport);
+
+      const commandLabel = document.createElement('label');
+      commandLabel.className = 'label';
+      commandLabel.textContent = 'Command (stdio)';
+
+      const commandInput = document.createElement('input');
+      commandInput.value = server.command || '';
+      commandInput.placeholder = 'npx';
+      commandInput.addEventListener('input', () => {
+        server.command = commandInput.value.trim();
+      });
+
+      const argsLabel = document.createElement('label');
+      argsLabel.className = 'label';
+      argsLabel.textContent = 'Args (space-separated)';
+
+      const argsInput = document.createElement('input');
+      argsInput.value = Array.isArray(server.args) ? server.args.join(' ') : '';
+      argsInput.placeholder = '@modelcontextprotocol/server-filesystem /path/to/repo';
+      argsInput.addEventListener('input', () => {
+        server.args = argsInput.value
+          .split(/\s+/)
+          .map(value => value.trim())
+          .filter(Boolean);
+      });
+
+      const endpointLabel = document.createElement('label');
+      endpointLabel.className = 'label';
+      endpointLabel.textContent = 'Endpoint (http/sse)';
+
+      const endpointInput = document.createElement('input');
+      endpointInput.value = server.endpoint || '';
+      endpointInput.placeholder = 'http://localhost:3000/mcp';
+      endpointInput.addEventListener('input', () => {
+        server.endpoint = endpointInput.value.trim();
+      });
+
+      const enableChatLabel = document.createElement('label');
+      enableChatLabel.className = 'orch-tool-item settings-checkbox';
+      const enableChatInput = document.createElement('input');
+      enableChatInput.type = 'checkbox';
+      enableChatInput.checked = Boolean(server.enabledForChat);
+      enableChatInput.addEventListener('change', () => {
+        server.enabledForChat = Boolean(enableChatInput.checked);
+      });
+      enableChatLabel.appendChild(enableChatInput);
+      enableChatLabel.appendChild(document.createTextNode(' Enable for Chat'));
+
+      const enableOrchLabel = document.createElement('label');
+      enableOrchLabel.className = 'orch-tool-item settings-checkbox';
+      const enableOrchInput = document.createElement('input');
+      enableOrchInput.type = 'checkbox';
+      enableOrchInput.checked = Boolean(server.enabledForOrchestration);
+      enableOrchInput.addEventListener('change', () => {
+        server.enabledForOrchestration = Boolean(enableOrchInput.checked);
+      });
+      enableOrchLabel.appendChild(enableOrchInput);
+      enableOrchLabel.appendChild(document.createTextNode(' Enable for Orchestration'));
+
+      const removeButton = document.createElement('button');
+      removeButton.type = 'button';
+      removeButton.className = 'sub-agent-profile-remove';
+      removeButton.textContent = 'Remove Server';
+      removeButton.addEventListener('click', () => {
+        modalMcpServers.splice(index, 1);
+        renderMcpServersEditor();
+      });
+
+      function syncTransportInputs() {
+        const transport = normalizeMcpTransport(transportSelect.value);
+        server.transport = transport;
+        const stdioMode = transport === 'stdio';
+        commandInput.disabled = !stdioMode;
+        argsInput.disabled = !stdioMode;
+        endpointInput.disabled = stdioMode;
+      }
+
+      transportSelect.addEventListener('change', syncTransportInputs);
+      syncTransportInputs();
+
+      card.appendChild(titleRow);
+      card.appendChild(idLabel);
+      card.appendChild(idInput);
+      card.appendChild(labelLabel);
+      card.appendChild(labelInput);
+      card.appendChild(transportLabel);
+      card.appendChild(transportSelect);
+      card.appendChild(commandLabel);
+      card.appendChild(commandInput);
+      card.appendChild(argsLabel);
+      card.appendChild(argsInput);
+      card.appendChild(endpointLabel);
+      card.appendChild(endpointInput);
+      card.appendChild(enableChatLabel);
+      card.appendChild(enableOrchLabel);
+      if (runtime && runtime.lastError) {
+        const errorEl = document.createElement('div');
+        errorEl.className = 'settings-help notify-status-error';
+        errorEl.textContent = `Last runtime error: ${runtime.lastError}`;
+        card.appendChild(errorEl);
+      }
+      card.appendChild(removeButton);
+
+      mcpServersEditor.appendChild(card);
+    }
+  }
+
   function renderNotifyEventCheckboxes() {
     if (!notifyEventsContainer) return;
     notifyEventsContainer.innerHTML = '';
@@ -1867,7 +2160,7 @@ function initSettingsMenu() {
     notifyStatusEl.classList.toggle('notify-status-error', Boolean(isError));
   }
 
-  function openModal() {
+  async function openModal() {
     input.value = String(settingsState.maxToolTurns);
     timeoutInput.value = String(settingsState.requestTimeoutMs);
     endpointInput.value = settingsState.endpoint;
@@ -1879,6 +2172,14 @@ function initSettingsMenu() {
       modalSubAgentProfiles = [createDefaultSubAgentProfile(0)];
     }
     renderSubAgentProfilesEditor();
+
+    await loadMcpServersFromMain();
+    modalMcpServers = normalizeMcpServerList(mcpServerState.servers);
+    renderMcpServersEditor();
+    const runtimeEntries = Object.values(mcpServerState.runtimeById);
+    const connectedCount = runtimeEntries.filter(entry => entry && entry.lifecycle === 'connected').length;
+    setMcpStatus(`Loaded ${modalMcpServers.length} server(s). Connected: ${connectedCount}.`);
+
     chatDebugDumpsInput.checked = settingsState.chatDebugDumpsEnabled;
     promptSpecVersionInput.value = normalizePromptSpecVersion(settingsState.promptSpecVersion);
     notifyEnabledInput.checked = settingsState.notifyEnabled;
@@ -1905,8 +2206,26 @@ function initSettingsMenu() {
     modalSubAgentProfiles.push(createDefaultSubAgentProfile(modalSubAgentProfiles.length));
     renderSubAgentProfilesEditor();
   });
+  addMcpServerButton.addEventListener('click', () => {
+    modalMcpServers.push(createDefaultMcpServer(modalMcpServers.length));
+    renderMcpServersEditor();
+  });
+  refreshMcpRuntimeButton.addEventListener('click', async () => {
+    setMcpStatus('Refreshing MCP runtime and tool discovery...');
+    refreshMcpRuntimeButton.disabled = true;
+    try {
+      const runtimeById = await refreshMcpRuntimeFromMain();
+      renderMcpServersEditor();
+      const connected = Object.values(runtimeById).filter(entry => entry && entry.lifecycle === 'connected').length;
+      setMcpStatus(`MCP runtime refreshed. Connected servers: ${connected}.`);
+    } catch (error) {
+      setMcpStatus(`Failed to refresh MCP runtime: ${error instanceof Error ? error.message : String(error)}`, true);
+    } finally {
+      refreshMcpRuntimeButton.disabled = false;
+    }
+  });
 
-  save.addEventListener('click', () => {
+  save.addEventListener('click', async () => {
     settingsState.maxToolTurns = clampMaxToolTurns(Number(input.value));
     settingsState.requestTimeoutMs = clampRequestTimeoutMs(Number(timeoutInput.value));
     settingsState.endpoint = endpointInput.value.trim() || settingsState.endpoint;
@@ -1930,6 +2249,15 @@ function initSettingsMenu() {
     settingsState.notifyEvents = normalizeNotifyEvents(readNotifyEventsFromUi());
     settingsState.notifyIncludeExcerpt = Boolean(notifyExcerptInput.checked);
     settingsState.notifyRateLimitSeconds = clampNotifySeconds(notifyRateInput.value);
+
+    try {
+      const persisted = await saveMcpServersToMain(modalMcpServers);
+      const connected = Object.values(mcpServerState.runtimeById).filter(entry => entry && entry.lifecycle === 'connected').length;
+      setMcpStatus(`Saved ${persisted.length} MCP server(s). Connected: ${connected}.`);
+    } catch (error) {
+      setMcpStatus(`Failed to save MCP servers: ${error instanceof Error ? error.message : String(error)}`, true);
+      return;
+    }
 
     chatProvider.value = settingsState.provider;
     chatEndpoint.value = settingsState.endpoint;
@@ -3175,6 +3503,7 @@ async function initChat() {
         maxToolTurns: settingsState.maxToolTurns,
         toolNames: [
           'list_reference_workspaces',
+          'list_mcp_servers',
           'browser_fetch',
           'web_search',
           'query_memory',
@@ -3297,6 +3626,7 @@ async function initOrchestration() {
 
   const availableTools = [
     'list_reference_workspaces',
+    'list_mcp_servers',
     'browser_fetch',
     'web_search',
     'query_memory',
@@ -3488,7 +3818,7 @@ async function initOrchestration() {
   function defaultTools() {
     return availableTools.map(name => ({
       name,
-      enabled: ['list_repo_tree', 'list_dir', 'read_file', 'grep_search'].includes(name)
+      enabled: ['list_mcp_servers', 'list_repo_tree', 'list_dir', 'read_file', 'grep_search'].includes(name)
     }));
   }
 
@@ -4313,6 +4643,7 @@ async function initAdvancedOrchestration() {
   const markdownEl = document.getElementById('orchLogMarkdown');
 
   const availableTools = [
+    'list_mcp_servers',
     'browser_fetch',
     'web_search',
     'query_memory',
@@ -4388,7 +4719,7 @@ async function initAdvancedOrchestration() {
   function defaultTools() {
     return availableTools.map(toolName => ({
       name: toolName,
-      enabled: ['list_reference_workspaces', 'list_repo_tree', 'list_dir', 'read_file', 'grep_search'].includes(toolName)
+      enabled: ['list_reference_workspaces', 'list_mcp_servers', 'list_repo_tree', 'list_dir', 'read_file', 'grep_search'].includes(toolName)
     }));
   }
 

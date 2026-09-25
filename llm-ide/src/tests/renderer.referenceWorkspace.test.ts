@@ -29,7 +29,7 @@ test('reference workspace handlers call an existing loadWorkspaceState helper', 
 test('chat and advanced orchestration expose reference workspace discovery tool', async () => {
   const source = await readRendererSource();
 
-  assert.match(source, /toolNames:\s*\[\s*'list_reference_workspaces'/);
-  assert.match(source, /const availableTools = \[\s*'list_reference_workspaces'/);
-  assert.match(source, /enabled:\s*\['list_reference_workspaces', 'list_repo_tree', 'list_dir', 'read_file', 'grep_search'\]\.includes\(toolName\)/);
+  assert.match(source, /toolNames:\s*\[\s*'list_reference_workspaces',\s*'list_mcp_servers'/);
+  assert.match(source, /const availableTools = \[\s*'list_reference_workspaces',\s*'list_mcp_servers'/);
+  assert.match(source, /enabled:\s*\['list_reference_workspaces', 'list_mcp_servers', 'list_repo_tree', 'list_dir', 'read_file', 'grep_search'\]\.includes\(toolName\)/);
 });

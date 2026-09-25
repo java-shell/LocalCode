@@ -42,6 +42,35 @@ export interface LLMConfig {
   requestTimeoutMs?: number;
 }
 
+export type MCPServerTransport = 'stdio' | 'http' | 'sse';
+export type MCPServerTarget = 'chat' | 'orchestration';
+
+export interface MCPServerConfig {
+  id: string;
+  label: string;
+  transport: MCPServerTransport;
+  enabledForChat: boolean;
+  enabledForOrchestration: boolean;
+  command?: string;
+  args?: string[];
+  endpoint?: string;
+  env?: Record<string, string>;
+}
+
+export type MCPServerLifecycleState = 'disconnected' | 'connecting' | 'connected' | 'error';
+
+export interface MCPServerRuntimeStatus {
+  serverId: string;
+  label: string;
+  transport: MCPServerTransport;
+  lifecycle: MCPServerLifecycleState;
+  healthy: boolean;
+  discoveredToolCount: number;
+  discoveredToolNames: string[];
+  lastError?: string;
+  updatedAt: string;
+}
+
 export type PromptSpecVersion = 'v1' | 'v2';
 
 export interface SubAgentConfigProfile extends LLMConfig {
@@ -85,6 +114,7 @@ export interface ChatStreamRequest {
   config: LLMConfig;
   subAgentConfig?: LLMConfig;
   subAgentConfigs?: SubAgentConfigProfile[];
+  mcpServers?: MCPServerConfig[];
   prompt: string;
   historyMessages?: ChatMessage[];
   toolNames?: string[];
@@ -101,6 +131,7 @@ export interface OrchestrationRunRequest {
   plan: OrchestrationPlan;
   subAgentConfig?: LLMConfig;
   subAgentConfigs?: SubAgentConfigProfile[];
+  mcpServers?: MCPServerConfig[];
   prompt: string;
   memoryNamespace?: string;
   memoryGlobalNamespace?: string;

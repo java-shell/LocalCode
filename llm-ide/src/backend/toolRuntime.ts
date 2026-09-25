@@ -4,7 +4,15 @@ import simpleGit from 'simple-git';
 import axios from 'axios';
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
 import { chatWithTools } from './llmClient';
-import { ToolDefinition, LLMConfig, PromptSpecVersion, ReferenceWorkspace, ChatMessage } from '../shared/types';
+import {
+  ToolDefinition,
+  LLMConfig,
+  PromptSpecVersion,
+  ReferenceWorkspace,
+  ChatMessage,
+  MCPServerConfig,
+  MCPServerRuntimeStatus
+} from '../shared/types';
 import type { TurboVecMemory, TurboVecNamespaceDiagnostics } from './turboVecMemory';
 
 interface RuntimeSubAgentProfile {
@@ -55,6 +63,10 @@ interface RuntimeContext {
   subAgentDepth?: number;
   onAgentEvent?: (message: string) => void;
   onQueryUser?: QueryUserCallback;
+  mcpServers?: MCPServerConfig[];
+  mcpServerStatuses?: MCPServerRuntimeStatus[];
+  mcpToolDefinitions?: ToolDefinition[];
+  invokeMcpTool?: (toolName: string, args: Record<string, unknown>) => Promise<unknown>;
   requestReferenceWriteApproval?: (payload: {
     tool: string;
     summary: string;
@@ -303,6 +315,18 @@ export const toolDefinitions: ToolDefinition[] = [
       description:
         'List configured reference workspaces and their scope IDs. ' +
         'Use returned scope values (ref:<id>) in other tools that accept a scope parameter.',
+      parameters: {
+        type: 'object',
+        properties: {}
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_mcp_servers',
+      description:
+        'List MCP servers enabled for the current run, including connection details and workflow targeting.',
       parameters: {
         type: 'object',
         properties: {}
@@ -775,7 +799,11 @@ export const toolDefinitions: ToolDefinition[] = [
 
 export function getAllowedToolDefinitions(names: string[], context?: RuntimeContext): ToolDefinition[] {
   const allowed = new Set(names);
-  const filtered = toolDefinitions.filter(tool => allowed.has(tool.function.name));
+  const combinedToolDefinitions = [
+    ...toolDefinitions,
+    ...(Array.isArray(context?.mcpToolDefinitions) ? context.mcpToolDefinitions : [])
+  ];
+  const filtered = combinedToolDefinitions.filter(tool => allowed.has(tool.function.name));
   return filtered.map(tool => {
     const params = tool.function.parameters;
     if (!params || !params.properties) {
@@ -2374,6 +2402,27 @@ async function listReferenceWorkspacesTool(_args: Record<string, unknown>, conte
   };
 }
 
+async function listMcpServersTool(_args: Record<string, unknown>, context?: RuntimeContext) {
+  const servers = Array.isArray(context?.mcpServers) ? context.mcpServers : [];
+  const statusById = new Map(
+    (Array.isArray(context?.mcpServerStatuses) ? context.mcpServerStatuses : []).map(status => [status.serverId, status])
+  );
+  return {
+    count: servers.length,
+    servers: servers.map(server => ({
+      id: server.id,
+      label: server.label,
+      transport: server.transport,
+      endpoint: server.endpoint,
+      command: server.command,
+      args: server.args ?? [],
+      enabledForChat: Boolean(server.enabledForChat),
+      enabledForOrchestration: Boolean(server.enabledForOrchestration),
+      status: statusById.get(server.id)
+    }))
+  };
+}
+
 
 
 async function enforceReferenceWriteApproval(
@@ -2434,6 +2483,8 @@ export async function executeTool(name: string, args: unknown, context?: Runtime
   switch (name) {
     case 'list_reference_workspaces':
       return listReferenceWorkspacesTool(refSafeArgs, context);
+    case 'list_mcp_servers':
+      return listMcpServersTool(refSafeArgs, context);
     case 'list_dir':
       return listDir(refSafeArgs, context);
     case 'browser_fetch':
@@ -2484,6 +2535,9 @@ export async function executeTool(name: string, args: unknown, context?: Runtime
     case 'query_user':
       return queryUser(refSafeArgs, context);
     default:
+      if (context?.invokeMcpTool) {
+        return context.invokeMcpTool(name, refSafeArgs);
+      }
       throw new Error(`Unsupported tool: ${name}`);
   }
 }
