@@ -828,6 +828,83 @@ button.btn-danger:hover:not(:disabled) {
   margin: 0;
 }
 
+.chat-advanced-panel {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(6, 12, 22, 0.5);
+  overflow: hidden;
+}
+
+.chat-advanced-header {
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid transparent;
+  background: transparent;
+  color: var(--text);
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.chat-advanced-header:hover {
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.chat-advanced-header:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.chat-advanced-title-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-advanced-chevron {
+  display: inline-block;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  transition: transform var(--transition);
+}
+
+.chat-advanced-panel.collapsed .chat-advanced-chevron {
+  transform: rotate(-90deg);
+}
+
+.chat-advanced-body {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+}
+
+.chat-advanced-panel.collapsed .chat-advanced-body {
+  display: none;
+}
+
+.chat-advanced-panel:not(.collapsed) .chat-advanced-header {
+  border-bottom-color: var(--border);
+}
+
+.chat-advanced-panel.advanced-disabled .chat-advanced-body > :not(.chat-think-toggle) {
+  opacity: 0.55;
+}
+
+.chat-advanced-panel.advanced-disabled .chat-advanced-body input:not(#chatAdvancedSettingsEnabled),
+.chat-advanced-panel.advanced-disabled .chat-advanced-body textarea {
+  pointer-events: none;
+}
+
+.chat-advanced-json {
+  min-height: 76px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+}
+
 .chat-settings-panel.collapsed {
   display: none;
 }

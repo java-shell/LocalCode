@@ -894,6 +894,15 @@ function payloadBase(config: LLMConfig, messages: ChatMessage[]): Record<string,
   if ((config.maxTokens ?? 0) > 0) {
     payload.max_tokens = config.maxTokens;
   }
+  if (config.openaiParameters && typeof config.openaiParameters === 'object') {
+    const reserved = new Set(['model', 'messages', 'tools', 'tool_choice', 'stream']);
+    for (const [key, value] of Object.entries(config.openaiParameters)) {
+      if (!key || reserved.has(key)) {
+        continue;
+      }
+      payload[key] = value;
+    }
+  }
   return payload;
 }
 
@@ -908,6 +917,14 @@ function buildOllamaNativePayload(config: LLMConfig, messages: ChatMessage[], to
   if (numCtx) {
     options.num_ctx = numCtx;
   }
+  if (config.ollamaOptions && typeof config.ollamaOptions === 'object') {
+    for (const [key, value] of Object.entries(config.ollamaOptions)) {
+      if (!key) {
+        continue;
+      }
+      options[key] = value;
+    }
+  }
 
   const payload: Record<string, unknown> = {
     model: config.model,
@@ -916,6 +933,15 @@ function buildOllamaNativePayload(config: LLMConfig, messages: ChatMessage[], to
     think: Boolean(config.ollamaThink),
     options
   };
+  if (config.ollamaParameters && typeof config.ollamaParameters === 'object') {
+    const reserved = new Set(['model', 'messages', 'tools', 'stream', 'think', 'options']);
+    for (const [key, value] of Object.entries(config.ollamaParameters)) {
+      if (!key || reserved.has(key)) {
+        continue;
+      }
+      payload[key] = value;
+    }
+  }
   if (tools.length > 0) {
     payload.tools = tools;
   }

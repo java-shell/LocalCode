@@ -135,6 +135,67 @@
               <input id="chatOllamaStreamingMode" type="checkbox" />
               Enable Ollama Streaming
             </label>
+            <div id="chatAdvancedSettingsPanel" class="chat-advanced-panel collapsed">
+              <button
+                id="chatAdvancedSettingsToggle"
+                type="button"
+                class="chat-advanced-header"
+                aria-expanded="false"
+              >
+                <span class="chat-advanced-title-row">
+                  <span class="chat-advanced-chevron" aria-hidden="true">▾</span>
+                  <span>Advanced Settings</span>
+                </span>
+              </button>
+              <div class="chat-advanced-body">
+                <label class="orch-tool-item chat-think-toggle" for="chatAdvancedSettingsEnabled">
+                  <input id="chatAdvancedSettingsEnabled" type="checkbox" />
+                  Enable advanced settings
+                </label>
+                <label class="label" for="chatAdvancedTemperature">Temperature (0.0 - 2.0)</label>
+                <input id="chatAdvancedTemperature" type="number" min="0" max="2" step="0.01" value="0.2" />
+                <label class="label" for="chatAdvancedMaxTokens">Max Output Tokens (both providers)</label>
+                <input id="chatAdvancedMaxTokens" type="number" min="1" step="1" placeholder="Optional" />
+
+                <label class="label" for="chatAdvancedOpenAIPresencePenalty">OpenAI Presence Penalty (-2.0 - 2.0)</label>
+                <input id="chatAdvancedOpenAIPresencePenalty" type="number" min="-2" max="2" step="0.01" placeholder="Optional" />
+                <label class="label" for="chatAdvancedOpenAIFrequencyPenalty">OpenAI Frequency Penalty (-2.0 - 2.0)</label>
+                <input id="chatAdvancedOpenAIFrequencyPenalty" type="number" min="-2" max="2" step="0.01" placeholder="Optional" />
+                <div class="row-inline">
+                  <label class="label" for="chatAdvancedOpenAIExtraJson">OpenAI Request Parameters (JSON object)</label>
+                  <button id="chatAdvancedOpenAITemplate" type="button">Load OpenAI Template</button>
+                </div>
+                <textarea
+                  id="chatAdvancedOpenAIExtraJson"
+                  class="chat-advanced-json"
+                  rows="7"
+                  placeholder='{"top_p":0.9,"seed":42,"n":1,"stop":["\n\n"]}'
+                ></textarea>
+
+                <label class="label" for="chatAdvancedOllamaRepetitionPenalty">Ollama Repetition Penalty (0.0+)</label>
+                <input id="chatAdvancedOllamaRepetitionPenalty" type="number" min="0" step="0.01" placeholder="Optional" />
+                <div class="row-inline">
+                  <label class="label" for="chatAdvancedOllamaExtraJson">Ollama Options (JSON object)</label>
+                  <button id="chatAdvancedOllamaOptionsTemplate" type="button">Load Ollama Options Template</button>
+                </div>
+                <textarea
+                  id="chatAdvancedOllamaExtraJson"
+                  class="chat-advanced-json"
+                  rows="10"
+                  placeholder='{"top_k":40,"top_p":0.95,"seed":42}'
+                ></textarea>
+                <div class="row-inline">
+                  <label class="label" for="chatAdvancedOllamaParametersJson">Ollama Request Parameters (JSON object)</label>
+                  <button id="chatAdvancedOllamaParametersTemplate" type="button">Load Ollama Request Template</button>
+                </div>
+                <textarea
+                  id="chatAdvancedOllamaParametersJson"
+                  class="chat-advanced-json"
+                  rows="6"
+                  placeholder='{"keep_alive":"5m","format":"json"}'
+                ></textarea>
+              </div>
+            </div>
             <label class="label">API Key (optional)</label>
             <input id="chatApiKey" type="password" placeholder="sk-..." />
             <label class="label">Global Memory Namespace (optional)</label>

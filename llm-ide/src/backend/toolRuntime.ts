@@ -45,7 +45,35 @@ interface RuntimeContext {
   referenceWorkspaces?: ReferenceWorkspace[];
   onTerminalOutput?: (payload: { source: 'stdout' | 'stderr'; text: string }) => void;
   onTerminalEvent?: (payload: { type: 'start' | 'end'; command: string; cwd: string; code?: number | null; signal?: string | null }) => void;
-  setActiveTerminalProcess?: (child: ChildProcessWithoutNullStreams | null) => void;
+  setActiveTerminalProcess?: (
+    child: ChildProcessWithoutNullStreams | null,
+    metadata?: {
+      command?: string;
+      cwd?: string;
+      replaceOnlyIfCurrent?: ChildProcessWithoutNullStreams | null;
+      code?: number | null;
+      signal?: string | null;
+    }
+  ) => void;
+  getActiveTerminalProcessInfo?: () => {
+    running: boolean;
+    pid?: number;
+    command?: string;
+    cwd?: string;
+    startedAt?: string;
+    code?: number | null;
+    signal?: string | null;
+  };
+  interruptActiveTerminalProcess?: () => {
+    interrupted: boolean;
+    reason?: string;
+  };
+  waitForActiveTerminalProcess?: (timeoutMs: number) => Promise<{
+    running: boolean;
+    timedOut?: boolean;
+    code?: number | null;
+    signal?: string | null;
+  }>;
   requestOutsideWorkspaceApproval?: (payload: {
     tool: string;
     summary: string;
@@ -595,9 +623,49 @@ export const toolDefinitions: ToolDefinition[] = [
           command: { type: 'string' },
           cwd: { type: 'string' },
           timeoutMs: { type: 'number' },
+          timeoutAction: {
+            type: 'string',
+            enum: ['continue', 'kill'],
+            description: 'When timeoutMs is reached: continue = return while command keeps running; kill = terminate process.'
+          },
           scope: scopeProperty
         },
         required: ['command']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'terminal_process_status',
+      description: 'Get status of the currently running terminal command (if any).',
+      parameters: {
+        type: 'object',
+        properties: {}
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'wait_for_terminal_process',
+      description: 'Wait for the currently running terminal process to complete, or return when wait timeout is reached.',
+      parameters: {
+        type: 'object',
+        properties: {
+          timeoutMs: { type: 'number' }
+        }
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'interrupt_terminal_process',
+      description: 'Send Ctrl+C (SIGINT) to the currently running terminal process.',
+      parameters: {
+        type: 'object',
+        properties: {}
       }
     }
   },
@@ -1583,6 +1651,7 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
   const cwd = args.cwd ? resolveScopedPath(String(args.cwd), scope, context) : scopeBase;
   const rawTimeoutMs = Number(args.timeoutMs ?? 30000);
   const timeoutMs = rawTimeoutMs <= 0 ? 0 : Math.max(1000, Math.min(120000, rawTimeoutMs));
+  const timeoutAction = String(args.timeoutAction ?? 'continue').trim().toLowerCase() === 'kill' ? 'kill' : 'continue';
   const shellConfig = process.platform === 'win32'
     ? {
         executable: process.env.ComSpec || 'cmd.exe',
@@ -1626,19 +1695,28 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
     stdoutTruncated?: boolean;
     stderrTruncated?: boolean;
     maxCaptureChars?: number;
+    timeoutMs?: number;
+    timedOut?: boolean;
+    running?: boolean;
+    timeoutAction?: 'continue' | 'kill';
+    message?: string;
   }>(resolve => {
     const child = spawn(shellConfig.executable, shellConfig.args, {
       cwd,
       env: process.env
     });
 
-    context?.setActiveTerminalProcess?.(child);
+    context?.setActiveTerminalProcess?.(child, {
+      command,
+      cwd: terminalCwd
+    });
 
     let stdout = '';
     let stderr = '';
     let stdoutTruncated = false;
     let stderrTruncated = false;
     let completed = false;
+    let timedOutWhileRunning = false;
 
     const handleAbort = () => {
       if (completed) {
@@ -1684,7 +1762,11 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
         code: result.code,
         signal: result.signal
       });
-      context?.setActiveTerminalProcess?.(null);
+      context?.setActiveTerminalProcess?.(null, {
+        replaceOnlyIfCurrent: child,
+        code: result.code,
+        signal: result.signal
+      });
 
       resolve({
         command,
@@ -1704,7 +1786,33 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
     const timeoutHandle = timeoutMs > 0
       ? setTimeout(() => {
           if (!completed) {
-            child.kill('SIGTERM');
+            if (timeoutAction === 'kill') {
+              child.kill('SIGTERM');
+              return;
+            }
+
+            timedOutWhileRunning = true;
+            completed = true;
+            resolve({
+              command,
+              scope,
+              cwd: terminalCwd,
+              success: false,
+              code: null,
+              signal: null,
+              stdout,
+              stderr,
+              stdoutTruncated,
+              stderrTruncated,
+              maxCaptureChars: TERMINAL_CAPTURE_MAX_CHARS,
+              timeoutMs,
+              timedOut: true,
+              running: true,
+              timeoutAction,
+              message:
+                `Command is still running after ${timeoutMs}ms. ` +
+                'Use terminal_process_status, wait_for_terminal_process, or interrupt_terminal_process.'
+            });
           }
         }, timeoutMs)
       : null;
@@ -1749,6 +1857,9 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
       }
+      if (timedOutWhileRunning) {
+        return;
+      }
       const detail = (err as NodeJS.ErrnoException).code === 'ENOENT'
         ? `${err.message} (shell: ${shellConfig.executable}, cwd: ${cwd})`
         : err.message;
@@ -1759,9 +1870,88 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
       }
+      if (timedOutWhileRunning) {
+        context?.onTerminalEvent?.({
+          type: 'end',
+          command,
+          cwd: terminalCwd,
+          code,
+          signal
+        });
+        context?.setActiveTerminalProcess?.(null, {
+          replaceOnlyIfCurrent: child,
+          code,
+          signal
+        });
+        return;
+      }
       finish({ success: code === 0, code, signal });
     });
   });
+}
+
+function terminalProcessStatus(args: Record<string, unknown>, context?: RuntimeContext) {
+  void args;
+  const info = context?.getActiveTerminalProcessInfo?.();
+  if (!info || !info.running) {
+    return {
+      running: false
+    };
+  }
+
+  return {
+    running: true,
+    pid: info.pid,
+    command: info.command,
+    cwd: info.cwd,
+    startedAt: info.startedAt,
+    code: info.code ?? null,
+    signal: info.signal ?? null
+  };
+}
+
+async function waitForTerminalProcess(args: Record<string, unknown>, context?: RuntimeContext) {
+  const rawTimeoutMs = Number(args.timeoutMs ?? 30000);
+  const timeoutMs = rawTimeoutMs <= 0 ? 0 : Math.max(1000, Math.min(300000, rawTimeoutMs));
+
+  const info = context?.getActiveTerminalProcessInfo?.();
+  if (!info || !info.running) {
+    return {
+      running: false,
+      timedOut: false,
+      code: info?.code ?? null,
+      signal: info?.signal ?? null
+    };
+  }
+
+  const waited = await context?.waitForActiveTerminalProcess?.(timeoutMs);
+  if (!waited) {
+    return {
+      running: true,
+      timedOut: true,
+      timeoutMs
+    };
+  }
+
+  return {
+    running: waited.running,
+    timedOut: Boolean(waited.timedOut),
+    code: waited.code ?? null,
+    signal: waited.signal ?? null
+  };
+}
+
+function interruptTerminalProcess(args: Record<string, unknown>, context?: RuntimeContext) {
+  void args;
+  const result = context?.interruptActiveTerminalProcess?.();
+  if (!result) {
+    return {
+      interrupted: false,
+      reason: 'terminal_control_unavailable'
+    };
+  }
+
+  return result;
 }
 
 /* ------------------------------------------------------------------ */
@@ -2523,6 +2713,12 @@ export async function executeTool(name: string, args: unknown, context?: Runtime
       return gitCommit(refSafeArgs, context);
     case 'run_terminal_command':
       return runTerminalCommand(refSafeArgs, context);
+    case 'terminal_process_status':
+      return terminalProcessStatus(refSafeArgs, context);
+    case 'wait_for_terminal_process':
+      return waitForTerminalProcess(refSafeArgs, context);
+    case 'interrupt_terminal_process':
+      return interruptTerminalProcess(refSafeArgs, context);
     case 'complete_orchestration_task':
       // Intercepted by the orchestration engine; this fallback handles unexpected direct calls.
       return { ok: true, message: 'Task completion acknowledged.' };

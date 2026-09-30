@@ -38,6 +38,9 @@ export interface LLMConfig {
   ollamaStreaming?: boolean;
   temperature: number;
   maxTokens?: number;
+  openaiParameters?: Record<string, unknown>;
+  ollamaOptions?: Record<string, unknown>;
+  ollamaParameters?: Record<string, unknown>;
   contextWindowTokens?: number;
   requestTimeoutMs?: number;
 }

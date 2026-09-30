@@ -43,6 +43,16 @@ const settingsState = {
   notifyPriority: 0,
   notifyRateLimitSeconds: 15,
   chatSettingsCollapsed: true,
+  advancedSettingsCollapsed: true,
+  advancedSettingsEnabled: false,
+  advancedTemperature: 0.2,
+  advancedMaxTokens: '',
+  advancedOpenAIPresencePenalty: '',
+  advancedOpenAIFrequencyPenalty: '',
+  advancedOpenAIExtraJson: '',
+  advancedOllamaRepetitionPenalty: '',
+  advancedOllamaExtraJson: '',
+  advancedOllamaParametersJson: '',
   contextUsageCollapsed: false,
   lockedNamespaces: []
 };
@@ -107,6 +117,63 @@ const contextWindowHints = [
   { pattern: /(deepseek|phi-4)/i, tokens: 65536 }
 ];
 
+const OPENAI_ADVANCED_TEMPLATE = JSON.stringify(
+  {
+    top_p: 1,
+    n: 1,
+    stop: ['\\n\\n'],
+    seed: 42,
+    logit_bias: {},
+    response_format: { type: 'text' },
+    user: ''
+  },
+  null,
+  2
+);
+
+const OLLAMA_OPTIONS_TEMPLATE = JSON.stringify(
+  {
+    num_keep: 5,
+    seed: 42,
+    num_predict: 256,
+    top_k: 40,
+    top_p: 0.9,
+    min_p: 0,
+    typical_p: 1,
+    repeat_last_n: 64,
+    temperature: 0.2,
+    repeat_penalty: 1.1,
+    presence_penalty: 0,
+    frequency_penalty: 0,
+    penalize_newline: false,
+    stop: ['user:'],
+    numa: false,
+    num_ctx: 8192,
+    num_batch: 2,
+    num_gpu: 1,
+    main_gpu: 0,
+    low_vram: false,
+    vocab_only: false,
+    use_mmap: true,
+    use_mlock: false,
+    num_thread: 8,
+    mirostat: 0,
+    mirostat_tau: 5,
+    mirostat_eta: 0.1
+  },
+  null,
+  2
+);
+
+const OLLAMA_REQUEST_TEMPLATE = JSON.stringify(
+  {
+    keep_alive: '5m',
+    format: 'json'
+  },
+  null,
+  2
+);
+
 function clampMaxToolTurns(value) {
   if (!Number.isFinite(value)) return 40;
   return Math.max(1, Math.min(200, Math.floor(value)));
@@ -115,6 +182,55 @@ function clampMaxToolTurns(value) {
 function clampRequestTimeoutMs(value) {
   if (!Number.isFinite(value)) return 180000;
   return Math.max(1000, Math.min(3600000, Math.floor(value)));
+}
+
+function clampMaxTokens(value) {
+  if (!Number.isFinite(value)) return null;
+  return Math.max(1, Math.min(4_000_000, Math.floor(Number(value))));
+}
+
+function clampTemperature(value) {
+  if (!Number.isFinite(value)) return 0.2;
+  return Math.max(0, Math.min(2, Number(value)));
+}
+
+function clampPenalty(value) {
+  if (!Number.isFinite(value)) return null;
+  return Math.max(-2, Math.min(2, Number(value)));
+}
+
+function clampNonNegative(value) {
+  if (!Number.isFinite(value)) return null;
+  return Math.max(0, Number(value));
+}
+
+function parseOptionalNumber(value) {
+  const text = String(value ?? '').trim();
+  if (!text) {
+    return null;
+  }
+  const numeric = Number(text);
+  if (!Number.isFinite(numeric)) {
+    return null;
+  }
+  return numeric;
+}
+
+function parseOptionalAdvancedJsonObject(raw, label) {
+  const text = String(raw ?? '').trim();
+  if (!text) {
+    return {};
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw new Error(`${label} must be valid JSON.`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error(`${label} must be a JSON object.`);
+  }
+  return parsed;
 }
 
 function clampContextWindowTokens(value) {
@@ -885,6 +1001,36 @@ function loadSettings() {
     settingsState.notifyPriority = Math.max(0, Math.min(5, Number(parsed.notifyPriority ?? 0) || 0));
     settingsState.notifyRateLimitSeconds = clampNotifySeconds(parsed.notifyRateLimitSeconds ?? 15);
     settingsState.chatSettingsCollapsed = Boolean(parsed.chatSettingsCollapsed ?? settingsState.chatSettingsCollapsed);
+    settingsState.advancedSettingsCollapsed = Boolean(
+      parsed.advancedSettingsCollapsed ?? settingsState.advancedSettingsCollapsed
+    );
+    settingsState.advancedSettingsEnabled = Boolean(
+      parsed.advancedSettingsEnabled ?? settingsState.advancedSettingsEnabled
+    );
+    settingsState.advancedTemperature = clampTemperature(
+      Number(parsed.advancedTemperature ?? settingsState.advancedTemperature)
+    );
+    settingsState.advancedMaxTokens = String(
+      parsed.advancedMaxTokens ?? settingsState.advancedMaxTokens
+    ).trim();
+    settingsState.advancedOpenAIPresencePenalty = String(
+      parsed.advancedOpenAIPresencePenalty ?? settingsState.advancedOpenAIPresencePenalty
+    ).trim();
+    settingsState.advancedOpenAIFrequencyPenalty = String(
+      parsed.advancedOpenAIFrequencyPenalty ?? settingsState.advancedOpenAIFrequencyPenalty
+    ).trim();
+    settingsState.advancedOpenAIExtraJson = String(
+      parsed.advancedOpenAIExtraJson ?? settingsState.advancedOpenAIExtraJson
+    ).trim();
+    settingsState.advancedOllamaRepetitionPenalty = String(
+      parsed.advancedOllamaRepetitionPenalty ?? settingsState.advancedOllamaRepetitionPenalty
+    ).trim();
+    settingsState.advancedOllamaExtraJson = String(
+      parsed.advancedOllamaExtraJson ?? settingsState.advancedOllamaExtraJson
+    ).trim();
+    settingsState.advancedOllamaParametersJson = String(
+      parsed.advancedOllamaParametersJson ?? settingsState.advancedOllamaParametersJson
+    ).trim();
     settingsState.contextUsageCollapsed = Boolean(parsed.contextUsageCollapsed ?? settingsState.contextUsageCollapsed);
     settingsState.lockedNamespaces = Array.isArray(parsed.lockedNamespaces) ? parsed.lockedNamespaces : [];
   } catch {
@@ -917,6 +1063,16 @@ function loadSettings() {
     settingsState.notifyPriority = 0;
     settingsState.notifyRateLimitSeconds = 15;
     settingsState.chatSettingsCollapsed = true;
+    settingsState.advancedSettingsCollapsed = true;
+    settingsState.advancedSettingsEnabled = false;
+    settingsState.advancedTemperature = 0.2;
+    settingsState.advancedMaxTokens = '';
+    settingsState.advancedOpenAIPresencePenalty = '';
+    settingsState.advancedOpenAIFrequencyPenalty = '';
+    settingsState.advancedOpenAIExtraJson = '';
+    settingsState.advancedOllamaRepetitionPenalty = '';
+    settingsState.advancedOllamaExtraJson = '';
+    settingsState.advancedOllamaParametersJson = '';
     settingsState.contextUsageCollapsed = false;
     settingsState.lockedNamespaces = [];
   }
@@ -2361,6 +2517,20 @@ async function initChat() {
   const settingsPanel = document.getElementById('chatSettingsPanel');
   const refreshModels = document.getElementById('chatRefreshModels');
   const chatContextWindowTokens = document.getElementById('chatContextWindowTokens');
+  const advancedPanel = document.getElementById('chatAdvancedSettingsPanel');
+  const advancedToggle = document.getElementById('chatAdvancedSettingsToggle');
+  const advancedEnabled = document.getElementById('chatAdvancedSettingsEnabled');
+  const advancedTemperature = document.getElementById('chatAdvancedTemperature');
+  const advancedMaxTokens = document.getElementById('chatAdvancedMaxTokens');
+  const advancedOpenAIPresencePenalty = document.getElementById('chatAdvancedOpenAIPresencePenalty');
+  const advancedOpenAIFrequencyPenalty = document.getElementById('chatAdvancedOpenAIFrequencyPenalty');
+  const advancedOpenAIExtraJson = document.getElementById('chatAdvancedOpenAIExtraJson');
+  const advancedOpenAITemplate = document.getElementById('chatAdvancedOpenAITemplate');
+  const advancedOllamaRepetitionPenalty = document.getElementById('chatAdvancedOllamaRepetitionPenalty');
+  const advancedOllamaExtraJson = document.getElementById('chatAdvancedOllamaExtraJson');
+  const advancedOllamaOptionsTemplate = document.getElementById('chatAdvancedOllamaOptionsTemplate');
+  const advancedOllamaParametersJson = document.getElementById('chatAdvancedOllamaParametersJson');
+  const advancedOllamaParametersTemplate = document.getElementById('chatAdvancedOllamaParametersTemplate');
   const apiKey = document.getElementById('chatApiKey');
   const chatMemoryGlobalNamespace = document.getElementById('chatMemoryGlobalNamespace');
   const chatMemoryNamespace = document.getElementById('chatMemoryNamespace');
@@ -2376,7 +2546,82 @@ async function initChat() {
   apiKey.value = settingsState.apiKey;
   ollamaThinkMode.checked = Boolean(settingsState.ollamaThink);
   ollamaStreamingMode.checked = Boolean(settingsState.ollamaStreaming);
+  advancedEnabled.checked = Boolean(settingsState.advancedSettingsEnabled);
+  advancedTemperature.value = String(clampTemperature(Number(settingsState.advancedTemperature ?? 0.2)));
+  advancedMaxTokens.value = String(settingsState.advancedMaxTokens || '');
+  advancedOpenAIPresencePenalty.value = String(settingsState.advancedOpenAIPresencePenalty || '');
+  advancedOpenAIFrequencyPenalty.value = String(settingsState.advancedOpenAIFrequencyPenalty || '');
+  advancedOpenAIExtraJson.value = String(settingsState.advancedOpenAIExtraJson || '');
+  advancedOllamaRepetitionPenalty.value = String(settingsState.advancedOllamaRepetitionPenalty || '');
+  advancedOllamaExtraJson.value = String(settingsState.advancedOllamaExtraJson || '');
+  advancedOllamaParametersJson.value = String(settingsState.advancedOllamaParametersJson || '');
   chatNewMemoryNamespace.value = '';
+
+  function applyAdvancedSettingsVisibility() {
+    advancedPanel.classList.toggle('collapsed', settingsState.advancedSettingsCollapsed);
+    advancedPanel.classList.toggle('advanced-disabled', !settingsState.advancedSettingsEnabled);
+    advancedToggle.setAttribute('aria-expanded', String(!settingsState.advancedSettingsCollapsed));
+  }
+
+  function saveAdvancedSettingsFromInputs() {
+    settingsState.advancedSettingsEnabled = Boolean(advancedEnabled.checked);
+    settingsState.advancedTemperature = clampTemperature(Number(advancedTemperature.value));
+    settingsState.advancedMaxTokens = String(advancedMaxTokens.value ?? '').trim();
+    settingsState.advancedOpenAIPresencePenalty = String(advancedOpenAIPresencePenalty.value ?? '').trim();
+    settingsState.advancedOpenAIFrequencyPenalty = String(advancedOpenAIFrequencyPenalty.value ?? '').trim();
+    settingsState.advancedOpenAIExtraJson = String(advancedOpenAIExtraJson.value ?? '').trim();
+    settingsState.advancedOllamaRepetitionPenalty = String(advancedOllamaRepetitionPenalty.value ?? '').trim();
+    settingsState.advancedOllamaExtraJson = String(advancedOllamaExtraJson.value ?? '').trim();
+    settingsState.advancedOllamaParametersJson = String(advancedOllamaParametersJson.value ?? '').trim();
+    saveSettings();
+    applyAdvancedSettingsVisibility();
+  }
+
+  function buildAdvancedConfigOverrides() {
+    if (!settingsState.advancedSettingsEnabled) {
+      return {
+        temperature: 0.2
+      };
+    }
+
+    const openaiParameters = parseOptionalAdvancedJsonObject(
+      settingsState.advancedOpenAIExtraJson,
+      'OpenAI additional parameters'
+    );
+    const ollamaOptions = parseOptionalAdvancedJsonObject(
+      settingsState.advancedOllamaExtraJson,
+      'Ollama additional options'
+    );
+    const ollamaParameters = parseOptionalAdvancedJsonObject(
+      settingsState.advancedOllamaParametersJson,
+      'Ollama request parameters'
+    );
+
+    const presencePenalty = clampPenalty(parseOptionalNumber(settingsState.advancedOpenAIPresencePenalty));
+    if (presencePenalty != null) {
+      openaiParameters.presence_penalty = presencePenalty;
+    }
+
+    const frequencyPenalty = clampPenalty(parseOptionalNumber(settingsState.advancedOpenAIFrequencyPenalty));
+    if (frequencyPenalty != null) {
+      openaiParameters.frequency_penalty = frequencyPenalty;
+    }
+
+    const repetitionPenalty = clampNonNegative(parseOptionalNumber(settingsState.advancedOllamaRepetitionPenalty));
+    if (repetitionPenalty != null) {
+      ollamaOptions.repeat_penalty = repetitionPenalty;
+    }
+
+    const maxTokens = clampMaxTokens(parseOptionalNumber(settingsState.advancedMaxTokens));
+
+    return {
+      temperature: clampTemperature(Number(settingsState.advancedTemperature ?? 0.2)),
+      maxTokens,
+      openaiParameters,
+      ollamaOptions,
+      ollamaParameters
+    };
+  }
 
   function syncOllamaThinkModeAvailability() {
     const isOllama = normalizeProvider(provider.value) === 'ollama';
@@ -2391,6 +2636,7 @@ async function initChat() {
   }
 
   syncOllamaThinkModeAvailability();
+  applyAdvancedSettingsVisibility();
 
   let currentWorkspaceDir = '';
   let chatSessions = [];
@@ -3379,6 +3625,32 @@ async function initChat() {
     settingsState.chatMemoryNamespace = chatNewMemoryNamespace.value.trim();
     saveSettings();
   });
+  advancedToggle.addEventListener('click', () => {
+    settingsState.advancedSettingsCollapsed = !settingsState.advancedSettingsCollapsed;
+    saveSettings();
+    applyAdvancedSettingsVisibility();
+  });
+  advancedEnabled.addEventListener('change', saveAdvancedSettingsFromInputs);
+  advancedTemperature.addEventListener('change', saveAdvancedSettingsFromInputs);
+  advancedMaxTokens.addEventListener('change', saveAdvancedSettingsFromInputs);
+  advancedOpenAIPresencePenalty.addEventListener('change', saveAdvancedSettingsFromInputs);
+  advancedOpenAIFrequencyPenalty.addEventListener('change', saveAdvancedSettingsFromInputs);
+  advancedOpenAIExtraJson.addEventListener('change', saveAdvancedSettingsFromInputs);
+  advancedOllamaRepetitionPenalty.addEventListener('change', saveAdvancedSettingsFromInputs);
+  advancedOllamaExtraJson.addEventListener('change', saveAdvancedSettingsFromInputs);
+  advancedOllamaParametersJson.addEventListener('change', saveAdvancedSettingsFromInputs);
+  advancedOpenAITemplate.addEventListener('click', () => {
+    advancedOpenAIExtraJson.value = OPENAI_ADVANCED_TEMPLATE;
+    saveAdvancedSettingsFromInputs();
+  });
+  advancedOllamaOptionsTemplate.addEventListener('click', () => {
+    advancedOllamaExtraJson.value = OLLAMA_OPTIONS_TEMPLATE;
+    saveAdvancedSettingsFromInputs();
+  });
+  advancedOllamaParametersTemplate.addEventListener('click', () => {
+    advancedOllamaParametersJson.value = OLLAMA_REQUEST_TEMPLATE;
+    saveAdvancedSettingsFromInputs();
+  });
 
   // Preset selector wiring
   const chatPresetSelect = document.getElementById('chatPresetSelect');
@@ -3479,6 +3751,7 @@ async function initChat() {
     setChatRunning(true);
 
     try {
+      const advancedOverrides = buildAdvancedConfigOverrides();
       const result = await window.llmIde.chatStream({
         prompt: text,
         config: {
@@ -3488,8 +3761,11 @@ async function initChat() {
           apiKey: apiKey.value.trim() || undefined,
           ollamaThink: Boolean(ollamaThinkMode.checked),
           ollamaStreaming: Boolean(ollamaStreamingMode.checked),
-          temperature: 0.2,
-          maxTokens: 0,
+          temperature: advancedOverrides.temperature,
+          maxTokens: advancedOverrides.maxTokens ?? 0,
+          openaiParameters: advancedOverrides.openaiParameters,
+          ollamaOptions: advancedOverrides.ollamaOptions,
+          ollamaParameters: advancedOverrides.ollamaParameters,
           requestTimeoutMs: settingsState.requestTimeoutMs
         },
         subAgentConfigs: buildSubAgentConfigs(),

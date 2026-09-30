@@ -115,6 +115,56 @@ test('openai-compatible stream reports a user-aborted socket reset as cancellati
   });
 });
 
+test('openai-compatible request includes advanced OpenAI parameters when provided', async () => {
+  const config: LLMConfig = {
+    provider: 'openai-compatible',
+    endpoint: 'http://localhost:1234/v1/chat/completions',
+    model: 'gpt-test',
+    temperature: 0.35,
+    openaiParameters: {
+      presence_penalty: 0.7,
+      frequency_penalty: 0.2,
+      top_p: 0.9,
+      seed: 42
+    }
+  };
+  const stream = new EventEmitter();
+
+  await withMockedOpenAIStreamPost(stream, async requests => {
+    const resultPromise = chatWithTools(
+      config,
+      [{ role: 'user', content: 'Answer briefly.' }],
+      [],
+      async () => ({ ok: true })
+    );
+
+    setImmediate(() => {
+      stream.emit(
+        'data',
+        Buffer.from(
+          'data: {"choices":[{"delta":{"content":"Done."}}]}\n' +
+          'data: {"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":1,"total_tokens":4}}\n' +
+          'data: [DONE]\n'
+        )
+      );
+      stream.emit('end');
+    });
+
+    const result = await resultPromise;
+    assert.equal(result.text, 'Done.');
+    assert.ok(requests.length >= 1);
+    assert.ok(
+      requests.some(entry =>
+        entry.payload.temperature === 0.35
+        && entry.payload.presence_penalty === 0.7
+        && entry.payload.frequency_penalty === 0.2
+        && entry.payload.top_p === 0.9
+        && entry.payload.seed === 42
+      )
+    );
+  });
+});
+
 test('openai-compatible non-stream fallback still returns assistant text', async () => {
   const config: LLMConfig = {
     provider: 'openai-compatible',
