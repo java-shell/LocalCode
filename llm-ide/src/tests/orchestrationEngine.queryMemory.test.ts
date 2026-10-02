@@ -226,3 +226,43 @@ test('orchestration injects reference workspace guidance for stage models', asyn
     assert.equal(run.steps[0].output, 'guidance seen');
   });
 });
+
+test('loop continuation uses structured envelope and preserves unresolved signals between iterations', async () => {
+  const plan: OrchestrationPlan = {
+    ...makePlan(),
+    loopUntilComplete: true,
+    maxLoops: 2,
+    completionMarker: 'TASK_COMPLETE_UNLIKELY'
+  };
+
+  const userPayloads: string[] = [];
+
+  await withMockedChatWithTools(async (_config, initialMessages) => {
+    const userContent = String(initialMessages.find(message => message.role === 'user')?.content ?? '');
+    userPayloads.push(userContent);
+    const callIndex = userPayloads.length;
+
+    return {
+      text: callIndex === 1
+        ? 'First iteration analysis. blocker: API timeout while indexing context. next step: retry with tighter payload.'
+        : 'Second iteration follow-up without completion marker.',
+      usage: { promptTokens: 8, completionTokens: 4, totalTokens: 12, requests: 1 }
+    };
+  }, async () => {
+    const run = await runOrchestration(plan, 'Stabilize multi-step orchestration flow');
+
+    assert.equal(run.iterations, 2);
+    assert.equal(run.completed, false, 'loop run without completion signal should not be marked complete');
+    assert.equal(userPayloads.length, 2, 'each loop iteration should provide a user envelope');
+
+    assert.match(userPayloads[0], /Orchestration context envelope:/);
+    assert.match(userPayloads[0], /ORIGINAL_REQUEST:/);
+    assert.match(userPayloads[0], /STEP_INPUT:/);
+    assert.match(userPayloads[0], /CONTINUITY_INVARIANTS:/);
+
+    assert.match(userPayloads[1], /Previous orchestration output \(iteration 1\) summary:/);
+    assert.match(userPayloads[1], /Unresolved signals to preserve:/);
+    assert.match(userPayloads[1], /blocker: API timeout while indexing context/i);
+    assert.match(userPayloads[1], /next step: retry with tighter payload/i);
+  });
+});

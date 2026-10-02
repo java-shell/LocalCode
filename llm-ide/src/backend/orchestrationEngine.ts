@@ -61,6 +61,55 @@ function truncateText(value: string, maxChars: number): string {
   return `${text.slice(0, Math.max(0, maxChars - 3))}...`;
 }
 
+function buildStageInputEnvelope(originalPrompt: string, stepInput: string): string {
+  const objective = truncateText(originalPrompt, 4000);
+  const boundedInput = truncateText(stepInput, 9000);
+
+  return truncateText(
+    [
+      'Orchestration context envelope:',
+      '',
+      'ORIGINAL_REQUEST:',
+      objective,
+      '',
+      'STEP_INPUT:',
+      boundedInput,
+      '',
+      'CONTINUITY_INVARIANTS:',
+      '- Preserve the original objective and constraints.',
+      '- Preserve unresolved blockers and pending next actions.',
+      '- Keep handoff output concise and directly actionable.'
+    ].join('\n'),
+    12000
+  );
+}
+
+function buildIterationContinuationPrompt(iteration: number, finalOutput: string): string {
+  const normalizedOutput = String(finalOutput ?? '').trim();
+  const outputSummary = truncateText(normalizedOutput.replace(/\s+/g, ' '), 2500);
+  const unresolvedSignals = normalizedOutput
+    .split(/\r?\n/)
+    .map(line => line.trim())
+    .filter(Boolean)
+    .filter(line => /failed|error|blocker|todo|remaining|next step|follow-up|retry/i.test(line))
+    .slice(0, 8);
+
+  const unresolvedBlock = unresolvedSignals.length > 0
+    ? unresolvedSignals.map((line, index) => `${index + 1}. ${line}`).join('\n')
+    : 'No explicit unresolved signals detected.';
+
+  return truncateText([
+    `Previous orchestration output (iteration ${iteration}) summary:`,
+    outputSummary || '(empty output)',
+    '',
+    'Unresolved signals to preserve:',
+    unresolvedBlock,
+    '',
+    'Continue from this output. When the task is fully complete, call the complete_orchestration_task tool with a brief summary of what was accomplished.',
+    'Do not signal completion by emitting text — use the tool call.'
+  ].join('\n'), 12000);
+}
+
 function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -439,7 +488,6 @@ async function runStepWithRetries(
   signal?: AbortSignal,
   storeIntermediateOutputs?: boolean,
 ): Promise<StepExecutionResult> {
-  const originalPromptForModel = truncateText(originalPrompt, 4000);
   const COMPLETION_TOOL = 'complete_orchestration_task';
   const DOWNSTREAM_STAGE_TOOL = 'call_downstream_stage';
   const stepToolCalls: Array<{ name: string; intent: string; timestamp: string }> = [];
@@ -543,7 +591,7 @@ async function runStepWithRetries(
 
     messages.push({
       role: 'user',
-      content: `Original request:\n${originalPromptForModel}\n\nStep input:\n${truncateText(stepInput, 12000)}`
+      content: buildStageInputEnvelope(originalPrompt, stepInput)
     });
 
     selectedDownstreamStageId = '';
@@ -616,6 +664,12 @@ async function runStepWithRetries(
             throw new Error(`Tool ${name} is not enabled in step ${step.name}.`);
           }
           if (name === 'run_terminal_command') {
+            const input = (args && typeof args === 'object') ? (args as Record<string, unknown>) : {};
+            const rawTimeout = Number(input.timeoutMs ?? 30000);
+            const boundedTimeoutMs = rawTimeout <= 0 ? 30000 : Math.max(1000, Math.min(120000, rawTimeout));
+            return executeTool(name, { ...input, timeoutMs: boundedTimeoutMs }, stepRuntimeContext);
+          }
+          if (name === 'grep_search') {
             const input = (args && typeof args === 'object') ? (args as Record<string, unknown>) : {};
             const rawTimeout = Number(input.timeoutMs ?? 30000);
             const boundedTimeoutMs = rawTimeout <= 0 ? 30000 : Math.max(1000, Math.min(120000, rawTimeout));
@@ -1077,13 +1131,7 @@ export async function runOrchestration(
       break;
     }
 
-    iterationPrompt = truncateText([
-      `Previous orchestration output (iteration ${iteration}):`,
-      finalOutput,
-      '',
-      'Continue from this output. When the task is fully complete, call the complete_orchestration_task tool with a brief summary of what was accomplished.',
-      'Do not signal completion by emitting text — use the tool call.'
-    ].join('\n'), 12000);
+    iterationPrompt = buildIterationContinuationPrompt(iteration, finalOutput);
   }
 
   // Issue #2: derive `completed` from actual step success when no explicit

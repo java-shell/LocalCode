@@ -79,6 +79,100 @@ test.describe('P3 #8: Adaptive Injection Limits', () => {
     assert.ok(limits.maxItems >= 7, 'maxItems should be ~8 (4*2)');
     assert.ok(limits.maxCharsPerItem >= 1800, 'maxCharsPerItem should be ~2000 (1000*2)');
   });
+
+  test('increases limits for severe compaction multiplier', () => {
+    const baseline = computeAdaptiveInjectionLimits(8192, 1);
+    const severe = computeAdaptiveInjectionLimits(8192, 2);
+
+    assert.ok(severe.maxItems > baseline.maxItems, 'severe multiplier should increase maxItems');
+    assert.ok(severe.maxCharsPerItem > baseline.maxCharsPerItem, 'severe multiplier should increase per-item chars');
+    assert.ok(severe.maxTotalChars > baseline.maxTotalChars, 'severe multiplier should increase total chars');
+  });
+
+  test('caps severe multiplier to avoid runaway injection budgets', () => {
+    const capped = computeAdaptiveInjectionLimits(8192, 99);
+    const expectedCap = computeAdaptiveInjectionLimits(8192, 2.5);
+
+    assert.equal(capped.maxItems, expectedCap.maxItems, 'multiplier cap should bound maxItems');
+    assert.equal(capped.maxCharsPerItem, expectedCap.maxCharsPerItem, 'multiplier cap should bound per-item chars');
+    assert.equal(capped.maxTotalChars, expectedCap.maxTotalChars, 'multiplier cap should bound total chars');
+  });
+});
+
+test.describe('G3: same-turn/source GraphRAG prioritization', () => {
+  let tmpDir: string;
+
+  test.beforeEach(async () => {
+    tmpDir = await createTempRoot();
+  });
+
+  test.afterEach(async () => {
+    await cleanupTempRoot(tmpDir);
+  });
+
+  test('collectNeighborIds ranks turn and source neighbors ahead of explicit-only neighbors', async () => {
+    const memory = new TurboVecMemory(tmpDir, BRIDGE_SCRIPT, () => {});
+
+    try {
+      const itemsById = new Map<number, any>([
+        [1, { id: 1, text: 'seed', source: 'chat:user', metadata: { turnId: 't1', relatedIds: [4] } }],
+        [2, { id: 2, text: 'same turn', source: 'chat:assistant', metadata: { turnId: 't1' } }],
+        [3, { id: 3, text: 'same source', source: 'chat:user', metadata: { turnId: 't2' } }],
+        [4, { id: 4, text: 'explicit only', source: 'notes:misc', metadata: { turnId: 't3' } }]
+      ]);
+
+      const cache = {
+        items: Array.from(itemsById.values()),
+        byId: itemsById,
+        byTurnId: new Map<string, number[]>([['t1', [1, 2]]]),
+        bySource: new Map<string, number[]>([['chat:user', [1, 3]]]),
+        fileMtimeMs: Date.now()
+      };
+
+      const result = memory['collectNeighborIds'](1, itemsById, cache);
+
+      assert.ok(result.ids.includes(2), 'same-turn neighbor should be included');
+      assert.ok(result.ids.includes(3), 'same-source neighbor should be included');
+      assert.ok(result.ids.includes(4), 'explicit neighbor should be included');
+      assert.equal(result.scoredIds[0]?.id, 2, 'same-turn neighbor should receive highest priority');
+      assert.equal(result.scoredIds[1]?.id, 3, 'same-source neighbor should rank ahead of explicit-only neighbor');
+    } finally {
+      await memory.destroy();
+    }
+  });
+
+  test('hybridExpand keeps turn/source cluster when k is tight', async () => {
+    const memory = new TurboVecMemory(tmpDir, BRIDGE_SCRIPT, () => {});
+
+    try {
+      const itemsById = new Map<number, any>([
+        [1, { id: 1, text: 'seed', source: 'chat:user', metadata: { turnId: 't1', relatedIds: [4] } }],
+        [2, { id: 2, text: 'same turn', source: 'chat:assistant', metadata: { turnId: 't1' } }],
+        [3, { id: 3, text: 'same source', source: 'chat:user', metadata: { turnId: 't2' } }],
+        [4, { id: 4, text: 'explicit only', source: 'notes:misc', metadata: { turnId: 't3' } }]
+      ]);
+
+      const cache = {
+        items: Array.from(itemsById.values()),
+        byId: itemsById,
+        byTurnId: new Map<string, number[]>([['t1', [1, 2]]]),
+        bySource: new Map<string, number[]>([['chat:user', [1, 3]]]),
+        fileMtimeMs: Date.now()
+      };
+
+      const expanded = memory['hybridExpand'](
+        [{ id: 1, text: 'seed', source: 'chat:user', score: 0.1, metadata: { turnId: 't1' } }],
+        itemsById,
+        { k: 3, maxHops: 1 },
+        cache
+      );
+
+      const ids = expanded.items.map((item: any) => Number(item.id));
+      assert.deepEqual(ids, [1, 2, 3], 'tight k should prefer same-turn/source continuity cluster');
+    } finally {
+      await memory.destroy();
+    }
+  });
 });
 
 test.describe('P3 #10: Persist GraphRAG Stats', () => {

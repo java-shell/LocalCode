@@ -102,6 +102,7 @@ interface PersistedGraphRagStatsV1 {
 
 interface NeighborCollectionResult {
   ids: number[];
+  scoredIds: Array<{ id: number; linkType: keyof GraphRagLinkHitCounters; weight: number }>;
   linkHits: GraphRagLinkHitCounters;
 }
 
@@ -122,7 +123,7 @@ interface HybridExpandResult {
  * @param contextWindowTokens - The model's context window in tokens (defaults to 8192)
  * @returns Object with maxItems, maxCharsPerItem, and maxTotalChars
  */
-export function computeAdaptiveInjectionLimits(contextWindowTokens?: number): {
+export function computeAdaptiveInjectionLimits(contextWindowTokens?: number, severityMultiplier = 1): {
   maxItems: number;
   maxCharsPerItem: number;
   maxTotalChars: number;
@@ -134,15 +135,17 @@ export function computeAdaptiveInjectionLimits(contextWindowTokens?: number): {
   // Scale factor: how many times larger than baseline?
   const scale = Math.min(effectiveContext / baselineContext, 8); // Cap at 8x to prevent runaway
   
+  const severityScale = Math.max(1, Math.min(2.5, Number(severityMultiplier) || 1));
+
   // Base limits (original hardcoded values)
   const baseMaxItems = 4;
   const baseMaxCharsPerItem = 1000;
   const baseMaxTotalChars = 3500;
   
   // Scale proportionally, with minimums to ensure at least some memory is injected
-  const maxItems = Math.max(2, Math.round(baseMaxItems * scale));
-  const maxCharsPerItem = Math.max(400, Math.round(baseMaxCharsPerItem * scale));
-  const maxTotalChars = Math.max(1500, Math.round(baseMaxTotalChars * scale));
+  const maxItems = Math.max(2, Math.round(baseMaxItems * scale * severityScale));
+  const maxCharsPerItem = Math.max(400, Math.round(baseMaxCharsPerItem * scale * severityScale));
+  const maxTotalChars = Math.max(1500, Math.round(baseMaxTotalChars * scale * severityScale));
   
   return { maxItems, maxCharsPerItem, maxTotalChars };
 }
@@ -236,6 +239,20 @@ function cloneLinkHits(value?: Partial<GraphRagLinkHitCounters>): GraphRagLinkHi
     turn: Number(value?.turn ?? 0) || 0,
     source: Number(value?.source ?? 0) || 0
   };
+}
+
+function neighborLinkWeight(linkType: keyof GraphRagLinkHitCounters): number {
+  switch (linkType) {
+    case 'turn':
+      return 1.0;
+    case 'source':
+      return 0.94;
+    case 'explicit':
+      return 0.88;
+    case 'sequential':
+    default:
+      return 0.82;
+  }
 }
 
 function createEmptyGraphRagStats(): GraphRagMutableNamespaceStats {
@@ -674,14 +691,15 @@ export class TurboVecMemory {
       linkHits.turn += neighbors.linkHits.turn;
       linkHits.source += neighbors.linkHits.source;
 
-      for (const neighborId of neighbors.ids) {
+      for (const scoredNeighbor of neighbors.scoredIds) {
+        const neighborId = scoredNeighbor.id;
         const neighbor = itemsById.get(neighborId);
         if (!neighbor) {
           continue;
         }
 
         const nextHops = current.hops + 1;
-        const nextRank = current.inheritedRank * 0.85;
+        const nextRank = current.inheritedRank * neighborLinkWeight(scoredNeighbor.linkType);
         const existing = ranked.get(neighborId);
 
         if (existing && existing.rank >= nextRank) {
@@ -698,7 +716,8 @@ export class TurboVecMemory {
               ...(neighbor.metadata || {}),
               _retrieval: {
                 strategy: 'graph-expansion',
-                hops: nextHops
+                hops: nextHops,
+                linkType: scoredNeighbor.linkType
               }
             }
           },
@@ -732,10 +751,11 @@ export class TurboVecMemory {
 
   private collectNeighborIds(currentId: number, itemsById: Map<number, StoredMetadataItem>, cache?: MetadataCacheEntry): NeighborCollectionResult {
     const neighbors = new Set<number>();
+    const scoredNeighborMap = new Map<number, { linkType: keyof GraphRagLinkHitCounters; weight: number }>();
     const linkHits = cloneLinkHits(ZERO_LINK_HITS);
     const item = itemsById.get(currentId);
     if (!item) {
-      return { ids: [], linkHits };
+      return { ids: [], scoredIds: [], linkHits };
     }
 
     const addNeighbor = (candidate: unknown, linkType: keyof GraphRagLinkHitCounters) => {
@@ -746,10 +766,16 @@ export class TurboVecMemory {
       if (!itemsById.has(parsed)) {
         return;
       }
+      const weight = neighborLinkWeight(linkType);
       if (neighbors.has(parsed)) {
+        const existing = scoredNeighborMap.get(parsed);
+        if (existing && weight > existing.weight) {
+          scoredNeighborMap.set(parsed, { linkType, weight });
+        }
         return;
       }
       neighbors.add(parsed);
+      scoredNeighborMap.set(parsed, { linkType, weight });
       linkHits[linkType] += 1;
     };
 
@@ -797,8 +823,18 @@ export class TurboVecMemory {
       }
     }
 
+    const scoredIds = Array.from(scoredNeighborMap.entries())
+      .map(([id, value]) => ({ id, linkType: value.linkType, weight: value.weight }))
+      .sort((a, b) => {
+        if (b.weight !== a.weight) {
+          return b.weight - a.weight;
+        }
+        return a.id - b.id;
+      });
+
     return {
-      ids: Array.from(neighbors.values()),
+      ids: scoredIds.map(entry => entry.id),
+      scoredIds,
       linkHits
     };
   }

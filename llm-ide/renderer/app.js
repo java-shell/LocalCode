@@ -53,6 +53,7 @@ const settingsState = {
   advancedOllamaRepetitionPenalty: '',
   advancedOllamaExtraJson: '',
   advancedOllamaParametersJson: '',
+  thoughtSectionsCollapsedByDefault: true,
   contextUsageCollapsed: false,
   lockedNamespaces: []
 };
@@ -1031,6 +1032,9 @@ function loadSettings() {
     settingsState.advancedOllamaParametersJson = String(
       parsed.advancedOllamaParametersJson ?? settingsState.advancedOllamaParametersJson
     ).trim();
+    settingsState.thoughtSectionsCollapsedByDefault = Boolean(
+      parsed.thoughtSectionsCollapsedByDefault ?? settingsState.thoughtSectionsCollapsedByDefault
+    );
     settingsState.contextUsageCollapsed = Boolean(parsed.contextUsageCollapsed ?? settingsState.contextUsageCollapsed);
     settingsState.lockedNamespaces = Array.isArray(parsed.lockedNamespaces) ? parsed.lockedNamespaces : [];
   } catch {
@@ -1073,6 +1077,7 @@ function loadSettings() {
     settingsState.advancedOllamaRepetitionPenalty = '';
     settingsState.advancedOllamaExtraJson = '';
     settingsState.advancedOllamaParametersJson = '';
+    settingsState.thoughtSectionsCollapsedByDefault = true;
     settingsState.contextUsageCollapsed = false;
     settingsState.lockedNamespaces = [];
   }
@@ -2540,12 +2545,14 @@ async function initChat() {
   const stop = document.getElementById('chatStop');
   const ollamaThinkMode = document.getElementById('chatOllamaThinkMode');
   const ollamaStreamingMode = document.getElementById('chatOllamaStreamingMode');
+  const thoughtSectionsCollapsedByDefault = document.getElementById('chatThoughtSectionsCollapsedByDefault');
 
   provider.value = normalizeProvider(settingsState.provider);
   endpoint.value = settingsState.endpoint;
   apiKey.value = settingsState.apiKey;
   ollamaThinkMode.checked = Boolean(settingsState.ollamaThink);
   ollamaStreamingMode.checked = Boolean(settingsState.ollamaStreaming);
+  thoughtSectionsCollapsedByDefault.checked = Boolean(settingsState.thoughtSectionsCollapsedByDefault);
   advancedEnabled.checked = Boolean(settingsState.advancedSettingsEnabled);
   advancedTemperature.value = String(clampTemperature(Number(settingsState.advancedTemperature ?? 0.2)));
   advancedMaxTokens.value = String(settingsState.advancedMaxTokens || '');
@@ -3138,13 +3145,20 @@ async function initChat() {
     };
   }
 
-  function createEventVisibilityToggle(row, textNode, kind) {
+  function shouldHideEventByDefault(kind) {
+    if (!settingsState.thoughtSectionsCollapsedByDefault) {
+      return false;
+    }
+    return kind === 'thought' || kind === 'thinking';
+  }
+
+  function createEventVisibilityToggle(row, textNode, kind, initiallyHidden = false) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'log-line-visibility-toggle';
-    button.setAttribute('aria-label', `Hide ${kind} segment`);
-    button.setAttribute('aria-pressed', 'false');
-    button.title = `Hide ${kind} segment`;
+    button.setAttribute('aria-label', `${initiallyHidden ? 'Show' : 'Hide'} ${kind} segment`);
+    button.setAttribute('aria-pressed', initiallyHidden ? 'true' : 'false');
+    button.title = `${initiallyHidden ? 'Show' : 'Hide'} ${kind} segment`;
     button.innerHTML =
       '<svg class="eye-icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
       '<path d="M12 5c5.2 0 9.5 4.4 10.4 6.7.2.4.2.8 0 1.2C21.5 15.2 17.2 19.6 12 19.6S2.5 15.2 1.6 12.9a1.5 1.5 0 0 1 0-1.2C2.5 9.4 6.8 5 12 5Z"></path>' +
@@ -3152,13 +3166,19 @@ async function initChat() {
       '<path class="eye-slash" d="M4 4l16 16"></path>' +
       '</svg>';
 
-    button.addEventListener('click', () => {
-      const hidden = !row.classList.contains('segment-hidden');
+    const setHiddenState = hidden => {
       row.classList.toggle('segment-hidden', hidden);
       textNode.hidden = hidden;
       button.setAttribute('aria-pressed', hidden ? 'true' : 'false');
       button.setAttribute('aria-label', `${hidden ? 'Show' : 'Hide'} ${kind} segment`);
       button.title = `${hidden ? 'Show' : 'Hide'} ${kind} segment`;
+    };
+
+    setHiddenState(initiallyHidden);
+
+    button.addEventListener('click', () => {
+      const hidden = !row.classList.contains('segment-hidden');
+      setHiddenState(hidden);
     });
 
     return button;
@@ -3186,7 +3206,12 @@ async function initChat() {
     text.className = 'log-line-event-text';
     text.textContent = parsed.text;
 
-    const finalToggle = createEventVisibilityToggle(row, text, parsed.kind);
+    const finalToggle = createEventVisibilityToggle(
+      row,
+      text,
+      parsed.kind,
+      shouldHideEventByDefault(parsed.kind)
+    );
     row.appendChild(finalToggle);
     row.appendChild(kindLabel);
     row.appendChild(text);
@@ -3603,6 +3628,10 @@ async function initChat() {
   });
   ollamaStreamingMode.addEventListener('change', () => {
     settingsState.ollamaStreaming = Boolean(ollamaStreamingMode.checked);
+    saveSettings();
+  });
+  thoughtSectionsCollapsedByDefault.addEventListener('change', () => {
+    settingsState.thoughtSectionsCollapsedByDefault = Boolean(thoughtSectionsCollapsedByDefault.checked);
     saveSettings();
   });
   chatContextWindowTokens.addEventListener('change', () => {

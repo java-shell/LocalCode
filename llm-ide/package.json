@@ -17,7 +17,8 @@
     "dist:win": "npm run build && electron-builder --win nsis",
     "dist:win-zip": "npm run build && electron-builder --win zip",
     "namespace-creator": "node ../namespace_creator/ingest.js",
-    "test:namespace-creator": "node --test ../namespace_creator/__tests__/ingest.test.js"
+    "test:namespace-creator": "node --test ../namespace_creator/__tests__/ingest.test.js",
+    "analyze:compaction": "node scripts/summarize-compaction-telemetry.js"
   },
   "build": {
     "appId": "dev.localcode.llmide",

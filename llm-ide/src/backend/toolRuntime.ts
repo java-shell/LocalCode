@@ -288,6 +288,17 @@ const binaryExtensions = new Set([
 const DEFAULT_READ_FILE_MAX_CHARS = 24000;
 const MAX_READ_FILE_MAX_CHARS = 100000;
 const TERMINAL_CAPTURE_MAX_CHARS = 24000;
+const DEFAULT_GREP_TIMEOUT_MS = 30000;
+const MAX_GREP_TIMEOUT_MS = 120000;
+const grepExcludedDirectories = new Set([
+  '.git',
+  'node_modules',
+  'out',
+  'dist',
+  'build',
+  '.venv',
+  '.turbovec-venv'
+]);
 
 function likelyBinaryByExtension(filePath: string): boolean {
   return binaryExtensions.has(path.extname(filePath).toLowerCase());
@@ -554,12 +565,13 @@ export const toolDefinitions: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'grep_search',
-      description: 'Regex search across text files in selected scope.',
+      description: 'Regex search across text files in selected scope with bounded timeout and match limits.',
       parameters: {
         type: 'object',
         properties: {
           query: { type: 'string' },
           maxResults: { type: 'number' },
+          timeoutMs: { type: 'number' },
           includeBinary: { type: 'boolean' },
           scope: scopeProperty
         },
@@ -1526,29 +1538,74 @@ async function grepSearch(args: Record<string, unknown>, context?: RuntimeContex
   const scope = parseScope(args);
   const base = scopeBaseDir(scope, context);
   const query = String(args.query ?? '');
+  if (!query.trim()) {
+    throw new Error('query is required');
+  }
+
   const maxResults = Math.max(1, Math.min(200, Number(args.maxResults ?? 50)));
+  const rawTimeoutMs = Number(args.timeoutMs ?? DEFAULT_GREP_TIMEOUT_MS);
+  const timeoutMs = rawTimeoutMs <= 0 ? 0 : Math.max(1000, Math.min(MAX_GREP_TIMEOUT_MS, rawTimeoutMs));
   const includeBinary = Boolean(args.includeBinary ?? false);
-  const regex = new RegExp(query, 'i');
+  let regex: RegExp;
+  try {
+    regex = new RegExp(query, 'i');
+  } catch (error) {
+    throw new Error(`Invalid regex pattern: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   const matches: Array<{ file: string; line: number; text: string }> = [];
+  const startedAt = Date.now();
+  let timedOut = false;
+  let directoriesScanned = 0;
+  let filesScanned = 0;
+  let skippedSpecialEntries = 0;
+
+  const shouldStop = () => {
+    if (context?.abortSignal?.aborted) {
+      throw new Error('grep_search canceled by abort signal');
+    }
+    if (timeoutMs > 0 && Date.now() - startedAt >= timeoutMs) {
+      timedOut = true;
+      return true;
+    }
+    return false;
+  };
 
   async function walk(dir: string): Promise<void> {
+    if (shouldStop()) {
+      return;
+    }
+
+    directoriesScanned += 1;
     const entries = await fs.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
+      if (shouldStop()) {
+        return;
+      }
       if (matches.length >= maxResults) {
         return;
       }
-      if (entry.name === '.git' || entry.name === 'node_modules' || entry.name === 'out') {
+
+      if (entry.isDirectory() && grepExcludedDirectories.has(entry.name)) {
         continue;
       }
+
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         await walk(full);
         continue;
       }
 
+      if (!entry.isFile()) {
+        skippedSpecialEntries += 1;
+        continue;
+      }
+
       if (!includeBinary && likelyBinaryByExtension(full)) {
         continue;
       }
+
+      filesScanned += 1;
 
       const rawBuffer = await fs.readFile(full).catch(() => null);
       if (!rawBuffer) {
@@ -1572,7 +1629,16 @@ async function grepSearch(args: Record<string, unknown>, context?: RuntimeContex
   }
 
   await walk(base);
-  return matches;
+  return {
+    matches,
+    timedOut,
+    timeoutMs,
+    maxResults,
+    filesScanned,
+    directoriesScanned,
+    skippedSpecialEntries,
+    reachedMaxResults: matches.length >= maxResults
+  };
 }
 
 async function gitStatus(args: Record<string, unknown>, context?: RuntimeContext) {

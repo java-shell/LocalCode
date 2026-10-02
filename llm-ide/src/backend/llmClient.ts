@@ -90,6 +90,7 @@ export interface ChatWithToolsResult {
     initialMessageCount: number;
     finalMessageCount: number;
     totalToolCalls: number;
+    compactionTelemetry: CompactionTelemetry[];
     turns: Array<{
       turn: number;
       promptTokens: number;
@@ -106,6 +107,155 @@ export interface ChatWithToolsResult {
 type ChatWithToolsDebug = NonNullable<ChatWithToolsResult['debug']>;
 const MAX_TOOL_RESULT_MESSAGE_CHARS = 16000;
 const MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS = 3;
+const CONTEXT_COMPACTION_V2_FLAG = 'LOCALCODE_CONTEXT_COMPACTION_V2';
+
+type CompactionStage = 'soft' | 'medium' | 'hard';
+type CompactionConfidence = 'reported' | 'configured' | 'unknown';
+type CompactionRole = 'system' | 'user' | 'assistant' | 'tool';
+type CompactionType = 'system' | 'user' | 'assistant_text' | 'assistant_tool_call' | 'tool_result' | 'continuity_digest';
+
+interface CompactionTelemetry {
+  source: 'proactive' | 'overflow-retry';
+  mode: 'legacy' | 'v2';
+  stage: CompactionStage | 'legacy';
+  confidence: CompactionConfidence;
+  overflowCount: number;
+  summaryMode: boolean;
+  contextWindowTokens: number;
+  preEstimatedTokens: number;
+  postEstimatedTokens: number;
+  droppedEstimatedTokens: number;
+  preMessageCount: number;
+  postMessageCount: number;
+  droppedMessagesByRole: Record<CompactionRole, number>;
+  droppedMessagesByType: Record<CompactionType, number>;
+}
+
+interface CompactionOptions {
+  stage?: CompactionStage;
+  estimatedTokens?: number;
+  overflowCount?: number;
+  confidence?: CompactionConfidence;
+}
+
+interface CompactionWindowResolution {
+  window?: number;
+  confidence: CompactionConfidence;
+}
+
+interface OverflowCompactionResult {
+  messages: ChatMessage[];
+  telemetry?: CompactionTelemetry;
+}
+
+function emptyCompactionRoleCounts(): Record<CompactionRole, number> {
+  return {
+    system: 0,
+    user: 0,
+    assistant: 0,
+    tool: 0
+  };
+}
+
+function emptyCompactionTypeCounts(): Record<CompactionType, number> {
+  return {
+    system: 0,
+    user: 0,
+    assistant_text: 0,
+    assistant_tool_call: 0,
+    tool_result: 0,
+    continuity_digest: 0
+  };
+}
+
+function classifyCompactionType(message: ChatMessage): CompactionType {
+  if (message.role === 'tool') {
+    return 'tool_result';
+  }
+  if (message.role === 'assistant') {
+    return Array.isArray(message.tool_calls) && message.tool_calls.length > 0
+      ? 'assistant_tool_call'
+      : 'assistant_text';
+  }
+  if (message.role === 'system') {
+    const content = String(message.content ?? '');
+    return /Conversation continuity digest/i.test(content) ? 'continuity_digest' : 'system';
+  }
+  return 'user';
+}
+
+function countCompactionRoles(messages: ChatMessage[]): Record<CompactionRole, number> {
+  const counts = emptyCompactionRoleCounts();
+  for (const message of messages) {
+    if (message.role === 'system' || message.role === 'user' || message.role === 'assistant' || message.role === 'tool') {
+      counts[message.role] += 1;
+    }
+  }
+  return counts;
+}
+
+function countCompactionTypes(messages: ChatMessage[]): Record<CompactionType, number> {
+  const counts = emptyCompactionTypeCounts();
+  for (const message of messages) {
+    const type = classifyCompactionType(message);
+    counts[type] += 1;
+  }
+  return counts;
+}
+
+function subtractCompactionCounts<T extends string>(
+  before: Record<T, number>,
+  after: Record<T, number>
+): Record<T, number> {
+  const result = {} as Record<T, number>;
+  for (const key of Object.keys(before) as T[]) {
+    result[key] = Math.max(0, Number(before[key] ?? 0) - Number(after[key] ?? 0));
+  }
+  return result;
+}
+
+function buildCompactionTelemetry(
+  before: ChatMessage[],
+  after: ChatMessage[],
+  meta: {
+    source: 'proactive' | 'overflow-retry';
+    mode: 'legacy' | 'v2';
+    stage: CompactionStage | 'legacy';
+    confidence: CompactionConfidence;
+    overflowCount: number;
+    summaryMode: boolean;
+    contextWindowTokens: number;
+  }
+): CompactionTelemetry {
+  const preEstimatedTokens = estimateMessagesTokens(before);
+  const postEstimatedTokens = estimateMessagesTokens(after);
+
+  return {
+    ...meta,
+    preEstimatedTokens,
+    postEstimatedTokens,
+    droppedEstimatedTokens: Math.max(0, preEstimatedTokens - postEstimatedTokens),
+    preMessageCount: before.length,
+    postMessageCount: after.length,
+    droppedMessagesByRole: subtractCompactionCounts(
+      countCompactionRoles(before),
+      countCompactionRoles(after)
+    ),
+    droppedMessagesByType: subtractCompactionCounts(
+      countCompactionTypes(before),
+      countCompactionTypes(after)
+    )
+  };
+}
+
+function serializeCompactionTelemetryEvent(telemetry: CompactionTelemetry): string {
+  return `context:compacted-metrics:${JSON.stringify(telemetry)}`;
+}
+
+function isContextCompactionV2Enabled(): boolean {
+  const raw = String(process.env[CONTEXT_COMPACTION_V2_FLAG] ?? '').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
 
 function clampToolResultForPrompt(raw: string): string {
   if (raw.length <= MAX_TOOL_RESULT_MESSAGE_CHARS) {
@@ -663,19 +813,327 @@ export function estimateMessagesTokens(messages: ChatMessage[]): number {
   return messages.reduce((total, message) => total + estimateMessageTokens(message), 0);
 }
 
+function adaptiveForcedMargin(
+  contextLimit: number,
+  safetyMarginTokens: number,
+  options?: CompactionOptions
+): number {
+  if (!isContextCompactionV2Enabled()) {
+    return Math.max(safetyMarginTokens, Math.round(contextLimit * 0.3));
+  }
+
+  const stage = options?.stage ?? 'hard';
+  const overflowCount = Math.max(0, Math.floor(Number(options?.overflowCount ?? 0) || 0));
+  const confidence = options?.confidence ?? 'unknown';
+  const estimatedTokens = Math.max(0, Number(options?.estimatedTokens ?? 0));
+  const severity = estimatedTokens > 0 ? estimatedTokens / Math.max(1, contextLimit) : 1;
+
+  let factor = stage === 'soft' ? 0.1 : stage === 'medium' ? 0.14 : 0.18;
+
+  if (severity > 1.1) factor += 0.02;
+  if (severity > 1.2) factor += 0.02;
+  if (severity > 1.35) factor += 0.02;
+
+  // Only widen aggressively when overflows repeat and provider-reported limits are available.
+  if (overflowCount >= 2 && confidence === 'reported') {
+    factor += 0.03;
+  } else if (overflowCount >= 2) {
+    factor += 0.015;
+  }
+
+  if (confidence === 'unknown' && overflowCount === 0) {
+    factor = Math.min(factor, 0.2);
+  }
+
+  factor = Math.max(0.08, Math.min(0.28, factor));
+  return Math.max(safetyMarginTokens, Math.round(contextLimit * factor));
+}
+
 function summarizeConversationForContext(messages: ChatMessage[]): string {
-  return messages
-    .map(message => {
-      const content = String(message.content ?? '').replace(/\s+/g, ' ').trim();
-      if (!content) {
-        return '';
+  const normalized = messages
+    .map(message => ({
+      role: message.role,
+      content: String(message.content ?? '').replace(/\s+/g, ' ').trim()
+    }))
+    .filter(message => message.content.length > 0);
+
+  if (normalized.length === 0) {
+    return '';
+  }
+
+  const latestUser = [...normalized].reverse().find(message => message.role === 'user');
+  const latestAssistant = [...normalized].reverse().find(message => message.role === 'assistant');
+  const latestTool = [...normalized].reverse().find(message => message.role === 'tool');
+
+  const unresolvedSignals = normalized
+    .filter(message => message.role !== 'system')
+    .map(message => message.content)
+    .filter(content => /\?|todo|remaining|follow-up|next step|blocker|failed|error/i.test(content))
+    .slice(-3)
+    .map(content => `- ${content.slice(0, 240)}`);
+
+  const recentDecisions = normalized
+    .filter(message => message.role === 'assistant')
+    .map(message => message.content)
+    .filter(content => content.length > 0)
+    .slice(-2)
+    .map(content => `- ${content.slice(0, 260)}`);
+
+  const summaryParts: string[] = [
+    'Conversation continuity digest:',
+    latestUser ? `- Current objective: ${latestUser.content.slice(0, 320)}` : '- Current objective: (not available)',
+    latestAssistant ? `- Latest assistant outcome: ${latestAssistant.content.slice(0, 280)}` : '- Latest assistant outcome: (not available)',
+    latestTool ? `- Latest tool evidence: ${latestTool.content.slice(0, 220)}` : '- Latest tool evidence: (not available)'
+  ];
+
+  if (recentDecisions.length > 0) {
+    summaryParts.push('Recent decisions:', ...recentDecisions);
+  }
+
+  if (unresolvedSignals.length > 0) {
+    summaryParts.push('Unresolved or follow-up signals:', ...unresolvedSignals);
+  }
+
+  return summaryParts.join('\n').slice(0, 2600);
+}
+
+function compactToolPayloadForContext(content: string, maxChars = 1400): string {
+  if (content.length <= maxChars) {
+    return content;
+  }
+
+  try {
+    const parsed = JSON.parse(content);
+    if (parsed && typeof parsed === 'object') {
+      const record = parsed as Record<string, unknown>;
+      const compact: Record<string, unknown> = {
+        truncated: true,
+        note: 'Tool output compacted for context window preservation.'
+      };
+      if (record.ok !== undefined) compact.ok = record.ok;
+      if (record.error !== undefined) compact.error = String(record.error).slice(0, 400);
+      if (record.summary !== undefined) compact.summary = String(record.summary).slice(0, 500);
+      const textFields = ['result', 'content', 'stdout', 'stderr'];
+      for (const field of textFields) {
+        if (record[field] === undefined) {
+          continue;
+        }
+        const value = String(record[field] ?? '');
+        compact[field] = value.length > 500 ? `${value.slice(0, 250)} ... ${value.slice(-220)}` : value;
       }
-      const roleText = message.role.toUpperCase();
-      return `${roleText}: ${content.slice(0, 300)}`;
-    })
-    .filter(Boolean)
-    .join('\n')
-    .slice(0, 2000);
+      return JSON.stringify(compact);
+    }
+  } catch {
+    // Fall back to head/tail compaction for non-JSON payloads.
+  }
+
+  const head = content.slice(0, Math.floor(maxChars * 0.65));
+  const tail = content.slice(-Math.floor(maxChars * 0.25));
+  return JSON.stringify({
+    truncated: true,
+    head,
+    tail,
+    note: 'Tool output compacted for context window preservation.'
+  });
+}
+
+function compactMessageContentForContext(message: ChatMessage): string {
+  const normalized = String(message.content ?? '').replace(/\s+/g, ' ').trim();
+  if (!normalized) {
+    return '';
+  }
+
+  if (message.role === 'tool') {
+    return compactToolPayloadForContext(normalized, 1400);
+  }
+  if (message.role === 'system') {
+    return normalized.slice(0, 1400);
+  }
+  if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+    return normalized.slice(0, 1000);
+  }
+  return normalized.slice(0, 1100);
+}
+
+function cloneMessage(message: ChatMessage): ChatMessage {
+  return {
+    role: message.role,
+    content: String(message.content ?? ''),
+    tool_call_id: message.tool_call_id,
+    tool_calls: Array.isArray(message.tool_calls)
+      ? message.tool_calls.map(call => ({
+          id: String(call.id ?? ''),
+          type: 'function',
+          function: {
+            name: String(call.function?.name ?? ''),
+            arguments: String(call.function?.arguments ?? '')
+          }
+        }))
+      : undefined
+  };
+}
+
+function trimCompactedMessagesToSafeLimit(
+  messages: ChatMessage[],
+  safeLimit: number,
+  protectedIndexes: Set<number>
+): ChatMessage[] {
+  const working = [...messages];
+  const protectedPositions = new Set<number>(Array.from(protectedIndexes.values()).filter(index => index >= 0 && index < working.length));
+
+  while (estimateMessagesTokens(working) > safeLimit && working.length > 1) {
+    let removableIndex = -1;
+    for (let index = 0; index < working.length; index += 1) {
+      if (!protectedPositions.has(index)) {
+        removableIndex = index;
+        break;
+      }
+    }
+
+    if (removableIndex < 0) {
+      break;
+    }
+
+    working.splice(removableIndex, 1);
+    const reindexed = new Set<number>();
+    for (const protectedIndex of protectedPositions) {
+      if (protectedIndex === removableIndex) {
+        continue;
+      }
+      reindexed.add(protectedIndex > removableIndex ? protectedIndex - 1 : protectedIndex);
+    }
+    protectedPositions.clear();
+    for (const nextIndex of reindexed) {
+      protectedPositions.add(nextIndex);
+    }
+  }
+
+  return working;
+}
+
+function enforceCompactionInvariants(
+  originalMessages: ChatMessage[],
+  candidateMessages: ChatMessage[],
+  safeLimit: number
+): ChatMessage[] {
+  const latestUser = [...originalMessages]
+    .reverse()
+    .find(message => message.role === 'user' && String(message.content ?? '').trim().length > 0);
+  const primarySystem = originalMessages.find(
+    message => message.role === 'system' && String(message.content ?? '').trim().length > 0
+  );
+
+  let repaired = candidateMessages.map(cloneMessage);
+  if (primarySystem && !repaired.some(message => message.role === 'system' && String(message.content ?? '').trim().length > 0)) {
+    repaired.unshift(cloneMessage(primarySystem));
+  }
+
+  if (latestUser && !repaired.some(
+    message => message.role === 'user' && String(message.content ?? '') === String(latestUser.content ?? '')
+  )) {
+    repaired.push(cloneMessage(latestUser));
+  }
+
+  // Keep assistant tool calls and tool results coherent after aggressive slicing.
+  const assistantCallIds = new Set<string>();
+  for (const message of repaired) {
+    if (message.role !== 'assistant') {
+      continue;
+    }
+    for (const call of message.tool_calls ?? []) {
+      const id = String(call.id ?? '').trim();
+      if (id) {
+        assistantCallIds.add(id);
+      }
+    }
+  }
+
+  repaired = repaired.filter(message => {
+    if (message.role !== 'tool') {
+      return true;
+    }
+    const id = String(message.tool_call_id ?? '').trim();
+    return !id || assistantCallIds.has(id);
+  });
+
+  const toolResultIds = new Set<string>();
+  for (const message of repaired) {
+    if (message.role !== 'tool') {
+      continue;
+    }
+    const id = String(message.tool_call_id ?? '').trim();
+    if (id) {
+      toolResultIds.add(id);
+    }
+  }
+
+  repaired = repaired.map(message => {
+    if (message.role !== 'assistant' || !Array.isArray(message.tool_calls) || message.tool_calls.length === 0) {
+      return message;
+    }
+    const pairedCalls = message.tool_calls.filter(call => {
+      const id = String(call.id ?? '').trim();
+      return !id || toolResultIds.has(id);
+    });
+    return {
+      ...message,
+      tool_calls: pairedCalls.length > 0 ? pairedCalls : undefined
+    };
+  });
+
+  const protectedIndexes = new Set<number>();
+  if (primarySystem) {
+    const systemIndex = repaired.findIndex(
+      message => message.role === 'system' && String(message.content ?? '').trim().length > 0
+    );
+    if (systemIndex >= 0) {
+      protectedIndexes.add(systemIndex);
+    }
+  }
+  if (latestUser) {
+    const latestUserIndex = repaired.findIndex(
+      message => message.role === 'user' && String(message.content ?? '') === String(latestUser.content ?? '')
+    );
+    if (latestUserIndex >= 0) {
+      protectedIndexes.add(latestUserIndex);
+    }
+  }
+
+  repaired = trimCompactedMessagesToSafeLimit(repaired, safeLimit, protectedIndexes);
+  if (estimateMessagesTokens(repaired) <= safeLimit) {
+    return repaired;
+  }
+
+  if (latestUser) {
+    const fallbackMessages: ChatMessage[] = [];
+    if (primarySystem) {
+      fallbackMessages.push(cloneMessage(primarySystem));
+    }
+    fallbackMessages.push(cloneMessage(latestUser));
+
+    let finalFallback = trimCompactedMessagesToSafeLimit(
+      fallbackMessages,
+      safeLimit,
+      new Set<number>([fallbackMessages.length - 1])
+    );
+    if (estimateMessagesTokens(finalFallback) > safeLimit) {
+      const latestIndex = finalFallback.length - 1;
+      const latest = finalFallback[latestIndex];
+      if (latest) {
+        const messageOverheadTokens = estimateMessageTokens({ ...latest, content: '' });
+        const contentCharacterBudget = Math.max(0, (safeLimit - messageOverheadTokens) * 4);
+        finalFallback = [
+          {
+            ...latest,
+            content: String(latest.content ?? '').slice(0, contentCharacterBudget)
+          }
+        ];
+      }
+    }
+    return finalFallback;
+  }
+
+  return repaired;
 }
 
 /**
@@ -685,14 +1143,20 @@ function summarizeConversationForContext(messages: ChatMessage[]): string {
  * when it alone exceeds the budget. This keeps overflow retries bounded instead of repeating
  * the same context-window failure.
  */
-export function compactMessagesForContext(messages: ChatMessage[], contextWindowTokens?: number, safetyMarginTokens = 512, force = false): ChatMessage[] {
+export function compactMessagesForContext(
+  messages: ChatMessage[],
+  contextWindowTokens?: number,
+  safetyMarginTokens = 512,
+  force = false,
+  options?: CompactionOptions
+): ChatMessage[] {
   const contextLimit = toPositiveInteger(contextWindowTokens);
   if (!contextLimit) {
     return messages;
   }
 
   const margin = force
-    ? Math.max(safetyMarginTokens, Math.round(contextLimit * 0.3))
+    ? adaptiveForcedMargin(contextLimit, safetyMarginTokens, options)
     : safetyMarginTokens;
   const safeLimit = Math.max(256, contextLimit - margin);
   if (!force && estimateMessagesTokens(messages) <= safeLimit) {
@@ -703,48 +1167,49 @@ export function compactMessagesForContext(messages: ChatMessage[], contextWindow
   const recent = messages.slice(-recentWindow);
   const older = messages.slice(0, -recentWindow);
   const summary = summarizeConversationForContext(older);
-  const compacted = [
-    ...(summary ? [{ role: 'user' as const, content: `Earlier context summary: ${summary}` }] : []),
-    ...recent
-  ];
+  const forceToolAwareMessages = force
+    ? messages.map(message => (
+      message.role === 'tool'
+        ? { ...message, content: compactMessageContentForContext(message) }
+        : message
+    ))
+    : messages;
+  const forceToolAwareRecent = forceToolAwareMessages.slice(-recentWindow);
+
+  const compacted = enforceCompactionInvariants(forceToolAwareMessages, [
+    ...(summary ? [{ role: 'system' as const, content: summary }] : []),
+    ...forceToolAwareRecent
+  ], safeLimit);
 
   if (estimateMessagesTokens(compacted) <= safeLimit) {
     return compacted;
   }
 
-  const aggressiveSummary = summary ? `Compressed earlier context: ${summary.slice(0, 900)}` : 'Earlier context omitted to fit the model context window.';
-  const aggressive = [
-    { role: 'user' as const, content: aggressiveSummary },
+  const aggressiveSummary = summary
+    ? `Conversation continuity digest (compressed):\n${summary.slice(0, 1200)}`
+    : 'Conversation continuity digest: earlier context omitted to fit the model context window.';
+  const aggressive = enforceCompactionInvariants(messages, [
+    { role: 'system' as const, content: aggressiveSummary },
     ...recent.map(message => ({
       ...message,
-      content: String(message.content ?? '').replace(/\s+/g, ' ').trim().slice(0, 900)
+      content: compactMessageContentForContext(message)
     }))
-  ];
+  ], safeLimit);
 
   if (estimateMessagesTokens(aggressive) <= safeLimit) {
     return aggressive;
   }
 
-  const bounded = aggressive.slice(-Math.min(aggressive.length, 4));
+  const bounded = enforceCompactionInvariants(
+    messages,
+    aggressive.slice(-Math.min(aggressive.length, 4)),
+    safeLimit
+  );
   while (estimateMessagesTokens(bounded) > safeLimit && bounded.length > 1) {
     bounded.shift();
   }
 
-  if (estimateMessagesTokens(bounded) <= safeLimit) {
-    return bounded;
-  }
-
-  const latestMessage = bounded[0];
-  if (!latestMessage) {
-    return bounded;
-  }
-
-  const messageOverheadTokens = estimateMessageTokens({ ...latestMessage, content: '' });
-  const contentCharacterBudget = Math.max(0, (safeLimit - messageOverheadTokens) * 4);
-  return [{
-    ...latestMessage,
-    content: String(latestMessage.content ?? '').slice(0, contentCharacterBudget)
-  }];
+  return enforceCompactionInvariants(messages, bounded, safeLimit);
 }
 
 function isContextOverflowError(error: unknown): boolean {
@@ -808,12 +1273,226 @@ function extractContextLimitFromError(error: unknown): number | undefined {
 }
 
 function resolveCompactionWindow(config: LLMConfig, error: unknown): number | undefined {
+  return resolveCompactionWindowDetails(config, error).window;
+}
+
+function resolveCompactionWindowDetails(config: LLMConfig, error: unknown): CompactionWindowResolution {
   const configured = toPositiveInteger(config.contextWindowTokens);
   const reported = extractContextLimitFromError(error);
   if (configured && reported) {
-    return Math.min(configured, reported);
+    return {
+      window: Math.min(configured, reported),
+      confidence: 'reported'
+    };
   }
-  return configured ?? reported;
+  if (reported) {
+    return {
+      window: reported,
+      confidence: 'reported'
+    };
+  }
+  if (configured) {
+    return {
+      window: configured,
+      confidence: 'configured'
+    };
+  }
+  return {
+    window: undefined,
+    confidence: 'unknown'
+  };
+}
+
+function maybeCompactProactively(
+  baseMessages: ChatMessage[],
+  contextWindowTokens: number | undefined,
+  options: {
+    legacyLabel: string;
+    v2Label: string;
+    summaryMode?: boolean;
+  },
+  onEvent?: (message: string) => void,
+  onCompactionTelemetry?: (telemetry: CompactionTelemetry) => void
+): ChatMessage[] {
+  const proactiveWindow = toPositiveInteger(contextWindowTokens);
+  if (!proactiveWindow) {
+    return baseMessages;
+  }
+
+  const proactiveEstimate = estimateMessagesTokens(baseMessages);
+  if (proactiveEstimate > proactiveWindow) {
+    return baseMessages;
+  }
+
+  if (!isContextCompactionV2Enabled()) {
+    const proactiveThreshold = Math.round(proactiveWindow * 0.8);
+    if (proactiveEstimate <= proactiveThreshold) {
+      return baseMessages;
+    }
+    const compacted = compactMessagesForContext(baseMessages, proactiveWindow, 1024, true);
+    if (JSON.stringify(compacted) !== JSON.stringify(baseMessages)) {
+      onCompactionTelemetry?.(buildCompactionTelemetry(baseMessages, compacted, {
+        source: 'proactive',
+        mode: 'legacy',
+        stage: 'legacy',
+        confidence: 'configured',
+        overflowCount: 0,
+        summaryMode: Boolean(options.summaryMode),
+        contextWindowTokens: proactiveWindow
+      }));
+      onEvent?.(`${options.legacyLabel} (estimate ${proactiveEstimate} tokens, threshold ${proactiveThreshold})`);
+      return compacted;
+    }
+    return baseMessages;
+  }
+
+  const softThreshold = Math.round(proactiveWindow * (options.summaryMode ? 0.9 : 0.92));
+  const mediumThreshold = Math.round(proactiveWindow * (options.summaryMode ? 0.95 : 0.965));
+
+  if (proactiveEstimate <= softThreshold) {
+    return baseMessages;
+  }
+
+  let staged = baseMessages;
+  let stagedEstimate = proactiveEstimate;
+  let changed = false;
+  let stageUsed: CompactionStage = 'soft';
+
+  staged = compactMessagesForContext(staged, proactiveWindow, 640, false, {
+    stage: 'soft',
+    estimatedTokens: stagedEstimate,
+    confidence: 'configured',
+    overflowCount: 0
+  });
+  if (JSON.stringify(staged) !== JSON.stringify(baseMessages)) {
+    changed = true;
+    stagedEstimate = estimateMessagesTokens(staged);
+  }
+
+  if (stagedEstimate > mediumThreshold) {
+    const medium = compactMessagesForContext(staged, proactiveWindow, 896, true, {
+      stage: 'medium',
+      estimatedTokens: stagedEstimate,
+      confidence: 'configured',
+      overflowCount: 1
+    });
+    if (JSON.stringify(medium) !== JSON.stringify(staged)) {
+      changed = true;
+      stageUsed = 'medium';
+      staged = medium;
+      stagedEstimate = estimateMessagesTokens(staged);
+    }
+  }
+
+  if (stagedEstimate > proactiveWindow) {
+    const hard = compactMessagesForContext(staged, proactiveWindow, 1152, true, {
+      stage: 'hard',
+      estimatedTokens: stagedEstimate,
+      confidence: 'configured',
+      overflowCount: 2
+    });
+    if (JSON.stringify(hard) !== JSON.stringify(staged)) {
+      changed = true;
+      stageUsed = 'hard';
+      staged = hard;
+      stagedEstimate = estimateMessagesTokens(staged);
+    }
+  }
+
+  if (changed) {
+    onCompactionTelemetry?.(buildCompactionTelemetry(baseMessages, staged, {
+      source: 'proactive',
+      mode: 'v2',
+      stage: stageUsed,
+      confidence: 'configured',
+      overflowCount: 0,
+      summaryMode: Boolean(options.summaryMode),
+      contextWindowTokens: proactiveWindow
+    }));
+    onEvent?.(`${options.v2Label} (stage=${stageUsed}, estimate ${proactiveEstimate}->${stagedEstimate})`);
+    return staged;
+  }
+
+  return baseMessages;
+}
+
+function compactAfterOverflow(
+  baseMessages: ChatMessage[],
+  window: CompactionWindowResolution,
+  overflowCount: number
+): OverflowCompactionResult {
+  if (!window.window) {
+    return { messages: baseMessages };
+  }
+
+  if (!isContextCompactionV2Enabled()) {
+    const compacted = compactMessagesForContext(baseMessages, window.window, 1024, true);
+    if (JSON.stringify(compacted) === JSON.stringify(baseMessages)) {
+      return { messages: baseMessages };
+    }
+    return {
+      messages: compacted,
+      telemetry: buildCompactionTelemetry(baseMessages, compacted, {
+        source: 'overflow-retry',
+        mode: 'legacy',
+        stage: 'legacy',
+        confidence: window.confidence,
+        overflowCount,
+        summaryMode: false,
+        contextWindowTokens: window.window
+      })
+    };
+  }
+
+  const initialEstimate = estimateMessagesTokens(baseMessages);
+  const medium = compactMessagesForContext(baseMessages, window.window, 1024, true, {
+    stage: 'medium',
+    estimatedTokens: initialEstimate,
+    overflowCount,
+    confidence: window.confidence
+  });
+
+  const mediumEstimate = estimateMessagesTokens(medium);
+  const hardThreshold = Math.round(window.window * 0.92);
+  if (mediumEstimate <= hardThreshold) {
+    if (JSON.stringify(medium) === JSON.stringify(baseMessages)) {
+      return { messages: baseMessages };
+    }
+    return {
+      messages: medium,
+      telemetry: buildCompactionTelemetry(baseMessages, medium, {
+        source: 'overflow-retry',
+        mode: 'v2',
+        stage: 'medium',
+        confidence: window.confidence,
+        overflowCount,
+        summaryMode: false,
+        contextWindowTokens: window.window
+      })
+    };
+  }
+
+  const hard = compactMessagesForContext(medium, window.window, 1280, true, {
+    stage: 'hard',
+    estimatedTokens: mediumEstimate,
+    overflowCount: overflowCount + 1,
+    confidence: window.confidence
+  });
+  if (JSON.stringify(hard) === JSON.stringify(baseMessages)) {
+    return { messages: baseMessages };
+  }
+  return {
+    messages: hard,
+    telemetry: buildCompactionTelemetry(baseMessages, hard, {
+      source: 'overflow-retry',
+      mode: 'v2',
+      stage: 'hard',
+      confidence: window.confidence,
+      overflowCount: overflowCount + 1,
+      summaryMode: false,
+      contextWindowTokens: window.window
+    })
+  };
 }
 
 function toOllamaMessages(messages: ChatMessage[]): Array<Record<string, unknown>> {
@@ -1401,7 +2080,13 @@ export async function chatWithTools(
     requests: 0
   };
   const debugTurns: ChatWithToolsDebug['turns'] = [];
+  const compactionTelemetry: CompactionTelemetry[] = [];
   let totalToolCalls = 0;
+
+  function recordCompactionTelemetry(telemetry: CompactionTelemetry): void {
+    compactionTelemetry.push(telemetry);
+    onEvent?.(serializeCompactionTelemetryEvent(telemetry));
+  }
 
   function snapshotMessages(items: ChatMessage[]): ChatMessage[] {
     return items.map(message => ({
@@ -1426,6 +2111,7 @@ export async function chatWithTools(
       initialMessageCount: initialMessages.length,
       finalMessageCount: messages.length,
       totalToolCalls,
+      compactionTelemetry: [...compactionTelemetry],
       turns: [...debugTurns],
       finalMessages: snapshotMessages(messages)
     };
@@ -1452,20 +2138,23 @@ export async function chatWithTools(
     // Only act while the estimate is still within the window (80%-100%); if it is
     // already over 100%, the request will fail and the reactive path compacts
     // using the server-reported limit, which is more accurate.
-    const proactiveWindow = toPositiveInteger(config.contextWindowTokens);
-    if (proactiveWindow) {
-      const proactiveThreshold = Math.round(proactiveWindow * 0.8);
-      const proactiveCeiling = proactiveWindow;
-      const proactiveEstimate = estimateMessagesTokens(summaryMessages);
-      if (proactiveEstimate > proactiveThreshold && proactiveEstimate <= proactiveCeiling) {
-        const compacted = compactMessagesForContext(summaryMessages, proactiveWindow, 1024, true);
-        if (JSON.stringify(compacted) !== JSON.stringify(summaryMessages)) {
-          summaryMessages.length = 0;
-          summaryMessages.push(...compacted);
-          onEvent?.(`context:compacted-proactively (final summary, estimate ${proactiveEstimate} tokens, threshold ${proactiveThreshold})`);
-        }
-      }
+    const proactiveCompactedSummary = maybeCompactProactively(
+      summaryMessages,
+      config.contextWindowTokens,
+      {
+        legacyLabel: 'context:compacted-proactively (final summary)',
+        v2Label: 'context:compacted-proactively-v2 (final summary)',
+        summaryMode: true
+      },
+      onEvent,
+      recordCompactionTelemetry
+    );
+    if (JSON.stringify(proactiveCompactedSummary) !== JSON.stringify(summaryMessages)) {
+      summaryMessages.length = 0;
+      summaryMessages.push(...proactiveCompactedSummary);
     }
+
+    let overflowCompactionCount = 0;
 
     let streamedTokenCount = 0;
 
@@ -1564,8 +2253,17 @@ export async function chatWithTools(
         return await attemptRequest(summaryMessages, true);
       } catch (streamError) {
         if (isContextOverflowError(streamError)) {
-          const compacted = compactMessagesForContext(summaryMessages, resolveCompactionWindow(config, streamError), 1024, true);
+          overflowCompactionCount += 1;
+          const compactedResult = compactAfterOverflow(
+            summaryMessages,
+            resolveCompactionWindowDetails(config, streamError),
+            overflowCompactionCount
+          );
+          const compacted = compactedResult.messages;
           if (JSON.stringify(compacted) !== JSON.stringify(summaryMessages)) {
+            if (compactedResult.telemetry) {
+              recordCompactionTelemetry(compactedResult.telemetry);
+            }
             onEvent?.('context:compacted-after-exceeding-window');
             return await attemptRequest(compacted, false);
           }
@@ -1579,8 +2277,17 @@ export async function chatWithTools(
       }
     } catch (error) {
       if (isContextOverflowError(error)) {
-        const compacted = compactMessagesForContext(summaryMessages, resolveCompactionWindow(config, error), 1024, true);
+        overflowCompactionCount += 1;
+        const compactedResult = compactAfterOverflow(
+          summaryMessages,
+          resolveCompactionWindowDetails(config, error),
+          overflowCompactionCount
+        );
+        const compacted = compactedResult.messages;
         if (JSON.stringify(compacted) !== JSON.stringify(summaryMessages)) {
+          if (compactedResult.telemetry) {
+            recordCompactionTelemetry(compactedResult.telemetry);
+          }
           onEvent?.('context:compacted-after-exceeding-window');
           return await attemptRequest(compacted, false);
         }
@@ -1739,22 +2446,23 @@ export async function chatWithTools(
     // Only act while the estimate is still within the window (80%-100%); if it is
     // already over 100%, the request will fail and the reactive path compacts
     // using the server-reported limit, which is more accurate.
-    const proactiveWindow = toPositiveInteger(config.contextWindowTokens);
-    if (proactiveWindow) {
-      const proactiveThreshold = Math.round(proactiveWindow * 0.8);
-      const proactiveCeiling = proactiveWindow;
-      const proactiveEstimate = estimateMessagesTokens(messages);
-      if (proactiveEstimate > proactiveThreshold && proactiveEstimate <= proactiveCeiling) {
-        const compacted = compactMessagesForContext(messages, proactiveWindow, 1024, true);
-        if (JSON.stringify(compacted) !== JSON.stringify(messages)) {
-          messages.length = 0;
-          messages.push(...compacted);
-          onEvent?.(`context:compacted-proactively (estimate ${proactiveEstimate} tokens, threshold ${proactiveThreshold})`);
-        }
-      }
+    const proactiveCompacted = maybeCompactProactively(
+      messages,
+      config.contextWindowTokens,
+      {
+        legacyLabel: 'context:compacted-proactively',
+        v2Label: 'context:compacted-proactively-v2'
+      },
+      onEvent,
+      recordCompactionTelemetry
+    );
+    if (JSON.stringify(proactiveCompacted) !== JSON.stringify(messages)) {
+      messages.length = 0;
+      messages.push(...proactiveCompacted);
     }
 
     const requestMessages = messages;
+    let overflowCompactionCount = 0;
 
     if (useOllamaNativeChat && ollamaNativeEndpoint) {
       const payload = buildOllamaNativePayload(config, normalizeForStrictSystemTemplates(ensureOllamaUserPrompt(requestMessages)), activeTools);
@@ -1785,8 +2493,17 @@ export async function chatWithTools(
         }
       } catch (error) {
         if (isContextOverflowError(error)) {
-          const compacted = compactMessagesForContext(messages, resolveCompactionWindow(config, error), 1024, true);
+          overflowCompactionCount += 1;
+          const compactedResult = compactAfterOverflow(
+            messages,
+            resolveCompactionWindowDetails(config, error),
+            overflowCompactionCount
+          );
+          const compacted = compactedResult.messages;
           if (JSON.stringify(compacted) !== JSON.stringify(requestMessages)) {
+            if (compactedResult.telemetry) {
+              recordCompactionTelemetry(compactedResult.telemetry);
+            }
             onEvent?.('context:compacted-before-retry');
             const retryPayload = buildOllamaNativePayload(config, normalizeForStrictSystemTemplates(ensureOllamaUserPrompt(compacted)), activeTools);
             const retryStream = Boolean(config.ollamaStreaming ?? true);
@@ -1865,8 +2582,17 @@ export async function chatWithTools(
             usage = streamed.usage;
           } catch (streamError) {
             if (isContextOverflowError(streamError)) {
-              const compacted = compactMessagesForContext(messages, resolveCompactionWindow(config, streamError), 1024, true);
+              overflowCompactionCount += 1;
+              const compactedResult = compactAfterOverflow(
+                messages,
+                resolveCompactionWindowDetails(config, streamError),
+                overflowCompactionCount
+              );
+              const compacted = compactedResult.messages;
               if (JSON.stringify(compacted) !== JSON.stringify(requestMessages)) {
+                if (compactedResult.telemetry) {
+                  recordCompactionTelemetry(compactedResult.telemetry);
+                }
                 onEvent?.('context:compacted-before-retry');
                 const retryPayload: Record<string, unknown> = {
                   ...payloadBase(config, compacted),
@@ -1916,8 +2642,17 @@ export async function chatWithTools(
         }
       } catch (error) {
         if (isContextOverflowError(error)) {
-          const compacted = compactMessagesForContext(messages, resolveCompactionWindow(config, error), 1024, true);
+          overflowCompactionCount += 1;
+          const compactedResult = compactAfterOverflow(
+            messages,
+            resolveCompactionWindowDetails(config, error),
+            overflowCompactionCount
+          );
+          const compacted = compactedResult.messages;
           if (JSON.stringify(compacted) !== JSON.stringify(requestMessages)) {
+            if (compactedResult.telemetry) {
+              recordCompactionTelemetry(compactedResult.telemetry);
+            }
             onEvent?.('context:compacted-before-retry');
             const retryPayload: Record<string, unknown> = {
               ...payloadBase(config, compacted),

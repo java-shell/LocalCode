@@ -57,6 +57,10 @@ let turboMemory: TurboVecMemory | null = null;
 const mcpServerManager = new MCPServerManager();
 const MAIN_STATE_FILE = 'localcode-main-state.json';
 const DEFAULT_PROMPT_SPEC_VERSION: PromptSpecVersion = 'v2';
+const CONTEXT_COMPACTION_V2_FLAG = 'LOCALCODE_CONTEXT_COMPACTION_V2';
+const COMPACTION_MEMORY_SOURCE = 'chat:compaction-summary';
+const COMPACTION_TOOL_STATE_MEMORY_SOURCE = 'chat:compaction-tool-state';
+const ORCH_COMPACTION_HANDOFF_SOURCE = 'orch:compaction-handoff';
 
 // Pending query_user promise for awaiting user response
 let pendingQueryUserResolve: ((response: import('./backend/toolRuntime').QueryUserResponse) => void) | null = null;
@@ -250,6 +254,231 @@ function estimateTokensFromText(text: string): number {
   }
   // Approximate conversion used for UI visualization only.
   return Math.max(1, Math.ceil(normalized.length / 4));
+}
+
+function isContextCompactionV2Enabled(): boolean {
+  const raw = String(process.env[CONTEXT_COMPACTION_V2_FLAG] ?? '').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
+function isCompactionEventMessage(message: string): boolean {
+  return String(message ?? '').trim().startsWith('context:compacted');
+}
+
+function summarizeRetainedSystemConstraints(messages: ChatMessage[], maxItems = 3): string[] {
+  const lines = messages
+    .filter(message => message.role === 'system')
+    .map(message => String(message.content ?? '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .slice(-Math.max(1, maxItems))
+    .map(value => truncateText(value, 220));
+
+  return Array.from(new Set(lines));
+}
+
+function collectRecentToolSignals(messages: ChatMessage[], maxItems = 6): string[] {
+  const toolSignals: string[] = [];
+
+  for (const message of messages.slice(-20)) {
+    if (message.role === 'assistant' && Array.isArray(message.tool_calls) && message.tool_calls.length > 0) {
+      for (const call of message.tool_calls.slice(0, 4)) {
+        const name = String(call?.function?.name ?? '').trim();
+        if (!name) {
+          continue;
+        }
+        const argsPreview = truncateText(String(call?.function?.arguments ?? '').replace(/\s+/g, ' '), 140);
+        toolSignals.push(`intent ${name}${argsPreview ? `(${argsPreview})` : ''}`);
+      }
+      continue;
+    }
+
+    if (message.role === 'tool') {
+      const content = String(message.content ?? '').replace(/\s+/g, ' ').trim();
+      if (!content) {
+        continue;
+      }
+      const status = /error|failed|exception|timeout|denied|invalid/i.test(content) ? 'error' : 'result';
+      toolSignals.push(`${status}: ${truncateText(content, 220)}`);
+    }
+  }
+
+  return toolSignals.slice(-Math.max(1, maxItems));
+}
+
+function deriveCompactionSeverityMultiplier(
+  telemetry: ChatCompactionTelemetry[]
+): number {
+  if (!Array.isArray(telemetry) || telemetry.length === 0) {
+    return 1;
+  }
+
+  const recent = telemetry.slice(-4);
+  let severity = 1;
+
+  for (const item of recent) {
+    const pre = Math.max(1, Number(item.preEstimatedTokens ?? 1));
+    const dropped = Math.max(0, Number(item.droppedEstimatedTokens ?? 0));
+    const droppedRatio = dropped / pre;
+    const stage = String(item.stage ?? 'soft');
+    const overflowCount = Math.max(0, Number(item.overflowCount ?? 0));
+
+    if (stage === 'hard') {
+      severity += 0.35;
+    } else if (stage === 'medium') {
+      severity += 0.2;
+    } else {
+      severity += 0.08;
+    }
+
+    if (droppedRatio >= 0.4) {
+      severity += 0.22;
+    } else if (droppedRatio >= 0.25) {
+      severity += 0.12;
+    }
+
+    if (overflowCount >= 2) {
+      severity += 0.12;
+    }
+  }
+
+  return Math.max(1, Math.min(2.5, Number(severity.toFixed(2))));
+}
+
+interface ChatCompactionTelemetry {
+  source: 'proactive' | 'overflow-retry';
+  mode: 'legacy' | 'v2';
+  stage: 'soft' | 'medium' | 'hard' | 'legacy';
+  confidence: 'reported' | 'configured' | 'unknown';
+  overflowCount: number;
+  summaryMode: boolean;
+  contextWindowTokens: number;
+  preEstimatedTokens: number;
+  postEstimatedTokens: number;
+  droppedEstimatedTokens: number;
+  preMessageCount: number;
+  postMessageCount: number;
+  droppedMessagesByRole: Record<'system' | 'user' | 'assistant' | 'tool', number>;
+  droppedMessagesByType: Record<string, number>;
+}
+
+function parseCompactionTelemetryEvent(message: string): ChatCompactionTelemetry | null {
+  const raw = String(message ?? '').trim();
+  const prefix = 'context:compacted-metrics:';
+  if (!raw.startsWith(prefix)) {
+    return null;
+  }
+
+  const payload = raw.slice(prefix.length).trim();
+  if (!payload) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(payload) as Partial<ChatCompactionTelemetry>;
+    if (!parsed || typeof parsed !== 'object') {
+      return null;
+    }
+    return {
+      source: parsed.source === 'overflow-retry' ? 'overflow-retry' : 'proactive',
+      mode: parsed.mode === 'legacy' ? 'legacy' : 'v2',
+      stage: parsed.stage === 'legacy' || parsed.stage === 'hard' || parsed.stage === 'medium' || parsed.stage === 'soft'
+        ? parsed.stage
+        : 'soft',
+      confidence: parsed.confidence === 'reported' || parsed.confidence === 'configured' ? parsed.confidence : 'unknown',
+      overflowCount: Math.max(0, Number(parsed.overflowCount ?? 0) || 0),
+      summaryMode: Boolean(parsed.summaryMode),
+      contextWindowTokens: Math.max(0, Number(parsed.contextWindowTokens ?? 0) || 0),
+      preEstimatedTokens: Math.max(0, Number(parsed.preEstimatedTokens ?? 0) || 0),
+      postEstimatedTokens: Math.max(0, Number(parsed.postEstimatedTokens ?? 0) || 0),
+      droppedEstimatedTokens: Math.max(0, Number(parsed.droppedEstimatedTokens ?? 0) || 0),
+      preMessageCount: Math.max(0, Number(parsed.preMessageCount ?? 0) || 0),
+      postMessageCount: Math.max(0, Number(parsed.postMessageCount ?? 0) || 0),
+      droppedMessagesByRole: {
+        system: Math.max(0, Number(parsed.droppedMessagesByRole?.system ?? 0) || 0),
+        user: Math.max(0, Number(parsed.droppedMessagesByRole?.user ?? 0) || 0),
+        assistant: Math.max(0, Number(parsed.droppedMessagesByRole?.assistant ?? 0) || 0),
+        tool: Math.max(0, Number(parsed.droppedMessagesByRole?.tool ?? 0) || 0)
+      },
+      droppedMessagesByType: Object.entries(parsed.droppedMessagesByType ?? {}).reduce<Record<string, number>>((acc, [key, value]) => {
+        acc[String(key)] = Math.max(0, Number(value ?? 0) || 0);
+        return acc;
+      }, {})
+    };
+  } catch {
+    return null;
+  }
+}
+
+function summarizeChatMessagesForCapsule(messages: ChatMessage[], maxMessages = 4): string {
+  return messages
+    .slice(-Math.max(1, maxMessages))
+    .map((message, index) => {
+      const role = String(message.role || 'unknown').toUpperCase();
+      const content = String(message.content ?? '').replace(/\s+/g, ' ').trim();
+      const clipped = content.length > 500 ? `${content.slice(0, 497)}...` : content;
+      return `${index + 1}. ${role}: ${clipped || '(empty)'}`;
+    })
+    .join('\n');
+}
+
+function buildCompactionContinuityQuery(prompt: string, priorMessages: ChatMessage[]): string {
+  const latestUser = [...priorMessages]
+    .reverse()
+    .find(message => message.role === 'user' && String(message.content ?? '').trim().length > 0);
+  const latestAssistant = [...priorMessages]
+    .reverse()
+    .find(message => message.role === 'assistant' && String(message.content ?? '').trim().length > 0);
+
+  const systemConstraints = summarizeRetainedSystemConstraints(priorMessages, 3);
+  const toolSignals = collectRecentToolSignals(priorMessages, 6);
+
+  return [
+    'Compaction continuity retrieval',
+    `Current objective: ${String(prompt ?? '').slice(0, 1200)}`,
+    latestUser ? `Latest prior user intent: ${String(latestUser.content ?? '').slice(0, 800)}` : '',
+    latestAssistant ? `Latest prior assistant outcome: ${String(latestAssistant.content ?? '').slice(0, 800)}` : '',
+    systemConstraints.length > 0 ? `Retained system constraints:\n${systemConstraints.map((line, index) => `${index + 1}. ${line}`).join('\n')}` : '',
+    toolSignals.length > 0 ? `Recent tool intents and outcomes:\n${toolSignals.map((line, index) => `${index + 1}. ${line}`).join('\n')}` : '',
+    'Find compaction summaries, unresolved blockers, key decisions, and pending next actions.'
+  ].filter(Boolean).join('\n\n');
+}
+
+function buildCompactionToolStateSnapshotText(messages: ChatMessage[]): string {
+  const toolSignals = collectRecentToolSignals(messages, 10);
+  if (toolSignals.length === 0) {
+    return [
+      'Compaction tool-state capsule',
+      'No explicit tool intents or tool outputs were observed in recent messages.'
+    ].join('\n\n');
+  }
+
+  return [
+    'Compaction tool-state capsule',
+    'Recent tool intents and outcomes:',
+    toolSignals.map((line, index) => `${index + 1}. ${line}`).join('\n')
+  ].join('\n\n');
+}
+
+function buildCompactionSnapshotText(payload: {
+  prompt: string;
+  priorMessages: ChatMessage[];
+  compactionEvents: string[];
+  assistantText: string;
+}): string {
+  const objective = String(payload.prompt ?? '').replace(/\s+/g, ' ').trim();
+  const events = Array.from(new Set(payload.compactionEvents.map(value => String(value ?? '').trim()).filter(Boolean))).slice(-12);
+  const assistantOutcome = String(payload.assistantText ?? '').replace(/\s+/g, ' ').trim();
+
+  return [
+    'Compaction continuity capsule',
+    `Objective:\n${objective.slice(0, 1400) || '(none)'}`,
+    events.length > 0
+      ? `Compaction events:\n${events.map((value, index) => `${index + 1}. ${value}`).join('\n')}`
+      : 'Compaction events:\n(none)',
+    `Recent conversation context:\n${summarizeChatMessagesForCapsule(payload.priorMessages, 5)}`,
+    `Latest assistant outcome snapshot:\n${assistantOutcome.slice(0, 2200) || '(empty)'}`,
+    'Continuity focus:\n- preserve current objective\n- preserve unresolved blockers\n- preserve next actionable step'
+  ].join('\n\n');
 }
 
 function formatReferenceWorkspaceGuidance(
@@ -572,6 +801,7 @@ async function writeChatContextDebugDump(payload: {
     assistantToolCalls: number;
   }>;
   totalToolCalls?: number;
+  compactionTelemetry?: ChatCompactionTelemetry[];
   usage: {
     promptTokens: number;
     completionTokens: number;
@@ -629,6 +859,7 @@ async function writeChatContextDebugDump(payload: {
       messageRoleCounts,
       finalMessageRoleCounts: finalRoleCounts,
       totalToolCalls: Math.max(0, Number(payload.totalToolCalls ?? 0)),
+      compactionTelemetry: Array.isArray(payload.compactionTelemetry) ? payload.compactionTelemetry : [],
       turns: Array.isArray(payload.turns) ? payload.turns : [],
       usage: payload.usage,
       initialMessages: serializedInitialMessages,
@@ -1089,6 +1320,18 @@ ipcMain.handle(
       .filter(status => enabledMcpServerIds.has(status.serverId));
     let recalledMemorySystemSection = '';
     let recalledPromptTokens = 0;
+    const normalizedHistoryMessages = Array.isArray(payload.historyMessages)
+      ? payload.historyMessages
+          .filter(message => Boolean(message) && typeof message === 'object')
+          .map(message => ({
+            role: message.role,
+            content: String(message.content ?? ''),
+            tool_call_id: message.tool_call_id,
+            tool_calls: Array.isArray(message.tool_calls) ? message.tool_calls : undefined
+          }))
+      : [];
+    const priorMessages = normalizedHistoryMessages
+      .filter(message => (message.role === 'user' || message.role === 'assistant') && message.content.trim().length > 0);
 
     try {
       if (turboMemory && chatNamespaces.length > 0) {
@@ -1120,19 +1363,68 @@ ipcMain.handle(
           }
           event.sender.send('chat:event', `[memory] injected ${recalled.length} memory item(s).`);
         }
-      }
 
-      const priorMessages = Array.isArray(payload.historyMessages)
-        ? payload.historyMessages
-            .filter(message => Boolean(message) && typeof message === 'object')
-            .map(message => ({
-              role: message.role,
-              content: String(message.content ?? ''),
-              tool_call_id: message.tool_call_id,
-              tool_calls: Array.isArray(message.tool_calls) ? message.tool_calls : undefined
-            }))
-            .filter(message => (message.role === 'user' || message.role === 'assistant') && message.content.trim().length > 0)
-        : [];
+        // E3/G2: compaction-aware continuity rehydration from GraphRAG-expanded memory.
+        if (isContextCompactionV2Enabled()) {
+          const continuityQuery = buildCompactionContinuityQuery(payload.prompt, normalizedHistoryMessages);
+          const continuityRecalled = chatNamespaces.length > 1
+            ? await turboMemory.retrieveMulti(config, continuityQuery, {
+                namespaces: chatNamespaces,
+                k: 4,
+                maxHops: 2
+              })
+            : await turboMemory.retrieve(config, continuityQuery, {
+                namespace: chatNamespaces[0],
+                k: 4,
+                maxHops: 2
+              });
+
+          const continuityCapsules = continuityRecalled
+            .filter(item => {
+              const source = String(item?.source ?? '').trim();
+              return source === COMPACTION_MEMORY_SOURCE || source === COMPACTION_TOOL_STATE_MEMORY_SOURCE;
+            })
+            .slice(0, 3)
+            .map(item => ({
+              source: item.source,
+              text: item.text
+            }));
+
+          if (continuityCapsules.length > 0) {
+            const continuityTelemetry = continuityRecalled
+              .filter(item => {
+                const source = String(item?.source ?? '').trim();
+                return source === COMPACTION_MEMORY_SOURCE || source === COMPACTION_TOOL_STATE_MEMORY_SOURCE;
+              })
+              .flatMap(item => {
+                const raw = item?.metadata?.compactionTelemetry;
+                return Array.isArray(raw) ? raw as ChatCompactionTelemetry[] : [];
+              });
+            const severityMultiplier = deriveCompactionSeverityMultiplier(continuityTelemetry);
+            const adaptiveLimits = computeAdaptiveInjectionLimits(
+              payload.contextWindowTokens || config.contextWindowTokens,
+              severityMultiplier
+            );
+            const continuityLines = formatMemoryInjection(continuityCapsules, {
+              maxItems: Math.min(3, adaptiveLimits.maxItems),
+              maxCharsPerItem: Math.min(1400, adaptiveLimits.maxCharsPerItem),
+              maxTotalChars: Math.min(3800, adaptiveLimits.maxTotalChars)
+            });
+            const continuitySection =
+              'Compaction continuity capsules from prior compressed turns are available below. Prefer these for preserving objective, decisions, and next actions when context was reduced.\n\n' +
+              continuityLines;
+            recalledPromptTokens += estimateTokensFromText(continuityLines);
+            if (promptSpecVersion === 'v2') {
+              recalledMemorySystemSection = recalledMemorySystemSection
+                ? `${recalledMemorySystemSection}\n\n${continuitySection}`
+                : continuitySection;
+            } else {
+              systemPromptSections.push(continuitySection);
+            }
+            event.sender.send('chat:event', `[memory] injected ${continuityCapsules.length} compaction continuity capsule(s).`);
+          }
+        }
+      }
 
       const availableToolNames = toolDefinitions.map(def => def.function.name);
       const requestedToolNames = Array.isArray(payload.toolNames) && payload.toolNames.length > 0
@@ -1229,6 +1521,8 @@ ipcMain.handle(
       let result: Awaited<ReturnType<typeof chatWithTools>> | null = null;
       let initialMessagesForDebug: ChatMessage[] = [...messages];
       let streamedTokenCount = 0;
+      const compactionEvents: string[] = [];
+      const compactionTelemetryEvents: ChatCompactionTelemetry[] = [];
 
       while (attempt <= chatMaxRetries) {
         const attemptMessages: ChatMessage[] = [...messages];
@@ -1259,6 +1553,15 @@ ipcMain.handle(
               return executeTool(name, args, chatRuntimeContext);
             },
             message => {
+              const telemetry = parseCompactionTelemetryEvent(message);
+              if (telemetry) {
+                compactionTelemetryEvents.push(telemetry);
+                compactionEvents.push(message);
+                return;
+              }
+              if (isCompactionEventMessage(message)) {
+                compactionEvents.push(message);
+              }
               event.sender.send('chat:event', message);
             },
             payload.maxToolTurns ?? 40,
@@ -1298,6 +1601,10 @@ ipcMain.handle(
             finalMessages: result.debug?.finalMessages,
             turns: result.debug?.turns,
             totalToolCalls: result.debug?.totalToolCalls,
+            compactionTelemetry:
+              Array.isArray(result.debug?.compactionTelemetry) && result.debug.compactionTelemetry.length > 0
+                ? result.debug.compactionTelemetry
+                : compactionTelemetryEvents,
             usage: result.usage
           })
         : null;
@@ -1308,24 +1615,63 @@ ipcMain.handle(
 
       if (turboMemory) {
         try {
+          const memoryItems: Array<{ text: string; source: string; metadata?: Record<string, unknown> }> = [
+            {
+              text: payload.prompt.slice(0, 4000),
+              source: 'chat:user',
+              metadata: { workspaceDir: selectedWorkspaceDir }
+            },
+            {
+              text: text.slice(0, 6000),
+              source: 'chat:assistant',
+              metadata: { workspaceDir: selectedWorkspaceDir }
+            }
+          ];
+
+          // E3/G1: store compaction capsule when compaction happened in this run.
+          if (isContextCompactionV2Enabled() && compactionEvents.length > 0) {
+            const effectiveCompactionTelemetry = compactionTelemetryEvents.length > 0
+              ? compactionTelemetryEvents
+              : (Array.isArray(result.debug?.compactionTelemetry) ? result.debug.compactionTelemetry : []);
+            memoryItems.push({
+              text: buildCompactionSnapshotText({
+                prompt: payload.prompt,
+                priorMessages: normalizedHistoryMessages,
+                compactionEvents,
+                assistantText: text
+              }).slice(0, 7000),
+              source: COMPACTION_MEMORY_SOURCE,
+              metadata: {
+                workspaceDir: selectedWorkspaceDir,
+                model: config.model,
+                promptSpecVersion,
+                compactionEvents: compactionEvents.slice(-12),
+                compactionTelemetry: effectiveCompactionTelemetry
+              }
+            });
+
+            memoryItems.push({
+              text: buildCompactionToolStateSnapshotText(result.debug?.finalMessages ?? normalizedHistoryMessages).slice(0, 4500),
+              source: COMPACTION_TOOL_STATE_MEMORY_SOURCE,
+              metadata: {
+                workspaceDir: selectedWorkspaceDir,
+                model: config.model,
+                promptSpecVersion,
+                compactionTelemetry: effectiveCompactionTelemetry
+              }
+            });
+          }
+
           await turboMemory.store(
             config,
-            [
-              {
-                text: payload.prompt.slice(0, 4000),
-                source: 'chat:user',
-                metadata: { workspaceDir: selectedWorkspaceDir }
-              },
-              {
-                text: text.slice(0, 6000),
-                source: 'chat:assistant',
-                metadata: { workspaceDir: selectedWorkspaceDir }
-              }
-            ],
+            memoryItems,
             {
               namespace: workspaceChatNamespace
             }
           );
+          if (isContextCompactionV2Enabled() && compactionEvents.length > 0) {
+            event.sender.send('chat:event', `[memory] stored compaction continuity capsule (${compactionEvents.length} event(s)).`);
+          }
           event.sender.send('chat:event', '[memory] stored latest conversation turn in TurboVec memory.');
         } catch (storeErr) {
           event.sender.send('chat:event', `[memory] store failed: ${storeErr instanceof Error ? storeErr.message : String(storeErr)}`);
@@ -1862,11 +2208,22 @@ ipcMain.handle(
                   text: text.slice(0, 7000),
                   source: `orchestration:${stepName}`,
                   metadata: { workspaceDir: selectedWorkspaceDir }
+                },
+                {
+                  text: truncateText([
+                    `Orchestration handoff capsule for step: ${stepName}`,
+                    text
+                  ].join('\n\n'), 7000),
+                  source: ORCH_COMPACTION_HANDOFF_SOURCE,
+                  metadata: {
+                    workspaceDir: selectedWorkspaceDir,
+                    stepName
+                  }
                 }
               ],
               {
                 namespace: workspaceOrchestrationNamespace,
-                replaceSources: [`orchestration:${stepName}`]
+                replaceSources: [`orchestration:${stepName}`, ORCH_COMPACTION_HANDOFF_SOURCE]
               }
             );
             event.sender.send('orch:event', `[memory] ${stepName} stored output in TurboVec memory.`);
