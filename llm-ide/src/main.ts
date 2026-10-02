@@ -5,6 +5,11 @@ import { ChildProcessWithoutNullStreams } from 'child_process';
 import { chatWithTools, listModelCatalog } from './backend/llmClient';
 import { runOrchestration } from './backend/orchestrationEngine';
 import { deleteChatSession, listChatSessions, loadChatSession, saveChatSession } from './backend/chatSessionStore';
+import {
+  getLatestInterruptedChatTurn,
+  resolveChatTurnCheckpoint,
+  upsertChatTurnCheckpoint
+} from './backend/chatTurnCheckpointStore';
 import { defaultPlan, normalizeAdvancedStageIds, validatePlan, planPresets } from './backend/schema';
 import { loadPlan, savePlan } from './backend/planStore';
 import { listMcpServers, listMcpServersForTarget, saveMcpServers } from './backend/mcpServerStore';
@@ -27,6 +32,7 @@ import {
   OrchestrationPlan,
   OrchestrationRunRequest,
   OrchestrationRunResult,
+  UiContinuityState,
   WorkspaceState
 } from './shared/types';
 import { executeTool, getAllowedToolDefinitions, runTerminalCommand, toolDefinitions } from './backend/toolRuntime';
@@ -61,6 +67,24 @@ const CONTEXT_COMPACTION_V2_FLAG = 'LOCALCODE_CONTEXT_COMPACTION_V2';
 const COMPACTION_MEMORY_SOURCE = 'chat:compaction-summary';
 const COMPACTION_TOOL_STATE_MEMORY_SOURCE = 'chat:compaction-tool-state';
 const ORCH_COMPACTION_HANDOFF_SOURCE = 'orch:compaction-handoff';
+
+type AppTabKey = NonNullable<UiContinuityState['activeTab']>;
+
+interface PersistedMainState {
+  lastWorkspaceDir?: string;
+  referenceWorkspaces?: import('./shared/types').ReferenceWorkspace[];
+  activeChatSessionIdByWorkspace?: Record<string, string>;
+  activeTab?: AppTabKey;
+  lastVisitedPanel?: string;
+}
+
+const uiContinuityState: {
+  activeChatSessionIdByWorkspace: Record<string, string>;
+  activeTab?: AppTabKey;
+  lastVisitedPanel?: string;
+} = {
+  activeChatSessionIdByWorkspace: {}
+};
 
 // Pending query_user promise for awaiting user response
 let pendingQueryUserResolve: ((response: import('./backend/toolRuntime').QueryUserResponse) => void) | null = null;
@@ -1020,10 +1044,52 @@ function mainStatePath(): string {
   return path.join(app.getPath('userData'), MAIN_STATE_FILE);
 }
 
+function normalizeActiveTab(value: unknown): AppTabKey | undefined {
+  const raw = String(value ?? '').trim();
+  if (
+    raw === 'chat' ||
+    raw === 'orchestration' ||
+    raw === 'orchestration-advanced' ||
+    raw === 'diagnostics'
+  ) {
+    return raw;
+  }
+  return undefined;
+}
+
+function normalizeSessionPointerMap(value: unknown): Record<string, string> {
+  const map: Record<string, string> = {};
+  if (!value || typeof value !== 'object') {
+    return map;
+  }
+
+  for (const [workspace, sessionId] of Object.entries(value as Record<string, unknown>)) {
+    const safeWorkspace = String(workspace ?? '').trim();
+    const safeSessionId = String(sessionId ?? '').trim();
+    if (!safeWorkspace || !safeSessionId) {
+      continue;
+    }
+    map[safeWorkspace] = safeSessionId;
+  }
+
+  return map;
+}
+
+function continuityStateForWorkspace(workspaceDir: string): UiContinuityState {
+  const safeWorkspaceDir = String(workspaceDir ?? '').trim();
+  return {
+    activeTab: uiContinuityState.activeTab,
+    lastVisitedPanel: uiContinuityState.lastVisitedPanel,
+    activeChatSessionId: safeWorkspaceDir
+      ? uiContinuityState.activeChatSessionIdByWorkspace[safeWorkspaceDir]
+      : undefined
+  };
+}
+
 function restoreLastWorkspaceSelection() {
   try {
     const raw = fs.readFileSync(mainStatePath(), 'utf8');
-    const parsed = JSON.parse(raw) as { lastWorkspaceDir?: unknown; referenceWorkspaces?: import('./shared/types').ReferenceWorkspace[] };
+    const parsed = JSON.parse(raw) as PersistedMainState;
     const candidate = String(parsed?.lastWorkspaceDir ?? '').trim();
     if (candidate) {
       try {
@@ -1044,6 +1110,12 @@ function restoreLastWorkspaceSelection() {
         }
       });
     }
+
+    uiContinuityState.activeChatSessionIdByWorkspace = normalizeSessionPointerMap(
+      parsed?.activeChatSessionIdByWorkspace
+    );
+    uiContinuityState.activeTab = normalizeActiveTab(parsed?.activeTab);
+    uiContinuityState.lastVisitedPanel = String(parsed?.lastVisitedPanel ?? '').trim() || undefined;
   } catch {
     // Ignore missing/invalid state file and keep default workspace.
   }
@@ -1052,7 +1124,10 @@ function restoreLastWorkspaceSelection() {
 function persistLastWorkspaceSelection() {
   const payload = {
     lastWorkspaceDir: selectedWorkspaceDir,
-    referenceWorkspaces
+    referenceWorkspaces,
+    activeChatSessionIdByWorkspace: uiContinuityState.activeChatSessionIdByWorkspace,
+    activeTab: uiContinuityState.activeTab,
+    lastVisitedPanel: uiContinuityState.lastVisitedPanel
   };
 
   void fs.promises
@@ -1293,6 +1368,53 @@ ipcMain.handle(
     activeChatAbortController = abortController;
     const chatStartedAt = Date.now();
     const notifyCfg = notifyConfigFrom(payload);
+    const checkpointSessionId = String(payload.sessionId ?? '').trim();
+    const checkpointTurnId = String(payload.turnId ?? '').trim();
+    const checkpointPrompt = String(payload.prompt ?? '').trim();
+    const checkpointModel = String(config.model ?? '').trim();
+    let streamedAssistantText = '';
+    let checkpointStreamingMarked = false;
+
+    const writeCheckpoint = async (state: import('./shared/types').ChatTurnCheckpointState, overrides?: {
+      partialAssistantText?: string;
+      lastToolName?: string;
+      lastError?: string;
+      interrupted?: boolean;
+      resolved?: boolean;
+      resolution?: import('./shared/types').ChatTurnCheckpointResolution;
+    }) => {
+      if (!checkpointSessionId || !checkpointTurnId || !checkpointPrompt || !checkpointModel) {
+        return;
+      }
+      try {
+        await upsertChatTurnCheckpoint({
+          sessionId: checkpointSessionId,
+          turnId: checkpointTurnId,
+          workspaceDir: selectedWorkspaceDir,
+          prompt: checkpointPrompt,
+          model: checkpointModel,
+          state,
+          partialAssistantText: overrides?.partialAssistantText,
+          lastToolName: overrides?.lastToolName,
+          lastError: overrides?.lastError,
+          interrupted: overrides?.interrupted,
+          resolved: overrides?.resolved,
+          resolution: overrides?.resolution
+        });
+      } catch {
+        // Checkpoint persistence should never block chat completion.
+      }
+    };
+
+    const extractToolName = (message: string): string | undefined => {
+      const trimmed = String(message ?? '').trim();
+      if (!trimmed.toLowerCase().startsWith('tool:')) {
+        return undefined;
+      }
+      const body = trimmed.slice('tool:'.length).trim();
+      const match = body.match(/([a-zA-Z0-9_:-]+)/);
+      return match ? match[1] : undefined;
+    };
     const requestedChatNamespace = String(payload.memoryNamespace ?? '').trim();
     const requestedGlobalNamespace = String(payload.memoryGlobalNamespace ?? '').trim();
     
@@ -1334,6 +1456,11 @@ ipcMain.handle(
       .filter(message => (message.role === 'user' || message.role === 'assistant') && message.content.trim().length > 0);
 
     try {
+      await writeCheckpoint('queued', {
+        interrupted: false,
+        resolved: false
+      });
+
       if (turboMemory && chatNamespaces.length > 0) {
         // Use multi-namespace retrieval when both global and workspace namespaces are set
         const recalled = chatNamespaces.length > 1
@@ -1562,12 +1689,40 @@ ipcMain.handle(
               if (isCompactionEventMessage(message)) {
                 compactionEvents.push(message);
               }
+              const maybeToolName = extractToolName(message);
+              if (maybeToolName) {
+                const lower = message.toLowerCase();
+                if (lower.includes('result') || lower.includes('completed') || lower.includes('done')) {
+                  void writeCheckpoint('tool_call_completed', {
+                    lastToolName: maybeToolName,
+                    partialAssistantText: streamedAssistantText,
+                    interrupted: false,
+                    resolved: false
+                  });
+                } else {
+                  void writeCheckpoint('tool_call_started', {
+                    lastToolName: maybeToolName,
+                    partialAssistantText: streamedAssistantText,
+                    interrupted: false,
+                    resolved: false
+                  });
+                }
+              }
               event.sender.send('chat:event', message);
             },
             payload.maxToolTurns ?? 40,
             abortController.signal,
             token => {
               streamedTokenCount += 1;
+              streamedAssistantText += token;
+              if (!checkpointStreamingMarked) {
+                checkpointStreamingMarked = true;
+                void writeCheckpoint('streaming', {
+                  partialAssistantText: streamedAssistantText,
+                  interrupted: false,
+                  resolved: false
+                });
+              }
               event.sender.send('chat:token', token);
             }
           );
@@ -1681,9 +1836,17 @@ ipcMain.handle(
       if (streamedTokenCount === 0) {
         const chunkSize = 16;
         for (let i = 0; i < text.length; i += chunkSize) {
+          streamedAssistantText += text.slice(i, i + chunkSize);
           event.sender.send('chat:token', text.slice(i, i + chunkSize));
         }
       }
+
+      await writeCheckpoint('completed', {
+        partialAssistantText: streamedAssistantText || text,
+        interrupted: false,
+        resolved: true,
+        resolution: 'completed'
+      });
 
       const usageByModel = [{
         model: config.model,
@@ -1708,6 +1871,12 @@ ipcMain.handle(
       };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
+      await writeCheckpoint('interrupted', {
+        partialAssistantText: streamedAssistantText,
+        lastError: detail,
+        interrupted: true,
+        resolved: false
+      });
       // User-initiated stops are not failures; do not notify for them.
       if (!/canceled/i.test(detail) && !/stopped by user/i.test(detail)) {
         dispatchNotification(notifyCfg, {
@@ -1793,6 +1962,39 @@ ipcMain.handle('chat:delete-session', async (_event, payload: { id?: string }) =
   }
   return deleteChatSession(id);
 });
+
+ipcMain.handle('chat:get-interrupted-turn', async (_event, payload: { sessionId?: string }) => {
+  const sessionId = String(payload?.sessionId ?? '').trim();
+  if (!sessionId) {
+    return null;
+  }
+  return getLatestInterruptedChatTurn(sessionId);
+});
+
+ipcMain.handle(
+  'chat:resolve-interrupted-turn',
+  async (
+    _event,
+    payload: {
+      sessionId?: string;
+      turnId?: string;
+      resolution?: import('./shared/types').ChatTurnCheckpointResolution;
+    }
+  ) => {
+    const sessionId = String(payload?.sessionId ?? '').trim();
+    const turnId = String(payload?.turnId ?? '').trim();
+    const resolution = payload?.resolution;
+    if (!sessionId || !turnId || !resolution) {
+      return { ok: false, checkpoint: null as null };
+    }
+
+    const checkpoint = await resolveChatTurnCheckpoint(sessionId, turnId, resolution);
+    return {
+      ok: Boolean(checkpoint),
+      checkpoint
+    };
+  }
+);
 
 ipcMain.handle('chat:list-models', async (_event, payload: { endpoint: string; apiKey?: string }) => {
   const catalog = await listModelCatalog({
@@ -1962,6 +2164,44 @@ ipcMain.handle('orch:stop', async () => {
 });
 
 ipcMain.handle('workspace:get-state', async () => workspaceState());
+
+ipcMain.handle('workspace:get-ui-continuity', async () => {
+  return continuityStateForWorkspace(selectedWorkspaceDir);
+});
+
+ipcMain.handle(
+  'workspace:update-ui-continuity',
+  async (
+    _event,
+    payload: {
+      activeTab?: UiContinuityState['activeTab'];
+      lastVisitedPanel?: string;
+      activeChatSessionId?: string;
+    }
+  ) => {
+    const activeTab = normalizeActiveTab(payload?.activeTab);
+    if (activeTab) {
+      uiContinuityState.activeTab = activeTab;
+    }
+
+    if (typeof payload?.lastVisitedPanel === 'string') {
+      const panel = payload.lastVisitedPanel.trim();
+      uiContinuityState.lastVisitedPanel = panel || undefined;
+    }
+
+    if (typeof payload?.activeChatSessionId === 'string') {
+      const sessionId = payload.activeChatSessionId.trim();
+      if (sessionId) {
+        uiContinuityState.activeChatSessionIdByWorkspace[selectedWorkspaceDir] = sessionId;
+      } else {
+        delete uiContinuityState.activeChatSessionIdByWorkspace[selectedWorkspaceDir];
+      }
+    }
+
+    persistLastWorkspaceSelection();
+    return { ok: true, continuity: continuityStateForWorkspace(selectedWorkspaceDir) };
+  }
+);
 
 ipcMain.handle('workspace:select-directory', async () => {
   const result = await dialog.showOpenDialog({

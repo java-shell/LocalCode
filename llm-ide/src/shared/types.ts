@@ -118,6 +118,8 @@ export interface ChatStreamRequest {
   subAgentConfig?: LLMConfig;
   subAgentConfigs?: SubAgentConfigProfile[];
   mcpServers?: MCPServerConfig[];
+  sessionId?: string;
+  turnId?: string;
   prompt: string;
   historyMessages?: ChatMessage[];
   toolNames?: string[];
@@ -184,6 +186,33 @@ export interface ChatSessionSummary {
 
 export interface ChatSession extends ChatSessionSummary {
   messages: ChatMessage[];
+}
+
+export type ChatTurnCheckpointState =
+  | 'queued'
+  | 'streaming'
+  | 'tool_call_started'
+  | 'tool_call_completed'
+  | 'completed'
+  | 'interrupted';
+
+export type ChatTurnCheckpointResolution = 'dismissed' | 'retried' | 'regenerated' | 'completed';
+
+export interface ChatTurnCheckpoint {
+  sessionId: string;
+  turnId: string;
+  workspaceDir: string;
+  prompt: string;
+  model: string;
+  state: ChatTurnCheckpointState;
+  partialAssistantText?: string;
+  lastToolName?: string;
+  lastError?: string;
+  updatedAt: string;
+  interrupted: boolean;
+  resolved: boolean;
+  resolvedAt?: string;
+  resolution?: ChatTurnCheckpointResolution;
 }
 
 export interface ToolPermission {
@@ -333,6 +362,12 @@ export interface WorkspaceState {
   rootDir: string;
   referenceWorkspaces?: ReferenceWorkspace[];
   promptSpecVersion?: PromptSpecVersion;
+}
+
+export interface UiContinuityState {
+  activeTab?: 'chat' | 'orchestration' | 'orchestration-advanced' | 'diagnostics';
+  lastVisitedPanel?: string;
+  activeChatSessionId?: string;
 }
 
 

@@ -12,6 +12,7 @@ let activeTabKey = 'chat';
 let advancedFullscreenRequested = false;
 const SETTINGS_STORAGE_KEY = 'localcode.settings';
 const PANEL_SIZES_STORAGE_KEY = 'localcode.panelSizes';
+const TAB_KEYS = new Set(['chat', 'orchestration', 'orchestration-advanced', 'diagnostics']);
 
 const settingsState = {
   maxToolTurns: 40,
@@ -55,8 +56,35 @@ const settingsState = {
   advancedOllamaParametersJson: '',
   thoughtSectionsCollapsedByDefault: true,
   contextUsageCollapsed: false,
-  lockedNamespaces: []
+  lockedNamespaces: [],
+  activeTab: 'chat',
+  chatDraftText: '',
+  orchestrationDraftPrompt: '',
+  activeChatSessionIdByWorkspace: {}
 };
+
+function normalizeActiveTabKey(value) {
+  const key = String(value || '').trim();
+  return TAB_KEYS.has(key) ? key : 'chat';
+}
+
+function normalizeSessionHintByWorkspace(value) {
+  const hints = {};
+  if (!value || typeof value !== 'object') {
+    return hints;
+  }
+
+  for (const [workspaceDir, sessionId] of Object.entries(value)) {
+    const workspace = String(workspaceDir || '').trim();
+    const id = String(sessionId || '').trim();
+    if (!workspace || !id) {
+      continue;
+    }
+    hints[workspace] = id;
+  }
+
+  return hints;
+}
 
 const usageByModel = new Map();
 const subAgentActivityByProfile = new Map();
@@ -1037,6 +1065,14 @@ function loadSettings() {
     );
     settingsState.contextUsageCollapsed = Boolean(parsed.contextUsageCollapsed ?? settingsState.contextUsageCollapsed);
     settingsState.lockedNamespaces = Array.isArray(parsed.lockedNamespaces) ? parsed.lockedNamespaces : [];
+    settingsState.activeTab = normalizeActiveTabKey(parsed.activeTab ?? settingsState.activeTab);
+    settingsState.chatDraftText = String(parsed.chatDraftText ?? settingsState.chatDraftText);
+    settingsState.orchestrationDraftPrompt = String(
+      parsed.orchestrationDraftPrompt ?? settingsState.orchestrationDraftPrompt
+    );
+    settingsState.activeChatSessionIdByWorkspace = normalizeSessionHintByWorkspace(
+      parsed.activeChatSessionIdByWorkspace
+    );
   } catch {
     settingsState.maxToolTurns = 40;
     settingsState.requestTimeoutMs = 180000;
@@ -1080,6 +1116,10 @@ function loadSettings() {
     settingsState.thoughtSectionsCollapsedByDefault = true;
     settingsState.contextUsageCollapsed = false;
     settingsState.lockedNamespaces = [];
+    settingsState.activeTab = 'chat';
+    settingsState.chatDraftText = '';
+    settingsState.orchestrationDraftPrompt = '';
+    settingsState.activeChatSessionIdByWorkspace = {};
   }
 
   if (!Array.isArray(settingsState.subAgentProfiles) || settingsState.subAgentProfiles.length === 0) {
@@ -1089,6 +1129,10 @@ function loadSettings() {
 
 function saveSettings() {
   window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(settingsState));
+}
+
+function persistUiContinuityToMain(payload) {
+  return window.llmIde.updateUiContinuityState(payload).catch(() => undefined);
 }
 
 function buildSubAgentConfigs() {
@@ -1433,6 +1477,9 @@ function setActiveTab(which) {
   const diagOn = which === 'diagnostics';
 
   activeTabKey = which;
+  settingsState.activeTab = normalizeActiveTabKey(which);
+  saveSettings();
+  void persistUiContinuityToMain({ activeTab: settingsState.activeTab, lastVisitedPanel: settingsState.activeTab });
   document.body.classList.toggle('advanced-fullscreen-active', advancedFullscreenRequested && orchAdvancedOn);
 
   chatTab.classList.toggle('active', chatOn);
@@ -2644,6 +2691,7 @@ async function initChat() {
 
   syncOllamaThinkModeAvailability();
   applyAdvancedSettingsVisibility();
+  prompt.value = String(settingsState.chatDraftText || '');
 
   let currentWorkspaceDir = '';
   let chatSessions = [];
@@ -2651,8 +2699,39 @@ async function initChat() {
   let activeChatSessionTitle = '';
   let activeChatSessionCreatedAt = '';
   let activeChatMessages = [];
+  let preferredStartupSessionId = '';
   let forceFreshContextForNextSend = false;
   let sessionListMutating = false;
+
+  function getWorkspaceSessionHint(workspaceDir) {
+    const key = String(workspaceDir || '').trim();
+    if (!key) {
+      return '';
+    }
+    const map = settingsState.activeChatSessionIdByWorkspace || {};
+    return String(map[key] || '').trim();
+  }
+
+  function setWorkspaceSessionHint(workspaceDir, sessionId) {
+    const key = String(workspaceDir || '').trim();
+    if (!key) {
+      return;
+    }
+
+    const map = {
+      ...(settingsState.activeChatSessionIdByWorkspace || {})
+    };
+    const safeId = String(sessionId || '').trim();
+    if (safeId) {
+      map[key] = safeId;
+    } else {
+      delete map[key];
+    }
+
+    settingsState.activeChatSessionIdByWorkspace = map;
+    saveSettings();
+    void persistUiContinuityToMain({ activeChatSessionId: safeId || undefined });
+  }
 
   function workspaceLabel(workspaceDir) {
     const value = String(workspaceDir || '').trim();
@@ -2675,6 +2754,13 @@ async function initChat() {
       return window.crypto.randomUUID();
     }
     return `chat-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
+  }
+
+  function createChatTurnId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+      return window.crypto.randomUUID();
+    }
+    return `turn-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
   }
 
   function buildChatTitleFromPrompt(text) {
@@ -2717,6 +2803,116 @@ async function initChat() {
         appendLog(conversation, `You: ${String(message.content || '')}`);
       }
     }
+  }
+
+  let interruptedRecoveryCard = null;
+
+  function clearInterruptedRecoveryCard() {
+    if (interruptedRecoveryCard && interruptedRecoveryCard.parentElement) {
+      interruptedRecoveryCard.parentElement.removeChild(interruptedRecoveryCard);
+    }
+    interruptedRecoveryCard = null;
+  }
+
+  async function refreshInterruptedTurnRecovery() {
+    clearInterruptedRecoveryCard();
+    if (!activeChatSessionId) {
+      return;
+    }
+
+    let checkpoint = null;
+    try {
+      checkpoint = await window.llmIde.getInterruptedChatTurn({ sessionId: activeChatSessionId });
+    } catch {
+      return;
+    }
+
+    if (!checkpoint || !checkpoint.prompt) {
+      return;
+    }
+
+    const card = document.createElement('div');
+    card.className = 'query-user-card';
+
+    const title = document.createElement('div');
+    title.className = 'query-user-question';
+    title.innerHTML = renderMarkdownToHtml(
+      `### Interrupted Turn Recovered\nYour last turn was interrupted around ${formatChatTimestamp(checkpoint.updatedAt)}.`
+    );
+    card.appendChild(title);
+
+    const detail = document.createElement('div');
+    detail.className = 'query-user-answer-display';
+    detail.innerHTML = `<strong>Prompt:</strong> ${escapeHtml(String(checkpoint.prompt || ''))}`;
+    card.appendChild(detail);
+
+    const actionRow = document.createElement('div');
+    actionRow.className = 'query-user-button-row';
+
+    const retryButton = document.createElement('button');
+    retryButton.className = 'query-user-submit-btn';
+    retryButton.textContent = 'Retry';
+    retryButton.addEventListener('click', async () => {
+      if (
+        activeChatMessages.length > 0 &&
+        activeChatMessages[activeChatMessages.length - 1]?.role === 'user' &&
+        String(activeChatMessages[activeChatMessages.length - 1]?.content || '').trim() ===
+          String(checkpoint.prompt || '').trim()
+      ) {
+        activeChatMessages.pop();
+        await persistActiveChatSession();
+      }
+
+      prompt.value = String(checkpoint.prompt || '');
+      settingsState.chatDraftText = prompt.value;
+      saveSettings();
+      await window.llmIde.resolveInterruptedChatTurn({
+        sessionId: checkpoint.sessionId,
+        turnId: checkpoint.turnId,
+        resolution: 'retried'
+      });
+      clearInterruptedRecoveryCard();
+      status.textContent = 'Interrupted prompt restored. Press Send to retry.';
+      prompt.focus();
+    });
+    actionRow.appendChild(retryButton);
+
+    const regenerateButton = document.createElement('button');
+    regenerateButton.className = 'query-user-submit-btn';
+    regenerateButton.textContent = 'Regenerate';
+    regenerateButton.addEventListener('click', async () => {
+      prompt.value = String(checkpoint.prompt || '');
+      settingsState.chatDraftText = prompt.value;
+      saveSettings();
+      await window.llmIde.resolveInterruptedChatTurn({
+        sessionId: checkpoint.sessionId,
+        turnId: checkpoint.turnId,
+        resolution: 'regenerated'
+      });
+      clearInterruptedRecoveryCard();
+      status.textContent = 'Interrupted prompt restored for regeneration.';
+      prompt.focus();
+    });
+    actionRow.appendChild(regenerateButton);
+
+    const dismissButton = document.createElement('button');
+    dismissButton.className = 'query-user-cancel-btn';
+    dismissButton.textContent = 'Dismiss';
+    dismissButton.addEventListener('click', async () => {
+      await window.llmIde.resolveInterruptedChatTurn({
+        sessionId: checkpoint.sessionId,
+        turnId: checkpoint.turnId,
+        resolution: 'dismissed'
+      });
+      clearInterruptedRecoveryCard();
+      status.textContent = 'Interrupted-turn notice dismissed.';
+    });
+    actionRow.appendChild(dismissButton);
+
+    card.appendChild(actionRow);
+    conversation.appendChild(card);
+    conversation.scrollTop = conversation.scrollHeight;
+    interruptedRecoveryCard = card;
   }
 
   function selectedChatMemoryNamespace() {
@@ -2853,6 +3049,7 @@ async function initChat() {
     activeChatSessionCreatedAt = session.createdAt;
     activeChatMessages = Array.isArray(session.messages) ? session.messages : [];
     forceFreshContextForNextSend = false;
+    setWorkspaceSessionHint(currentWorkspaceDir, session.id);
 
     provider.value = normalizeProvider(session.config?.provider || settingsState.provider);
     endpoint.value = session.config?.endpoint || settingsState.endpoint;
@@ -2903,6 +3100,8 @@ async function initChat() {
       chatSessionList.value = session.id;
       sessionListMutating = false;
     }
+
+    await refreshInterruptedTurnRecovery();
   }
 
   async function createNewChatSession() {
@@ -2914,6 +3113,7 @@ async function initChat() {
     forceFreshContextForNextSend = true;
     conversation.innerHTML = '';
     await persistActiveChatSession();
+    setWorkspaceSessionHint(currentWorkspaceDir, activeChatSessionId);
     await refreshChatSessions();
     updateChatSessionWorkspaceLabel(currentWorkspaceDir, timestamp);
     status.textContent = 'Started new chat';
@@ -3654,6 +3854,10 @@ async function initChat() {
     settingsState.chatMemoryNamespace = chatNewMemoryNamespace.value.trim();
     saveSettings();
   });
+  prompt.addEventListener('input', () => {
+    settingsState.chatDraftText = String(prompt.value || '');
+    saveSettings();
+  });
   advancedToggle.addEventListener('click', () => {
     settingsState.advancedSettingsCollapsed = !settingsState.advancedSettingsCollapsed;
     saveSettings();
@@ -3720,6 +3924,8 @@ async function initChat() {
     activeChatSessionTitle = '';
     activeChatSessionCreatedAt = '';
     activeChatMessages = [];
+    clearInterruptedRecoveryCard();
+    setWorkspaceSessionHint(currentWorkspaceDir, '');
     conversation.innerHTML = '';
     await refreshChatSessions();
     if (chatSessions.length > 0) {
@@ -3772,6 +3978,9 @@ async function initChat() {
     }
 
     appendLog(conversation, `You: ${text}`);
+    settingsState.chatDraftText = '';
+    saveSettings();
+    prompt.value = '';
     assistantRowEl = null;
     assistantMarkdownEl = null;
     assistantMarkdownRaw = '';
@@ -3782,6 +3991,8 @@ async function initChat() {
     try {
       const advancedOverrides = buildAdvancedConfigOverrides();
       const result = await window.llmIde.chatStream({
+        sessionId: activeChatSessionId,
+        turnId: createChatTurnId(),
         prompt: text,
         config: {
           provider: normalizeProvider(provider.value),
@@ -3846,6 +4057,7 @@ async function initChat() {
 
       await persistActiveChatSession();
       await refreshChatSessions();
+      await refreshInterruptedTurnRecovery();
       updateChatSessionWorkspaceLabel(currentWorkspaceDir, new Date().toISOString());
 
       if (Array.isArray(result?.usageByModel)) {
@@ -3864,6 +4076,7 @@ async function initChat() {
       }
       await persistActiveChatSession();
       await refreshChatSessions();
+      await refreshInterruptedTurnRecovery();
       status.textContent = isCanceled ? 'Chat stopped' : 'Error';
       if (!isCanceled) {
         showToast({ type: 'error', title: 'Prompt Failed', message: errorMsg });
@@ -3885,6 +4098,16 @@ async function initChat() {
   try {
     const state = await window.llmIde.getWorkspaceState();
     currentWorkspaceDir = String(state?.workspaceDir || '').trim();
+    preferredStartupSessionId = getWorkspaceSessionHint(currentWorkspaceDir);
+    try {
+      const continuity = await window.llmIde.getUiContinuityState();
+      const persistedSessionId = String(continuity?.activeChatSessionId || '').trim();
+      if (persistedSessionId) {
+        preferredStartupSessionId = persistedSessionId;
+      }
+    } catch {
+      // Best-effort continuity hydration; local fallback already captured.
+    }
   } catch {
     currentWorkspaceDir = '';
   }
@@ -3894,7 +4117,12 @@ async function initChat() {
   await refreshChatNamespaceOptions();
   await refreshChatSessions();
 
-  if (chatSessions.length > 0) {
+  const hintedSession = preferredStartupSessionId
+    ? chatSessions.find(session => session.id === preferredStartupSessionId)
+    : null;
+  if (hintedSession) {
+    await loadChatSessionById(hintedSession.id);
+  } else if (chatSessions.length > 0) {
     await loadChatSessionById(chatSessions[0].id);
   } else {
     await createNewChatSession();
@@ -3923,6 +4151,12 @@ async function initOrchestration() {
   const logModal = document.getElementById('orchLogModal');
   const logMarkdownEl = document.getElementById('orchLogMarkdown');
   const logCloseButton = document.getElementById('orchLogClose');
+
+  prompt.value = String(settingsState.orchestrationDraftPrompt || '');
+  prompt.addEventListener('input', () => {
+    settingsState.orchestrationDraftPrompt = String(prompt.value || '');
+    saveSettings();
+  });
   const logExpandAllButton = document.getElementById('orchLogExpandAll');
   const logCollapseAllButton = document.getElementById('orchLogCollapseAll');
   const eventsEl = document.getElementById('orchEvents');
@@ -6629,12 +6863,20 @@ async function initDiagnostics() {
 
 async function main() {
   loadSettings();
+  try {
+    const continuity = await window.llmIde.getUiContinuityState();
+    settingsState.activeTab = normalizeActiveTabKey(continuity?.activeTab || settingsState.activeTab);
+    saveSettings();
+  } catch {
+    settingsState.activeTab = normalizeActiveTabKey(settingsState.activeTab);
+  }
   renderContextUsageGraph();
   initContextUsageToggle();
   document.getElementById('chatTab').addEventListener('click', () => setActiveTab('chat'));
   document.getElementById('orchTab').addEventListener('click', () => setActiveTab('orchestration'));
   document.getElementById('orchAdvancedTab').addEventListener('click', () => setActiveTab('orchestration-advanced'));
   document.getElementById('diagTab').addEventListener('click', () => setActiveTab('diagnostics'));
+  setActiveTab(settingsState.activeTab);
   document.getElementById('openSample').addEventListener('click', () => {
     openScratchTab(
       "// Sample file\nexport async function run() {\n  return 'Edit code here with Monaco and ask the LLM to help.';\n}\n",

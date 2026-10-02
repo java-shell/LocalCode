@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron';
 import {
   ChatSession,
   ChatSessionSummary,
+  ChatTurnCheckpoint,
+  ChatTurnCheckpointResolution,
   ChatStreamResult,
   ChatStreamRequest,
   MemoryNamespaceExportResult,
@@ -16,6 +18,7 @@ import {
   NotifyTestResult,
   MCPServerConfig,
   MCPServerRuntimeStatus,
+  UiContinuityState,
   WorkspaceState,
   WorkspaceTreeNode,
   QueryUserRequest,
@@ -72,6 +75,16 @@ const api = {
   },
   deleteChatSession: async (payload: { id: string }): Promise<{ deleted: boolean }> => {
     return ipcRenderer.invoke('chat:delete-session', payload);
+  },
+  getInterruptedChatTurn: async (payload: { sessionId: string }): Promise<ChatTurnCheckpoint | null> => {
+    return ipcRenderer.invoke('chat:get-interrupted-turn', payload);
+  },
+  resolveInterruptedChatTurn: async (payload: {
+    sessionId: string;
+    turnId: string;
+    resolution: ChatTurnCheckpointResolution;
+  }): Promise<{ ok: boolean; checkpoint: ChatTurnCheckpoint | null }> => {
+    return ipcRenderer.invoke('chat:resolve-interrupted-turn', payload);
   },
   stopChat: async (): Promise<{ stopped: boolean; reason?: string }> => {
     return ipcRenderer.invoke('chat:stop');
@@ -143,6 +156,14 @@ const api = {
     return ipcRenderer.invoke('notify:test', payload);
   },
   getWorkspaceState: async (): Promise<WorkspaceState> => ipcRenderer.invoke('workspace:get-state'),
+  getUiContinuityState: async (): Promise<UiContinuityState> =>
+    ipcRenderer.invoke('workspace:get-ui-continuity'),
+  updateUiContinuityState: async (payload: {
+    activeTab?: UiContinuityState['activeTab'];
+    lastVisitedPanel?: string;
+    activeChatSessionId?: string;
+  }): Promise<{ ok: boolean; continuity: UiContinuityState }> =>
+    ipcRenderer.invoke('workspace:update-ui-continuity', payload),
   selectWorkspaceDirectory: async (): Promise<WorkspaceState> =>
     ipcRenderer.invoke('workspace:select-directory'),
   listWorkspaceTree: async (): Promise<WorkspaceTreeNode> => ipcRenderer.invoke('workspace:list-tree'),
