@@ -10,6 +10,13 @@ import {
   resolveChatTurnCheckpoint,
   upsertChatTurnCheckpoint
 } from './backend/chatTurnCheckpointStore';
+import {
+  applyDurableRunRecoveryAction,
+  getDurableRun,
+  listDurableRuns,
+  listRecoverableDurableRuns,
+  upsertDurableRun
+} from './backend/durableRunStore';
 import { defaultPlan, normalizeAdvancedStageIds, validatePlan, planPresets } from './backend/schema';
 import { loadPlan, savePlan } from './backend/planStore';
 import { listMcpServers, listMcpServersForTarget, saveMcpServers } from './backend/mcpServerStore';
@@ -674,6 +681,12 @@ function truncateText(value: string, maxChars: number): string {
     return text;
   }
   return `${text.slice(0, Math.max(0, maxChars - 3))}...`;
+}
+
+function createDurableRunId(prefix: 'chat' | 'orch'): string {
+  const stamp = Date.now().toString(36);
+  const rand = Math.random().toString(36).slice(2, 10);
+  return `${prefix}-${stamp}-${rand}`;
 }
 
 function isInternalServerRetryableError(detail: string): boolean {
@@ -1342,6 +1355,7 @@ app.on('window-all-closed', () => {
 ipcMain.handle(
   'chat:stream',
   async (event, payload: ChatStreamRequest): Promise<ChatStreamResult> => {
+    const durableRunId = createDurableRunId('chat');
     const config: LLMConfig = {
       ...payload.config,
       contextWindowTokens: Math.max(0, Number(payload.contextWindowTokens ?? 0)) || undefined
@@ -1456,6 +1470,28 @@ ipcMain.handle(
       .filter(message => (message.role === 'user' || message.role === 'assistant') && message.content.trim().length > 0);
 
     try {
+      await upsertDurableRun({
+        runId: durableRunId,
+        kind: 'chat',
+        status: 'pending',
+        workspaceDir: selectedWorkspaceDir,
+        sessionId: checkpointSessionId || undefined,
+        model: String(config.model ?? '').trim() || undefined,
+        promptExcerpt: truncateText(String(payload.prompt ?? ''), 240),
+        promptSnapshot: truncateText(String(payload.prompt ?? ''), 4000)
+      }).catch(() => undefined);
+
+      await upsertDurableRun({
+        runId: durableRunId,
+        kind: 'chat',
+        status: 'running',
+        workspaceDir: selectedWorkspaceDir,
+        sessionId: checkpointSessionId || undefined,
+        model: String(config.model ?? '').trim() || undefined,
+        promptExcerpt: truncateText(String(payload.prompt ?? ''), 240),
+        promptSnapshot: truncateText(String(payload.prompt ?? ''), 4000)
+      }).catch(() => undefined);
+
       await writeCheckpoint('queued', {
         interrupted: false,
         resolved: false
@@ -1691,6 +1727,17 @@ ipcMain.handle(
               }
               const maybeToolName = extractToolName(message);
               if (maybeToolName) {
+                void upsertDurableRun({
+                  runId: durableRunId,
+                  kind: 'chat',
+                  status: 'waiting_tool',
+                  workspaceDir: selectedWorkspaceDir,
+                  sessionId: checkpointSessionId || undefined,
+                  model: String(config.model ?? '').trim() || undefined,
+                  promptExcerpt: truncateText(String(payload.prompt ?? ''), 240),
+                  promptSnapshot: truncateText(String(payload.prompt ?? ''), 4000),
+                  checkpointRef: checkpointTurnId || undefined
+                }).catch(() => undefined);
                 const lower = message.toLowerCase();
                 if (lower.includes('result') || lower.includes('completed') || lower.includes('done')) {
                   void writeCheckpoint('tool_call_completed', {
@@ -1848,6 +1895,18 @@ ipcMain.handle(
         resolution: 'completed'
       });
 
+      await upsertDurableRun({
+        runId: durableRunId,
+        kind: 'chat',
+        status: 'completed',
+        workspaceDir: selectedWorkspaceDir,
+        sessionId: checkpointSessionId || undefined,
+        model: String(config.model ?? '').trim() || undefined,
+        promptExcerpt: truncateText(String(payload.prompt ?? ''), 240),
+        promptSnapshot: truncateText(String(payload.prompt ?? ''), 4000),
+        checkpointRef: checkpointTurnId || undefined
+      }).catch(() => undefined);
+
       const usageByModel = [{
         model: config.model,
         ...result.usage,
@@ -1877,6 +1936,20 @@ ipcMain.handle(
         interrupted: true,
         resolved: false
       });
+
+      const canceled = /canceled/i.test(detail) || /stopped by user/i.test(detail);
+      await upsertDurableRun({
+        runId: durableRunId,
+        kind: 'chat',
+        status: canceled ? 'canceled' : 'failed',
+        workspaceDir: selectedWorkspaceDir,
+        sessionId: checkpointSessionId || undefined,
+        model: String(config.model ?? '').trim() || undefined,
+        promptExcerpt: truncateText(String(payload.prompt ?? ''), 240),
+        promptSnapshot: truncateText(String(payload.prompt ?? ''), 4000),
+        checkpointRef: checkpointTurnId || undefined,
+        error: truncateText(detail, 500)
+      }).catch(() => undefined);
       // User-initiated stops are not failures; do not notify for them.
       if (!/canceled/i.test(detail) && !/stopped by user/i.test(detail)) {
         dispatchNotification(notifyCfg, {
@@ -2315,6 +2388,7 @@ ipcMain.handle(
     event,
     payload: OrchestrationRunRequest
   ): Promise<OrchestrationRunResult> => {
+    const durableRunId = createDurableRunId('orch');
     const normalizedPlan = normalizeAdvancedStageIds(payload.plan ?? defaultPlan);
     const errors = validatePlan(normalizedPlan);
     if (errors.length > 0) {
@@ -2325,6 +2399,28 @@ ipcMain.handle(
     activeOrchestrationAbortController = abortController;
     const orchStartedAt = Date.now();
     const notifyCfg = notifyConfigFrom(payload);
+
+    await upsertDurableRun({
+      runId: durableRunId,
+      kind: 'orchestration',
+      status: 'pending',
+      workspaceDir: selectedWorkspaceDir,
+      model: String(normalizedPlan?.steps?.[0]?.model ?? '').trim() || undefined,
+      stageId: String(normalizedPlan?.steps?.[0]?.id ?? '').trim() || undefined,
+      promptExcerpt: truncateText(String(payload.prompt ?? ''), 240),
+      promptSnapshot: truncateText(String(payload.prompt ?? ''), 4000)
+    }).catch(() => undefined);
+
+    await upsertDurableRun({
+      runId: durableRunId,
+      kind: 'orchestration',
+      status: 'running',
+      workspaceDir: selectedWorkspaceDir,
+      model: String(normalizedPlan?.steps?.[0]?.model ?? '').trim() || undefined,
+      stageId: String(normalizedPlan?.steps?.[0]?.id ?? '').trim() || undefined,
+      promptExcerpt: truncateText(String(payload.prompt ?? ''), 240),
+      promptSnapshot: truncateText(String(payload.prompt ?? ''), 4000)
+    }).catch(() => undefined);
 
     const requestedNamespace = String(payload.memoryNamespace ?? '').trim();
     const requestedGlobalNamespace = String(payload.memoryGlobalNamespace ?? '').trim();
@@ -2485,9 +2581,35 @@ ipcMain.handle(
         totalTokens: sumTotalTokens(run?.usageByModel)
       });
 
-      return run;
+      await upsertDurableRun({
+        runId: durableRunId,
+        kind: 'orchestration',
+        status: 'completed',
+        workspaceDir: selectedWorkspaceDir,
+        model: String(normalizedPlan?.steps?.[0]?.model ?? '').trim() || undefined,
+        stageId: String(normalizedPlan?.steps?.[0]?.id ?? '').trim() || undefined,
+        promptExcerpt: truncateText(String(payload.prompt ?? ''), 240),
+        promptSnapshot: truncateText(String(payload.prompt ?? ''), 4000)
+      }).catch(() => undefined);
+
+      return {
+        ...run,
+        runId: durableRunId
+      };
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error);
+      const canceled = /canceled/i.test(detail) || /stopped by user/i.test(detail);
+      await upsertDurableRun({
+        runId: durableRunId,
+        kind: 'orchestration',
+        status: canceled ? 'canceled' : 'failed',
+        workspaceDir: selectedWorkspaceDir,
+        model: String(normalizedPlan?.steps?.[0]?.model ?? '').trim() || undefined,
+        stageId: String(normalizedPlan?.steps?.[0]?.id ?? '').trim() || undefined,
+        promptExcerpt: truncateText(String(payload.prompt ?? ''), 240),
+        promptSnapshot: truncateText(String(payload.prompt ?? ''), 4000),
+        error: truncateText(detail, 500)
+      }).catch(() => undefined);
       if (!/canceled/i.test(detail) && !/stopped by user/i.test(detail)) {
         dispatchNotification(notifyCfg, {
           kind: 'chat.error',
@@ -2602,3 +2724,48 @@ ipcMain.handle('workspace:update-reference-workspace', async (_event, payload: {
 ipcMain.handle('notify:test', async (_event, payload: NotifySettings) => {
   return sendTestNotification(notifyConfigFrom(payload) ?? {});
 });
+
+ipcMain.handle('runs:list', async (_event, payload?: { limit?: number }) => {
+  const limit = Math.max(1, Math.min(500, Number(payload?.limit ?? 100) || 100));
+  const runs = await listDurableRuns(limit);
+  return { runs };
+});
+
+ipcMain.handle(
+  'runs:list-recoverable',
+  async (_event, payload?: { limit?: number; kind?: 'chat' | 'orchestration' }) => {
+    const limit = Math.max(1, Math.min(500, Number(payload?.limit ?? 100) || 100));
+    const kind = payload?.kind === 'orchestration' ? 'orchestration' : payload?.kind === 'chat' ? 'chat' : undefined;
+    const runs = await listRecoverableDurableRuns({
+      workspaceDir: selectedWorkspaceDir,
+      kind,
+      limit
+    });
+    return { runs };
+  }
+);
+
+ipcMain.handle('runs:get', async (_event, payload?: { runId?: string }) => {
+  const runId = String(payload?.runId ?? '').trim();
+  if (!runId) {
+    return null;
+  }
+  return getDurableRun(runId);
+});
+
+ipcMain.handle(
+  'runs:apply-recovery-action',
+  async (_event, payload?: { runId?: string; action?: import('./shared/types').DurableRunRecoveryAction }) => {
+    const runId = String(payload?.runId ?? '').trim();
+    const action = payload?.action;
+    if (!runId || !action) {
+      return { ok: false, run: null as null };
+    }
+
+    const run = await applyDurableRunRecoveryAction(runId, action);
+    return {
+      ok: Boolean(run),
+      run
+    };
+  }
+);

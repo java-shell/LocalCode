@@ -33,3 +33,12 @@ test('renderer exposes interrupted-turn recovery UI and sends turn identifiers',
   assert.match(source, /turnId:\s*createChatTurnId\(\)/);
   assert.match(source, /sessionId:\s*activeChatSessionId/);
 });
+
+test('renderer exposes resume-manager run recovery controls for chat and orchestration', async () => {
+  const source = await readRendererSource();
+
+  assert.match(source, /window\.llmIde\.listRecoverableRuns\(\{ kind: 'chat'/);
+  assert.match(source, /window\.llmIde\.applyRunRecoveryAction\(\{ runId: run\.runId, action: 'resume' \}\)/);
+  assert.match(source, /window\.llmIde\.listRecoverableRuns\(\{ kind: 'orchestration'/);
+  assert.match(source, /window\.llmIde\.applyRunRecoveryAction\(\{ runId: run\.runId, action: 'restart' \}\)/);
+});

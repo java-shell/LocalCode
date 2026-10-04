@@ -54,6 +54,7 @@ const settingsState = {
   advancedOllamaRepetitionPenalty: '',
   advancedOllamaExtraJson: '',
   advancedOllamaParametersJson: '',
+  quickPresets: [],
   thoughtSectionsCollapsedByDefault: true,
   contextUsageCollapsed: false,
   lockedNamespaces: [],
@@ -203,6 +204,8 @@ const OLLAMA_REQUEST_TEMPLATE = JSON.stringify(
   2
 );
 
+const MAX_SAVED_QUICK_PRESETS = 50;
+
 function clampMaxToolTurns(value) {
   if (!Number.isFinite(value)) return 40;
   return Math.max(1, Math.min(200, Math.floor(value)));
@@ -273,6 +276,68 @@ function normalizeProvider(value) {
 
 function normalizePromptSpecVersion(value) {
   return String(value || '').trim().toLowerCase() === 'v2' ? 'v2' : 'v1';
+}
+
+function toPresetIdLabel(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60);
+}
+
+function buildSavedQuickPresetId(label) {
+  const slug = toPresetIdLabel(label) || 'preset';
+  return `saved-${slug}-${Date.now().toString(36)}`;
+}
+
+function normalizeSavedQuickPresets(value) {
+  const source = Array.isArray(value) ? value : [];
+  const normalized = [];
+  const seenIds = new Set();
+
+  for (let i = 0; i < source.length; i += 1) {
+    const item = source[i] && typeof source[i] === 'object' ? source[i] : {};
+    const label = String(item.label ?? '').trim();
+    const endpoint = String(item.endpoint ?? '').trim();
+    const model = String(item.model ?? '').trim();
+    const idBase = String(item.id ?? '').trim() || buildSavedQuickPresetId(label || `preset-${i + 1}`);
+    const id = seenIds.has(idBase) ? `${idBase}-${i + 1}` : idBase;
+    seenIds.add(id);
+
+    if (!label || !endpoint) {
+      continue;
+    }
+
+    normalized.push({
+      id,
+      label,
+      description: String(item.description ?? '').trim(),
+      provider: normalizeProvider(item.provider),
+      endpoint,
+      model,
+      apiKey: String(item.apiKey ?? ''),
+      maxToolTurns: clampMaxToolTurns(Number(item.maxToolTurns ?? 40)),
+      requestTimeoutMs: clampRequestTimeoutMs(Number(item.requestTimeoutMs ?? 180000)),
+      contextWindowTokens: clampContextWindowTokens(Number(item.contextWindowTokens ?? 0)),
+      advancedSettingsEnabled: Boolean(item.advancedSettingsEnabled ?? false),
+      advancedTemperature: clampTemperature(Number(item.advancedTemperature ?? 0.2)),
+      advancedMaxTokens: String(item.advancedMaxTokens ?? '').trim(),
+      advancedOpenAIPresencePenalty: String(item.advancedOpenAIPresencePenalty ?? '').trim(),
+      advancedOpenAIFrequencyPenalty: String(item.advancedOpenAIFrequencyPenalty ?? '').trim(),
+      advancedOpenAIExtraJson: String(item.advancedOpenAIExtraJson ?? '').trim(),
+      advancedOllamaRepetitionPenalty: String(item.advancedOllamaRepetitionPenalty ?? '').trim(),
+      advancedOllamaExtraJson: String(item.advancedOllamaExtraJson ?? '').trim(),
+      advancedOllamaParametersJson: String(item.advancedOllamaParametersJson ?? '').trim(),
+      chatMemoryGlobalNamespace: String(item.chatMemoryGlobalNamespace ?? '').trim(),
+      orchestrationMemoryGlobalNamespace: String(item.orchestrationMemoryGlobalNamespace ?? '').trim(),
+      createdAt: String(item.createdAt ?? '').trim() || new Date().toISOString(),
+      updatedAt: String(item.updatedAt ?? '').trim() || new Date().toISOString()
+    });
+  }
+
+  return normalized.slice(0, MAX_SAVED_QUICK_PRESETS);
 }
 
 function clampSubAgentSpawnLimit(value) {
@@ -490,38 +555,170 @@ const PRESETS = {
   }
 };
 
+function listQuickPresetEntries() {
+  const builtIns = Object.entries(PRESETS).map(([key, preset]) => ({
+    value: `builtin:${key}`,
+    key,
+    source: 'builtin',
+    label: preset.label,
+    description: preset.description,
+    preset
+  }));
+
+  const saved = normalizeSavedQuickPresets(settingsState.quickPresets).map(preset => ({
+    value: `saved:${preset.id}`,
+    key: preset.id,
+    source: 'saved',
+    label: preset.label,
+    description: preset.description || `Saved preset (${preset.model || 'model not set'})`,
+    preset
+  }));
+
+  return {
+    builtIns,
+    saved
+  };
+}
+
+function resolveQuickPresetSelection(value) {
+  const selected = String(value || '').trim();
+  if (!selected) {
+    return null;
+  }
+
+  if (selected.startsWith('builtin:')) {
+    const key = selected.slice('builtin:'.length);
+    const preset = PRESETS[key];
+    if (!preset) return null;
+    return {
+      key,
+      source: 'builtin',
+      label: preset.label,
+      description: preset.description,
+      preset
+    };
+  }
+
+  if (selected.startsWith('saved:')) {
+    const id = selected.slice('saved:'.length);
+    const savedPresets = normalizeSavedQuickPresets(settingsState.quickPresets);
+    const preset = savedPresets.find(item => item.id === id);
+    if (!preset) return null;
+    return {
+      key: id,
+      source: 'saved',
+      label: preset.label,
+      description: preset.description || 'Saved quick preset',
+      preset
+    };
+  }
+
+  // Backward compatibility for older option values that used bare keys.
+  if (PRESETS[selected]) {
+    return {
+      key: selected,
+      source: 'builtin',
+      label: PRESETS[selected].label,
+      description: PRESETS[selected].description,
+      preset: PRESETS[selected]
+    };
+  }
+
+  return null;
+}
+
 /**
  * Apply a preset configuration to settings and UI.
  */
-async function applyPreset(presetKey) {
-  const preset = PRESETS[presetKey];
-  if (!preset) return;
+async function applyPreset(presetKey, options = {}) {
+  const resolved = resolveQuickPresetSelection(presetKey);
+  if (!resolved) return;
+  const preset = resolved.preset;
+  const ui = options.ui || {};
 
   // Update settings state
-  settingsState.provider = preset.provider;
-  settingsState.endpoint = preset.endpoint;
-  settingsState.model = preset.model;
+  settingsState.provider = normalizeProvider(preset.provider ?? settingsState.provider);
+  settingsState.endpoint = String(preset.endpoint ?? settingsState.endpoint).trim() || settingsState.endpoint;
+  settingsState.model = String(preset.model ?? settingsState.model).trim() || settingsState.model;
   settingsState.apiKey = preset.apiKey || '';
   settingsState.maxToolTurns = clampMaxToolTurns(preset.maxToolTurns);
   settingsState.requestTimeoutMs = clampRequestTimeoutMs(preset.requestTimeoutMs);
+  settingsState.chatMemoryGlobalNamespace = String(
+    preset.chatMemoryGlobalNamespace ?? settingsState.chatMemoryGlobalNamespace
+  ).trim();
+  settingsState.orchestrationMemoryGlobalNamespace = String(
+    preset.orchestrationMemoryGlobalNamespace ?? settingsState.orchestrationMemoryGlobalNamespace
+  ).trim();
 
-  if (preset.contextWindowTokens && preset.model) {
-    setConfiguredContextWindow(preset.model, preset.contextWindowTokens);
+  const hasAdvancedFields = Object.prototype.hasOwnProperty.call(preset, 'advancedSettingsEnabled');
+  if (hasAdvancedFields) {
+    settingsState.advancedSettingsEnabled = Boolean(preset.advancedSettingsEnabled);
+    settingsState.advancedTemperature = clampTemperature(Number(preset.advancedTemperature ?? settingsState.advancedTemperature));
+    settingsState.advancedMaxTokens = String(preset.advancedMaxTokens ?? '').trim();
+    settingsState.advancedOpenAIPresencePenalty = String(preset.advancedOpenAIPresencePenalty ?? '').trim();
+    settingsState.advancedOllamaRepetitionPenalty = String(preset.advancedOllamaRepetitionPenalty ?? '').trim();
+    settingsState.advancedOpenAIFrequencyPenalty = String(preset.advancedOpenAIFrequencyPenalty ?? '').trim();
+    settingsState.advancedOpenAIExtraJson = String(preset.advancedOpenAIExtraJson ?? '').trim();
+    settingsState.advancedOllamaExtraJson = String(preset.advancedOllamaExtraJson ?? '').trim();
+    settingsState.advancedOllamaParametersJson = String(preset.advancedOllamaParametersJson ?? '').trim();
+  }
+
+  if (settingsState.model) {
+    setConfiguredContextWindow(settingsState.model, clampContextWindowTokens(Number(preset.contextWindowTokens ?? 0)));
   }
 
   saveSettings();
 
-  // Sync UI elements (use global refs from initChat)
-  if (typeof provider !== 'undefined' && provider) provider.value = preset.provider;
-  if (typeof endpoint !== 'undefined' && endpoint) endpoint.value = preset.endpoint;
-  if (typeof model !== 'undefined' && model) model.value = preset.model;
-  if (typeof apiKey !== 'undefined' && apiKey) apiKey.value = preset.apiKey || '';
+  // Sync UI elements if provided by initChat wiring.
+  if (ui.providerEl) ui.providerEl.value = settingsState.provider;
+  if (ui.endpointEl) ui.endpointEl.value = settingsState.endpoint;
+  if (ui.apiKeyEl) ui.apiKeyEl.value = settingsState.apiKey;
+  if (ui.chatMemoryGlobalNamespaceEl) {
+    ui.chatMemoryGlobalNamespaceEl.value = settingsState.chatMemoryGlobalNamespace;
+  }
 
-  // Refresh model list and sync context window input
-  if (typeof refreshModelOptions === 'function') await refreshModelOptions();
-  if (typeof syncChatContextWindowInput === 'function') syncChatContextWindowInput();
+  if (hasAdvancedFields) {
+    if (ui.advancedEnabledEl) ui.advancedEnabledEl.checked = Boolean(settingsState.advancedSettingsEnabled);
+    if (ui.advancedTemperatureEl) ui.advancedTemperatureEl.value = String(settingsState.advancedTemperature);
+    if (ui.advancedMaxTokensEl) ui.advancedMaxTokensEl.value = settingsState.advancedMaxTokens;
+    if (ui.advancedOpenAIPresencePenaltyEl) {
+      ui.advancedOpenAIPresencePenaltyEl.value = settingsState.advancedOpenAIPresencePenalty;
+    }
+    if (ui.advancedOpenAIFrequencyPenaltyEl) {
+      ui.advancedOpenAIFrequencyPenaltyEl.value = settingsState.advancedOpenAIFrequencyPenalty;
+    }
+    if (ui.advancedOpenAIExtraJsonEl) ui.advancedOpenAIExtraJsonEl.value = settingsState.advancedOpenAIExtraJson;
+    if (ui.advancedOllamaRepetitionPenaltyEl) {
+      ui.advancedOllamaRepetitionPenaltyEl.value = settingsState.advancedOllamaRepetitionPenalty;
+    }
+    if (ui.advancedOllamaExtraJsonEl) ui.advancedOllamaExtraJsonEl.value = settingsState.advancedOllamaExtraJson;
+    if (ui.advancedOllamaParametersJsonEl) {
+      ui.advancedOllamaParametersJsonEl.value = settingsState.advancedOllamaParametersJson;
+    }
+    if (typeof ui.applyAdvancedSettingsVisibility === 'function') {
+      ui.applyAdvancedSettingsVisibility();
+    }
+  }
 
-  showToast({ type: 'success', title: `Preset applied: ${preset.label}`, message: preset.description, durationMs: 3000 });
+  if (typeof ui.refreshModelOptions === 'function') {
+    await ui.refreshModelOptions(settingsState.model);
+  }
+  if (ui.modelEl) {
+    ui.modelEl.value = settingsState.model;
+  }
+  if (typeof ui.refreshChatNamespaceOptions === 'function') {
+    await ui.refreshChatNamespaceOptions();
+  }
+  if (typeof ui.syncChatContextWindowInput === 'function') {
+    ui.syncChatContextWindowInput();
+  }
+
+  showToast({
+    type: 'success',
+    title: `Preset applied: ${resolved.label}`,
+    message: resolved.description,
+    durationMs: 3000
+  });
 }
 
 
@@ -1060,6 +1257,7 @@ function loadSettings() {
     settingsState.advancedOllamaParametersJson = String(
       parsed.advancedOllamaParametersJson ?? settingsState.advancedOllamaParametersJson
     ).trim();
+    settingsState.quickPresets = normalizeSavedQuickPresets(parsed.quickPresets);
     settingsState.thoughtSectionsCollapsedByDefault = Boolean(
       parsed.thoughtSectionsCollapsedByDefault ?? settingsState.thoughtSectionsCollapsedByDefault
     );
@@ -1113,6 +1311,7 @@ function loadSettings() {
     settingsState.advancedOllamaRepetitionPenalty = '';
     settingsState.advancedOllamaExtraJson = '';
     settingsState.advancedOllamaParametersJson = '';
+    settingsState.quickPresets = [];
     settingsState.thoughtSectionsCollapsedByDefault = true;
     settingsState.contextUsageCollapsed = false;
     settingsState.lockedNamespaces = [];
@@ -2587,6 +2786,8 @@ async function initChat() {
   const chatMemoryGlobalNamespace = document.getElementById('chatMemoryGlobalNamespace');
   const chatMemoryNamespace = document.getElementById('chatMemoryNamespace');
   const chatNewMemoryNamespace = document.getElementById('chatNewMemoryNamespace');
+  const chatSavePresetButton = document.getElementById('chatSavePresetButton');
+  const chatDeletePresetButton = document.getElementById('chatDeletePresetButton');
   const prompt = document.getElementById('chatPrompt');
   const send = document.getElementById('chatSend');
   const stop = document.getElementById('chatStop');
@@ -2806,12 +3007,87 @@ async function initChat() {
   }
 
   let interruptedRecoveryCard = null;
+  let chatRunRecoveryCard = null;
 
   function clearInterruptedRecoveryCard() {
     if (interruptedRecoveryCard && interruptedRecoveryCard.parentElement) {
       interruptedRecoveryCard.parentElement.removeChild(interruptedRecoveryCard);
     }
     interruptedRecoveryCard = null;
+  }
+
+  function clearChatRunRecoveryCard() {
+    if (chatRunRecoveryCard && chatRunRecoveryCard.parentElement) {
+      chatRunRecoveryCard.parentElement.removeChild(chatRunRecoveryCard);
+    }
+    chatRunRecoveryCard = null;
+  }
+
+  async function refreshChatRunRecovery() {
+    clearChatRunRecoveryCard();
+    if (!activeChatSessionId) {
+      return;
+    }
+
+    let runs = [];
+    try {
+      const result = await window.llmIde.listRecoverableRuns({ kind: 'chat', limit: 20 });
+      runs = Array.isArray(result?.runs) ? result.runs : [];
+    } catch {
+      return;
+    }
+
+    const run = runs.find(item => String(item?.sessionId || '').trim() === activeChatSessionId);
+    if (!run) {
+      return;
+    }
+
+    const card = document.createElement('div');
+    card.className = 'query-user-card';
+
+    const title = document.createElement('div');
+    title.className = 'query-user-question';
+    title.innerHTML = renderMarkdownToHtml(
+      `### Recoverable Chat Run\nA prior chat run ended while still in progress (${String(run.status || 'running')}).`
+    );
+    card.appendChild(title);
+
+    const detail = document.createElement('div');
+    detail.className = 'query-user-answer-display';
+    detail.innerHTML = `<strong>Last prompt:</strong> ${escapeHtml(String(run.promptSnapshot || run.promptExcerpt || '(unavailable)'))}`;
+    card.appendChild(detail);
+
+    const actions = document.createElement('div');
+    actions.className = 'query-user-button-row';
+
+    const resumeButton = document.createElement('button');
+    resumeButton.className = 'query-user-submit-btn';
+    resumeButton.textContent = 'Restore Prompt';
+    resumeButton.addEventListener('click', async () => {
+      prompt.value = String(run.promptSnapshot || run.promptExcerpt || '');
+      settingsState.chatDraftText = prompt.value;
+      saveSettings();
+      await window.llmIde.applyRunRecoveryAction({ runId: run.runId, action: 'resume' });
+      clearChatRunRecoveryCard();
+      status.textContent = 'Recovered prompt restored. Press Send to continue.';
+      prompt.focus();
+    });
+    actions.appendChild(resumeButton);
+
+    const dismissButton = document.createElement('button');
+    dismissButton.className = 'query-user-cancel-btn';
+    dismissButton.textContent = 'Dismiss';
+    dismissButton.addEventListener('click', async () => {
+      await window.llmIde.applyRunRecoveryAction({ runId: run.runId, action: 'dismiss' });
+      clearChatRunRecoveryCard();
+      status.textContent = 'Recoverable run dismissed.';
+    });
+    actions.appendChild(dismissButton);
+
+    card.appendChild(actions);
+    conversation.appendChild(card);
+    conversation.scrollTop = conversation.scrollHeight;
+    chatRunRecoveryCard = card;
   }
 
   async function refreshInterruptedTurnRecovery() {
@@ -2913,6 +3189,7 @@ async function initChat() {
     conversation.appendChild(card);
     conversation.scrollTop = conversation.scrollHeight;
     interruptedRecoveryCard = card;
+    clearChatRunRecoveryCard();
   }
 
   function selectedChatMemoryNamespace() {
@@ -3102,6 +3379,7 @@ async function initChat() {
     }
 
     await refreshInterruptedTurnRecovery();
+    await refreshChatRunRecovery();
   }
 
   async function createNewChatSession() {
@@ -3887,20 +4165,213 @@ async function initChat() {
 
   // Preset selector wiring
   const chatPresetSelect = document.getElementById('chatPresetSelect');
-  if (chatPresetSelect) {
-    for (const [key, preset] of Object.entries(PRESETS)) {
-      const option = document.createElement('option');
-      option.value = key;
-      option.textContent = preset.label;
-      option.title = preset.description;
-      chatPresetSelect.appendChild(option);
+  function renderQuickPresetSelectorOptions() {
+    if (!chatPresetSelect) {
+      return;
     }
+
+    chatPresetSelect.innerHTML = '';
+
+    const defaultOption = document.createElement('option');
+    defaultOption.value = '';
+    defaultOption.textContent = '— Select a preset —';
+    chatPresetSelect.appendChild(defaultOption);
+
+    const entries = listQuickPresetEntries();
+
+    if (entries.builtIns.length) {
+      const builtInGroup = document.createElement('optgroup');
+      builtInGroup.label = 'Built-in';
+      for (const entry of entries.builtIns) {
+        const option = document.createElement('option');
+        option.value = entry.value;
+        option.textContent = entry.label;
+        option.title = entry.description;
+        builtInGroup.appendChild(option);
+      }
+      chatPresetSelect.appendChild(builtInGroup);
+    }
+
+    if (entries.saved.length) {
+      const savedGroup = document.createElement('optgroup');
+      savedGroup.label = 'Saved';
+      for (const entry of entries.saved) {
+        const option = document.createElement('option');
+        option.value = entry.value;
+        option.textContent = entry.label;
+        option.title = entry.description;
+        savedGroup.appendChild(option);
+      }
+      chatPresetSelect.appendChild(savedGroup);
+    }
+
+    if (chatDeletePresetButton) {
+      chatDeletePresetButton.disabled = entries.saved.length === 0;
+      chatDeletePresetButton.title = entries.saved.length
+        ? 'Delete a saved quick preset'
+        : 'No saved presets to delete';
+    }
+  }
+
+  if (chatPresetSelect) {
+    renderQuickPresetSelectorOptions();
     chatPresetSelect.addEventListener('change', async () => {
       const selected = chatPresetSelect.value;
       if (selected) {
-        await applyPreset(selected);
-        chatPresetSelect.value = ''; // Reset after applying
+        await applyPreset(selected, {
+          ui: {
+            providerEl: provider,
+            endpointEl: endpoint,
+            modelEl: model,
+            apiKeyEl: apiKey,
+            chatMemoryGlobalNamespaceEl: chatMemoryGlobalNamespace,
+            advancedEnabledEl: advancedEnabled,
+            advancedTemperatureEl: advancedTemperature,
+            advancedMaxTokensEl: advancedMaxTokens,
+            advancedOpenAIPresencePenaltyEl: advancedOpenAIPresencePenalty,
+            advancedOpenAIFrequencyPenaltyEl: advancedOpenAIFrequencyPenalty,
+            advancedOpenAIExtraJsonEl: advancedOpenAIExtraJson,
+            advancedOllamaRepetitionPenaltyEl: advancedOllamaRepetitionPenalty,
+            advancedOllamaExtraJsonEl: advancedOllamaExtraJson,
+            advancedOllamaParametersJsonEl: advancedOllamaParametersJson,
+            refreshModelOptions,
+            refreshChatNamespaceOptions,
+            syncChatContextWindowInput,
+            applyAdvancedSettingsVisibility
+          }
+        });
+        syncOllamaThinkModeAvailability();
+        chatPresetSelect.value = '';
       }
+    });
+  }
+
+  if (chatSavePresetButton) {
+    chatSavePresetButton.addEventListener('click', () => {
+      saveAdvancedSettingsFromInputs();
+      persistSelectedContextWindow({ syncInput: true, save: true });
+
+      const suggestedName = `${provider.value.trim() || 'preset'}:${model.value.trim() || 'model'}`;
+      const rawLabel = window.prompt('Name this quick preset:', suggestedName);
+      if (rawLabel == null) {
+        return;
+      }
+
+      const label = String(rawLabel || '').trim();
+      if (!label) {
+        showToast({ type: 'error', title: 'Preset not saved', message: 'A preset name is required.' });
+        return;
+      }
+
+      const existing = normalizeSavedQuickPresets(settingsState.quickPresets);
+      const existingIndex = existing.findIndex(item => item.label.toLowerCase() === label.toLowerCase());
+      if (existingIndex >= 0) {
+        const overwrite = window.confirm(`Overwrite saved preset "${existing[existingIndex].label}"?`);
+        if (!overwrite) {
+          return;
+        }
+      }
+
+      const nowIso = new Date().toISOString();
+      const selectedModel = model.value || settingsState.model;
+      const presetId = existingIndex >= 0 ? existing[existingIndex].id : buildSavedQuickPresetId(label);
+      const nextPreset = {
+        id: presetId,
+        label,
+        description: `Saved ${new Date().toLocaleString()}`,
+        provider: normalizeProvider(provider.value),
+        endpoint: endpoint.value.trim(),
+        model: selectedModel,
+        apiKey: apiKey.value,
+        maxToolTurns: clampMaxToolTurns(Number(settingsState.maxToolTurns)),
+        requestTimeoutMs: clampRequestTimeoutMs(Number(settingsState.requestTimeoutMs)),
+        contextWindowTokens: resolveSelectedContextWindowTokens(),
+        advancedSettingsEnabled: Boolean(settingsState.advancedSettingsEnabled),
+        advancedTemperature: clampTemperature(Number(settingsState.advancedTemperature)),
+        advancedMaxTokens: String(settingsState.advancedMaxTokens ?? '').trim(),
+        advancedOpenAIPresencePenalty: String(settingsState.advancedOpenAIPresencePenalty ?? '').trim(),
+        advancedOpenAIFrequencyPenalty: String(settingsState.advancedOpenAIFrequencyPenalty ?? '').trim(),
+        advancedOpenAIExtraJson: String(settingsState.advancedOpenAIExtraJson ?? '').trim(),
+        advancedOllamaRepetitionPenalty: String(settingsState.advancedOllamaRepetitionPenalty ?? '').trim(),
+        advancedOllamaExtraJson: String(settingsState.advancedOllamaExtraJson ?? '').trim(),
+        advancedOllamaParametersJson: String(settingsState.advancedOllamaParametersJson ?? '').trim(),
+        chatMemoryGlobalNamespace: selectedChatMemoryGlobalNamespace(),
+        orchestrationMemoryGlobalNamespace: String(settingsState.orchestrationMemoryGlobalNamespace || '').trim(),
+        createdAt: existingIndex >= 0 ? existing[existingIndex].createdAt : nowIso,
+        updatedAt: nowIso
+      };
+
+      const updatedPresets = existing.slice();
+      if (existingIndex >= 0) {
+        updatedPresets[existingIndex] = nextPreset;
+      } else {
+        updatedPresets.unshift(nextPreset);
+      }
+
+      settingsState.quickPresets = normalizeSavedQuickPresets(updatedPresets).slice(0, MAX_SAVED_QUICK_PRESETS);
+      saveSettings();
+      renderQuickPresetSelectorOptions();
+      showToast({ type: 'success', title: 'Preset saved', message: `Quick preset "${label}" is ready to use.` });
+    });
+  }
+
+  if (chatDeletePresetButton) {
+    chatDeletePresetButton.addEventListener('click', () => {
+      const saved = normalizeSavedQuickPresets(settingsState.quickPresets);
+      if (!saved.length) {
+        showToast({ type: 'info', title: 'No saved presets', message: 'There are no saved quick presets to delete.' });
+        return;
+      }
+
+      let target = null;
+      const selected = resolveQuickPresetSelection(chatPresetSelect?.value || '');
+      if (selected?.source === 'saved') {
+        target = saved.find(item => item.id === selected.key) || null;
+      }
+
+      if (!target && saved.length === 1) {
+        target = saved[0];
+      }
+
+      if (!target) {
+        const list = saved.map((item, index) => `${index + 1}. ${item.label}`).join('\n');
+        const selectedName = window.prompt(
+          `Enter the preset name to delete:\n\n${list}`,
+          saved[0]?.label || ''
+        );
+        if (selectedName == null) {
+          return;
+        }
+        const lookup = String(selectedName || '').trim().toLowerCase();
+        target =
+          saved.find(item => item.label.toLowerCase() === lookup)
+          || saved.find(item => item.id.toLowerCase() === lookup)
+          || null;
+      }
+
+      if (!target) {
+        showToast({
+          type: 'error',
+          title: 'Preset not found',
+          message: 'Select a saved preset first or enter an exact saved preset name.'
+        });
+        return;
+      }
+
+      const confirmed = window.confirm(`Delete saved preset "${target.label}"?`);
+      if (!confirmed) {
+        return;
+      }
+
+      settingsState.quickPresets = normalizeSavedQuickPresets(
+        saved.filter(item => item.id !== target.id)
+      ).slice(0, MAX_SAVED_QUICK_PRESETS);
+      saveSettings();
+      if (chatPresetSelect) {
+        chatPresetSelect.value = '';
+      }
+      renderQuickPresetSelectorOptions();
+      showToast({ type: 'success', title: 'Preset deleted', message: `Deleted quick preset "${target.label}".` });
     });
   }
 
@@ -3925,6 +4396,7 @@ async function initChat() {
     activeChatSessionCreatedAt = '';
     activeChatMessages = [];
     clearInterruptedRecoveryCard();
+    clearChatRunRecoveryCard();
     setWorkspaceSessionHint(currentWorkspaceDir, '');
     conversation.innerHTML = '';
     await refreshChatSessions();
@@ -4058,6 +4530,7 @@ async function initChat() {
       await persistActiveChatSession();
       await refreshChatSessions();
       await refreshInterruptedTurnRecovery();
+      await refreshChatRunRecovery();
       updateChatSessionWorkspaceLabel(currentWorkspaceDir, new Date().toISOString());
 
       if (Array.isArray(result?.usageByModel)) {
@@ -4077,6 +4550,7 @@ async function initChat() {
       await persistActiveChatSession();
       await refreshChatSessions();
       await refreshInterruptedTurnRecovery();
+      await refreshChatRunRecovery();
       status.textContent = isCanceled ? 'Chat stopped' : 'Error';
       if (!isCanceled) {
         showToast({ type: 'error', title: 'Prompt Failed', message: errorMsg });
@@ -4202,6 +4676,85 @@ async function initOrchestration() {
   };
   let orchestrationRunning = false;
   const outputLogEntries = [];
+  let orchestrationRecoveryCard = null;
+
+  function clearOrchestrationRecoveryCard() {
+    if (orchestrationRecoveryCard && orchestrationRecoveryCard.parentElement) {
+      orchestrationRecoveryCard.parentElement.removeChild(orchestrationRecoveryCard);
+    }
+    orchestrationRecoveryCard = null;
+  }
+
+  async function refreshOrchestrationRecovery() {
+    clearOrchestrationRecoveryCard();
+    if (orchestrationRunning) {
+      return;
+    }
+
+    let runs = [];
+    try {
+      const result = await window.llmIde.listRecoverableRuns({ kind: 'orchestration', limit: 10 });
+      runs = Array.isArray(result?.runs) ? result.runs : [];
+    } catch {
+      return;
+    }
+
+    const run = runs[0];
+    if (!run) {
+      return;
+    }
+
+    const card = document.createElement('div');
+    card.className = 'query-user-card';
+
+    const title = document.createElement('div');
+    title.className = 'query-user-question';
+    title.innerHTML = renderMarkdownToHtml(
+      `### Recoverable Orchestration Run\nA previous orchestration appears unfinished (${String(run.status || 'running')}).`
+    );
+    card.appendChild(title);
+
+    const detail = document.createElement('div');
+    detail.className = 'query-user-answer-display';
+    detail.innerHTML = `<strong>Prompt snapshot:</strong> ${escapeHtml(String(run.promptSnapshot || run.promptExcerpt || '(unavailable)'))}`;
+    card.appendChild(detail);
+
+    const actions = document.createElement('div');
+    actions.className = 'query-user-button-row';
+
+    const restartButton = document.createElement('button');
+    restartButton.className = 'query-user-submit-btn';
+    restartButton.textContent = 'Restore Prompt';
+    restartButton.addEventListener('click', async () => {
+      prompt.value = String(run.promptSnapshot || run.promptExcerpt || '');
+      settingsState.orchestrationDraftPrompt = String(prompt.value || '');
+      saveSettings();
+      await window.llmIde.applyRunRecoveryAction({ runId: run.runId, action: 'restart' });
+      clearOrchestrationRecoveryCard();
+      status.textContent = 'Recovered orchestration prompt restored. Press Run to restart.';
+      prompt.focus();
+    });
+    actions.appendChild(restartButton);
+
+    const dismissButton = document.createElement('button');
+    dismissButton.className = 'query-user-cancel-btn';
+    dismissButton.textContent = 'Dismiss';
+    dismissButton.addEventListener('click', async () => {
+      await window.llmIde.applyRunRecoveryAction({ runId: run.runId, action: 'dismiss' });
+      clearOrchestrationRecoveryCard();
+      status.textContent = 'Recoverable orchestration run dismissed.';
+    });
+    actions.appendChild(dismissButton);
+
+    card.appendChild(actions);
+
+    const parent = status.parentElement;
+    if (parent) {
+      const afterStatus = status.nextSibling;
+      parent.insertBefore(card, afterStatus);
+      orchestrationRecoveryCard = card;
+    }
+  }
 
   function selectedOrchestrationMemoryNamespace() {
     if (orchMemoryNamespace.value === '__new__') {
@@ -5101,6 +5654,7 @@ async function initOrchestration() {
   });
 
   document.getElementById('orchRun').addEventListener('click', async () => {
+    clearOrchestrationRecoveryCard();
     eventsEl.textContent = '';
     outputEl.innerHTML = '';
     status.textContent = 'Running orchestration...';
@@ -5140,12 +5694,14 @@ async function initOrchestration() {
     finally {
       setOrchestrationRunning(false);
       refreshOrchestrationNamespaceOptions();
+      refreshOrchestrationRecovery();
     }
   });
 
   orchNewMemoryNamespace.value = '';
   await reload();
   await refreshOrchestrationNamespaceOptions();
+  await refreshOrchestrationRecovery();
 
   window.addEventListener('beforeunload', () => {
     offEvent();

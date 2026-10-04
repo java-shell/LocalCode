@@ -18,6 +18,8 @@ import {
   NotifyTestResult,
   MCPServerConfig,
   MCPServerRuntimeStatus,
+  DurableRun,
+  DurableRunRecoveryAction,
   UiContinuityState,
   WorkspaceState,
   WorkspaceTreeNode,
@@ -200,7 +202,20 @@ const api = {
   getMcpRuntimeStatus: async (): Promise<{ runtime: MCPServerRuntimeStatus[] }> =>
     ipcRenderer.invoke('mcp:get-runtime-status'),
   refreshMcpRuntime: async (): Promise<{ runtime: MCPServerRuntimeStatus[] }> =>
-    ipcRenderer.invoke('mcp:refresh-runtime')
+    ipcRenderer.invoke('mcp:refresh-runtime'),
+  listDurableRuns: async (payload?: { limit?: number }): Promise<{ runs: DurableRun[] }> =>
+    ipcRenderer.invoke('runs:list', payload),
+  getDurableRun: async (payload: { runId: string }): Promise<DurableRun | null> =>
+    ipcRenderer.invoke('runs:get', payload),
+  listRecoverableRuns: async (payload?: {
+    limit?: number;
+    kind?: 'chat' | 'orchestration';
+  }): Promise<{ runs: DurableRun[] }> => ipcRenderer.invoke('runs:list-recoverable', payload),
+  applyRunRecoveryAction: async (payload: {
+    runId: string;
+    action: DurableRunRecoveryAction;
+  }): Promise<{ ok: boolean; run: DurableRun | null }> =>
+    ipcRenderer.invoke('runs:apply-recovery-action', payload)
 };
 
 contextBridge.exposeInMainWorld('llmIde', api);

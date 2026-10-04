@@ -301,12 +301,46 @@ export interface OrchestrationRunStep {
 }
 
 export interface OrchestrationRunResult {
+  runId?: string;
   output: string;
   steps: OrchestrationRunStep[];
   iterations: number;
   completed: boolean;
   completionMarker?: string;
   usageByModel?: ModelUsage[];
+}
+
+export type DurableRunStatus =
+  | 'pending'
+  | 'running'
+  | 'waiting_input'
+  | 'waiting_tool'
+  | 'completed'
+  | 'failed'
+  | 'canceled';
+
+export type DurableRunKind = 'chat' | 'orchestration';
+
+export type DurableRunRecoveryAction = 'resume' | 'restart' | 'abort' | 'dismiss';
+
+export interface DurableRun {
+  runId: string;
+  kind: DurableRunKind;
+  status: DurableRunStatus;
+  workspaceDir: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+  sessionId?: string;
+  stageId?: string;
+  model?: string;
+  promptExcerpt?: string;
+  promptSnapshot?: string;
+  replayPolicyVersion: number;
+  checkpointRef?: string;
+  error?: string;
+  recoveryAction?: DurableRunRecoveryAction;
+  recoveredAt?: string;
 }
 
 export interface OrchestrationImportResult {

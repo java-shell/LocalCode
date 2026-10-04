@@ -31,3 +31,16 @@ test('preload exposes P1 interrupted-turn bridge methods', async () => {
   assert.match(source, /resolveInterruptedChatTurn:\s*async/);
   assert.match(source, /chat:resolve-interrupted-turn/);
 });
+
+test('preload exposes P2 durable run ledger bridge methods', async () => {
+  const source = await readPreloadSource();
+
+  assert.match(source, /listDurableRuns:\s*async/);
+  assert.match(source, /runs:list/);
+  assert.match(source, /getDurableRun:\s*async/);
+  assert.match(source, /runs:get/);
+  assert.match(source, /listRecoverableRuns:\s*async/);
+  assert.match(source, /runs:list-recoverable/);
+  assert.match(source, /applyRunRecoveryAction:\s*async/);
+  assert.match(source, /runs:apply-recovery-action/);
+});

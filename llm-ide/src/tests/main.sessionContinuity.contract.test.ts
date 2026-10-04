@@ -31,3 +31,16 @@ test('main process exposes interrupted-turn recovery IPC handlers', async () => 
   assert.match(source, /upsertChatTurnCheckpoint/);
   assert.match(source, /resolveChatTurnCheckpoint/);
 });
+
+test('main process exposes durable run ledger IPC handlers', async () => {
+  const source = await readMainSource();
+
+  assert.match(source, /ipcMain\.handle\('runs:list'/);
+  assert.match(source, /ipcMain\.handle\('runs:get'/);
+  assert.match(source, /ipcMain\.handle\(\s*'runs:list-recoverable'/);
+  assert.match(source, /ipcMain\.handle\(\s*'runs:apply-recovery-action'/);
+  assert.match(source, /upsertDurableRun/);
+  assert.match(source, /createDurableRunId/);
+  assert.match(source, /listRecoverableDurableRuns/);
+  assert.match(source, /applyDurableRunRecoveryAction/);
+});

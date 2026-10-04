@@ -209,9 +209,13 @@
             <input id="chatNewMemoryNamespace" class="chat-new-namespace" placeholder="New namespace for this session" />
             <div class="preset-selector-row">
               <label class="label" for="chatPresetSelect">Quick Preset</label>
-              <select id="chatPresetSelect">
-                <option value="">— Select a preset —</option>
-              </select>
+              <div class="row-inline">
+                <select id="chatPresetSelect">
+                  <option value="">— Select a preset —</option>
+                </select>
+                <button id="chatSavePresetButton" type="button">Save</button>
+                <button id="chatDeletePresetButton" type="button">Delete</button>
+              </div>
             </div>
           </div>
           <label class="label">Prompt</label>
