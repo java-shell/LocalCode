@@ -471,6 +471,18 @@
     </div>
   </div>
 
+  <dialog id="chatPresetNameDialog" class="preset-name-dialog" aria-labelledby="chatPresetNameTitle">
+    <form id="chatPresetNameForm" class="preset-name-form">
+      <h2 id="chatPresetNameTitle">Save Quick Preset</h2>
+      <label class="label" for="chatPresetNameInput">Preset name</label>
+      <input id="chatPresetNameInput" type="text" maxlength="100" autocomplete="off" required />
+      <div class="preset-name-actions">
+        <button id="chatPresetNameCancel" type="button">Cancel</button>
+        <button id="chatPresetNameSave" type="submit" class="btn-primary">Save preset</button>
+      </div>
+    </form>
+  </dialog>
+
   <!-- Toast notification container -->
   <div id="toastContainer" class="toast-container"></div>
 

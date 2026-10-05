@@ -2788,6 +2788,10 @@ async function initChat() {
   const chatNewMemoryNamespace = document.getElementById('chatNewMemoryNamespace');
   const chatSavePresetButton = document.getElementById('chatSavePresetButton');
   const chatDeletePresetButton = document.getElementById('chatDeletePresetButton');
+  const chatPresetNameDialog = document.getElementById('chatPresetNameDialog');
+  const chatPresetNameForm = document.getElementById('chatPresetNameForm');
+  const chatPresetNameInput = document.getElementById('chatPresetNameInput');
+  const chatPresetNameCancel = document.getElementById('chatPresetNameCancel');
   const prompt = document.getElementById('chatPrompt');
   const send = document.getElementById('chatSend');
   const stop = document.getElementById('chatStop');
@@ -4247,21 +4251,45 @@ async function initChat() {
   }
 
   if (chatSavePresetButton) {
+    // Opening the app-owned form defers preset persistence until the user confirms a name.
     chatSavePresetButton.addEventListener('click', () => {
       saveAdvancedSettingsFromInputs();
       persistSelectedContextWindow({ syncInput: true, save: true });
 
       const suggestedName = `${provider.value.trim() || 'preset'}:${model.value.trim() || 'model'}`;
-      const rawLabel = window.prompt('Name this quick preset:', suggestedName);
-      if (rawLabel == null) {
-        return;
-      }
+      chatPresetNameInput.value = suggestedName;
+      chatPresetNameInput.setCustomValidity('');
+      chatPresetNameDialog.showModal();
+      chatPresetNameInput.focus();
+      chatPresetNameInput.select();
+    });
+  }
 
-      const label = String(rawLabel || '').trim();
+  if (chatPresetNameCancel) {
+    // Closing the dialog without submitting leaves the saved preset list unchanged.
+    chatPresetNameCancel.addEventListener('click', () => chatPresetNameDialog.close());
+  }
+
+  if (chatPresetNameForm) {
+    /**
+     * Save the current chat configuration under a user-provided preset name.
+     * Inputs: native form-submit event and the name currently in the dialog.
+     * Output: none; persists settings and refreshes the preset selector.
+     * Side effects: may show a confirmation/toast and writes settings to local storage.
+     * Errors: keeps the dialog open for invalid names or declined overwrite; existing save behavior otherwise applies.
+     * Security/privacy: preset contents use the existing local settings store, which may contain an API key.
+     * Concurrency: synchronous UI handler; browser events are serialized on the renderer thread.
+      * Rationale: an app-owned dialog provides a consistent naming flow across supported desktop environments.
+     */
+    chatPresetNameForm.addEventListener('submit', event => {
+      event.preventDefault();
+      const label = String(chatPresetNameInput.value || '').trim();
       if (!label) {
-        showToast({ type: 'error', title: 'Preset not saved', message: 'A preset name is required.' });
+        chatPresetNameInput.setCustomValidity('A preset name is required.');
+        chatPresetNameInput.reportValidity();
         return;
       }
+      chatPresetNameInput.setCustomValidity('');
 
       const existing = normalizeSavedQuickPresets(settingsState.quickPresets);
       const existingIndex = existing.findIndex(item => item.label.toLowerCase() === label.toLowerCase());
@@ -4311,6 +4339,7 @@ async function initChat() {
       settingsState.quickPresets = normalizeSavedQuickPresets(updatedPresets).slice(0, MAX_SAVED_QUICK_PRESETS);
       saveSettings();
       renderQuickPresetSelectorOptions();
+      chatPresetNameDialog.close();
       showToast({ type: 'success', title: 'Preset saved', message: `Quick preset "${label}" is ready to use.` });
     });
   }

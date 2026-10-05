@@ -77,8 +77,162 @@ test('openai-compatible streaming emits assistant tokens and a thought event fro
     assert.deepEqual(tokens, ['The fix is ready.']);
     assert.ok(events.some(event => event.startsWith('thinking:Need to check the renderer first.')));
     assert.equal(requests.length, 1);
+    assert.equal(requests[0]?.url, 'http://localhost:1234/v1/chat/completions');
     assert.equal(requests[0]?.payload.stream, true);
   });
+});
+
+test('Gemini OpenAI-compatible base URL gets the chat route and canonical model ID', async () => {
+  const config: LLMConfig = {
+    provider: 'openai-compatible',
+    endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+    model: 'models/gemini-3.6-flash',
+    temperature: 0.2
+  };
+  const stream = new EventEmitter();
+
+  await withMockedOpenAIStreamPost(stream, async requests => {
+    const resultPromise = chatWithTools(
+      config,
+      [{ role: 'user', content: 'Say hello.' }],
+      [],
+      async () => ({ ok: true })
+    );
+
+    setImmediate(() => {
+      stream.emit('data', Buffer.from(
+        'data: {"choices":[{"delta":{"content":"Hello."}}]}\n' +
+        'data: {"choices":[{"finish_reason":"stop"}]}\n' +
+        'data: [DONE]\n'
+      ));
+      stream.emit('end');
+    });
+
+    const result = await resultPromise;
+    assert.equal(result.text, 'Hello.');
+    assert.equal(requests[0]?.url, 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions');
+    assert.equal(requests[0]?.payload.model, 'gemini-3.6-flash');
+  });
+});
+
+test('Gemini thought signatures from streamed tool calls are sent back on the next turn', async () => {
+  const config: LLMConfig = {
+    provider: 'openai-compatible',
+    endpoint: 'https://generativelanguage.googleapis.com/v1beta/openai/',
+    model: 'gemini-3.6-flash',
+    temperature: 0.2
+  };
+  const requests: Array<{ url: string; payload: Record<string, unknown> }> = [];
+  const axiosRef = axios as unknown as {
+    post: (url: string, payload: Record<string, unknown>) => Promise<{ data: EventEmitter }>;
+  };
+  const originalPost = axiosRef.post;
+  axiosRef.post = async (url, payload) => {
+    requests.push({ url, payload });
+    const stream = new EventEmitter();
+    const responseNumber = requests.length;
+    setImmediate(() => {
+      const data = responseNumber === 1
+        ? 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"git_status","arguments":"{}"},"extra_content":{"google":{"thought_signature":"gemini-signature-1"}}}]},"finish_reason":"tool_calls"}]}\n'
+        : 'data: {"choices":[{"delta":{"content":"Done."},"finish_reason":"stop"}]}\n';
+      stream.emit('data', Buffer.from(`${data}data: [DONE]\n`));
+      stream.emit('end');
+    });
+    return { data: stream };
+  };
+
+  try {
+    const result = await chatWithTools(
+      config,
+      [{ role: 'user', content: 'Check git status.' }],
+      [{
+        type: 'function',
+        function: {
+          name: 'git_status',
+          description: 'Read repository status.',
+          parameters: { type: 'object', properties: {} }
+        }
+      }],
+      async () => ({ ok: true }),
+      undefined,
+      40,
+      undefined,
+      () => undefined
+    );
+
+    assert.equal(result.text, 'Done.');
+    assert.equal(requests.length, 2);
+    const secondTurnMessages = requests[1]?.payload.messages as Array<Record<string, unknown>>;
+    const assistantToolMessage = secondTurnMessages.find(message =>
+      message.role === 'assistant' && Array.isArray(message.tool_calls)
+    );
+    assert.ok(assistantToolMessage, JSON.stringify(secondTurnMessages));
+    const toolCalls = assistantToolMessage?.tool_calls as Array<Record<string, unknown>>;
+    assert.deepEqual(toolCalls[0]?.extra_content, {
+      google: { thought_signature: 'gemini-signature-1' }
+    });
+  } finally {
+    axiosRef.post = originalPost;
+  }
+});
+
+test('non-Gemini OpenAI-compatible providers retain model IDs and omit Gemini-only tool metadata', async () => {
+  const config: LLMConfig = {
+    provider: 'openai-compatible',
+    endpoint: 'https://api.example.test/v1/chat/completions',
+    model: 'models/provider-model',
+    temperature: 0.2
+  };
+  const requests: Array<{ url: string; payload: Record<string, unknown> }> = [];
+  const axiosRef = axios as unknown as {
+    post: (url: string, payload: Record<string, unknown>) => Promise<{ data: EventEmitter }>;
+  };
+  const originalPost = axiosRef.post;
+  axiosRef.post = async (url, payload) => {
+    requests.push({ url, payload });
+    const stream = new EventEmitter();
+    const responseNumber = requests.length;
+    setImmediate(() => {
+      const data = responseNumber === 1
+        ? 'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"git_status","arguments":"{}"},"extra_content":{"google":{"thought_signature":"provider-extension"}}}]},"finish_reason":"tool_calls"}]}\n'
+        : 'data: {"choices":[{"delta":{"content":"Done."},"finish_reason":"stop"}]}\n';
+      stream.emit('data', Buffer.from(`${data}data: [DONE]\n`));
+      stream.emit('end');
+    });
+    return { data: stream };
+  };
+
+  try {
+    await chatWithTools(
+      config,
+      [{ role: 'user', content: 'Check git status.' }],
+      [{
+        type: 'function',
+        function: {
+          name: 'git_status',
+          description: 'Read repository status.',
+          parameters: { type: 'object', properties: {} }
+        }
+      }],
+      async () => ({ ok: true }),
+      undefined,
+      40,
+      undefined,
+      () => undefined
+    );
+
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0]?.payload.model, 'models/provider-model');
+    const secondTurnMessages = requests[1]?.payload.messages as Array<Record<string, unknown>>;
+    const assistantToolMessage = secondTurnMessages.find(message =>
+      message.role === 'assistant' && Array.isArray(message.tool_calls)
+    );
+    assert.ok(assistantToolMessage, JSON.stringify(secondTurnMessages));
+    const toolCalls = assistantToolMessage.tool_calls as Array<Record<string, unknown>>;
+    assert.equal(toolCalls[0]?.extra_content, undefined);
+  } finally {
+    axiosRef.post = originalPost;
+  }
 });
 
 test('openai-compatible stream reports a user-aborted socket reset as cancellation', async () => {

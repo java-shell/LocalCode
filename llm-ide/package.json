@@ -1,7 +1,7 @@
 {
   "name": "llm-ide",
   "description": "Standalone local LLM IDE platform",
-  "version": "0.0.9",
+  "version": "1.0.1",
   "main": "./out/main.js",
   "type": "commonjs",
   "author": "Java-Shell",

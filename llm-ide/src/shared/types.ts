@@ -20,6 +20,8 @@ export interface ToolCall {
     name: string;
     arguments: string;
   };
+  /** Provider-specific metadata (for example Gemini thought signatures) that must round-trip with the call. */
+  extra_content?: Record<string, unknown>;
 }
 
 export interface ChatMessage {

@@ -109,6 +109,8 @@ The Diagnostics tab supports managing vector memory namespaces:
 
 Access from the **Chat Settings** panel → **Quick Preset** dropdown:
 
+- Select **Save** to name and store the current chat configuration as a custom preset. Saving with an existing name asks before replacing it; saved presets remain local to the app.
+
 | Preset | Provider | Endpoint | Model | Context |
 | --- | --- | --- | --- | --- |
 | 🏠 Local Ollama (Coding) | ollama | `localhost:11434` | llama3 | 8K |
@@ -151,6 +153,8 @@ In the Chat tab, set:
 - Endpoint, for example: `http://localhost:11434/v1/chat/completions`
 - Model, for example: `llama3`
 - API key only when required by your endpoint
+
+OpenAI-compatible base URLs are also accepted; LocalCode appends `/chat/completions` when it is missing. For Gemini, use `https://generativelanguage.googleapis.com/v1beta/openai/`, your Gemini API key, and a bare model ID such as `gemini-3.8-flash`. A `models/` prefix returned by model discovery is removed when sending Gemini OpenAI-compatible requests. Gemini tool-call thought signatures are retained and returned with the assistant tool-call message on subsequent turns.
 
 Or use a **Quick Preset** from the Chat Settings panel to auto-configure.
 

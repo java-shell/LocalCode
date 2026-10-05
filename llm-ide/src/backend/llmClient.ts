@@ -26,6 +26,7 @@ interface StreamChunk {
       tool_calls?: Array<{
         index?: number;
         id?: string;
+        extra_content?: Record<string, unknown>;
         function?: {
           name?: string;
           arguments?: string;
@@ -550,6 +551,62 @@ function toolParseFailureDisableToolsMessage(): string {
   );
 }
 
+/**
+ * Resolve an OpenAI-compatible base URL or completion URL to its chat-completions route.
+ *
+ * @param endpoint - Provider base URL (for example Gemini's `/v1beta/openai/`) or an existing completions URL.
+ * @returns The URL ending in `/chat/completions`, preserving any provider path prefix and query.
+ * @throws Error When the endpoint is empty.
+ * @security Does not log or expose credentials; URL query parameters are preserved for caller-configured providers.
+ * @rationale Supports both common SDK-style base URLs and existing fully qualified endpoint settings.
+ */
+function deriveOpenAIChatCompletionsEndpoint(endpoint: string): string {
+  const normalized = endpoint.trim();
+  if (!normalized) {
+    throw new Error('Endpoint is required.');
+  }
+
+  try {
+    const url = new URL(normalized);
+    const pathname = url.pathname.replace(/\/+$/, '');
+    if (!pathname.endsWith('/chat/completions')) {
+      url.pathname = `${pathname}/chat/completions`;
+    }
+    return url.toString();
+  } catch {
+    const withoutTrailingSlash = normalized.replace(/\/+$/, '');
+    return withoutTrailingSlash.endsWith('/chat/completions')
+      ? withoutTrailingSlash
+      : `${withoutTrailingSlash}/chat/completions`;
+  }
+}
+
+/** Identify Google's OpenAI-compatible endpoint without classifying other OpenAI-style APIs as Gemini. */
+function isGeminiOpenAICompatibleEndpoint(endpoint: string): boolean {
+  try {
+    const url = new URL(endpoint.trim());
+    return url.hostname.toLowerCase() === 'generativelanguage.googleapis.com'
+      && /(?:^|\/)openai(?:\/|$)/i.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Convert Gemini native model resource names to the bare IDs used by its OpenAI-compatible API.
+ * Inputs: provider endpoint and model ID from configuration/model discovery.
+ * Outputs: bare Gemini model ID for Gemini compatibility endpoints; otherwise the original ID.
+ * Side effects: none.
+ * Errors: none; malformed endpoints are treated as non-Gemini endpoints.
+ * Performance: constant-time URL parsing and prefix check per payload.
+ * Security/privacy: does not inspect credentials or emit model data.
+ * Concurrency: pure function.
+ * Rationale: Google's OpenAI compatibility examples pass IDs such as `gemini-3.8-flash`, not `models/gemini-3.8-flash`.
+ */
+function normalizeOpenAICompatibleModelId(endpoint: string, model: string): string {
+  return isGeminiOpenAICompatibleEndpoint(endpoint) ? model.replace(/^models\//i, '') : model;
+}
+
 function deriveModelsEndpoint(chatEndpoint: string): string {
   const normalized = chatEndpoint.trim();
   if (!normalized) {
@@ -955,6 +1012,7 @@ function compactMessageContentForContext(message: ChatMessage): string {
   return normalized.slice(0, 1100);
 }
 
+/** Clone a chat message while retaining provider metadata required to replay its tool calls. */
 function cloneMessage(message: ChatMessage): ChatMessage {
   return {
     role: message.role,
@@ -962,6 +1020,7 @@ function cloneMessage(message: ChatMessage): ChatMessage {
     tool_call_id: message.tool_call_id,
     tool_calls: Array.isArray(message.tool_calls)
       ? message.tool_calls.map(call => ({
+          ...call,
           id: String(call.id ?? ''),
           type: 'function',
           function: {
@@ -1566,7 +1625,7 @@ function ollamaResponseToAssistant(response: OllamaNativeChatResponse): ChatMess
 
 function payloadBase(config: LLMConfig, messages: ChatMessage[]): Record<string, unknown> {
   const payload: Record<string, unknown> = {
-    model: config.model,
+    model: normalizeOpenAICompatibleModelId(config.endpoint, config.model),
     messages,
     temperature: config.temperature
   };
@@ -1827,7 +1886,12 @@ async function streamOpenAICompatibleChat(
     let pending = '';
     let assistantContent = '';
     let assistantThinking = '';
-    const toolCalls = new Map<number, { id: string; name: string; arguments: string }>();
+    const toolCalls = new Map<number, {
+      id: string;
+      name: string;
+      arguments: string;
+      extra_content?: Record<string, unknown>;
+    }>();
     let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
     let settled = false;
 
@@ -1845,7 +1909,8 @@ async function streamOpenAICompatibleChat(
           function: {
             name: call.name,
             arguments: call.arguments || '{}'
-          }
+          },
+          ...(call.extra_content ? { extra_content: call.extra_content } : {})
         }))
         .filter(call => Boolean(call.function.name));
 
@@ -1895,6 +1960,12 @@ async function streamOpenAICompatibleChat(
           }
           if (toolDelta.function?.arguments) {
             existing.arguments += String(toolDelta.function.arguments);
+          }
+          if (toolDelta.extra_content && isGeminiOpenAICompatibleEndpoint(endpoint)) {
+            existing.extra_content = {
+              ...existing.extra_content,
+              ...toolDelta.extra_content
+            };
           }
           toolCalls.set(index, existing);
         }
@@ -1946,10 +2017,11 @@ export async function streamChat(
   onToken: (token: string) => void,
   signal?: AbortSignal
 ): Promise<string> {
+  const endpoint = deriveOpenAIChatCompletionsEndpoint(config.endpoint);
   let response;
   try {
     response = await axios.post(
-      config.endpoint,
+      endpoint,
       {
         ...payloadBase(config, messages),
         stream: true
@@ -1963,7 +2035,7 @@ export async function streamChat(
   } catch (error) {
     throw formatAxiosFailure(error, {
       operation: 'Streaming chat request',
-      endpoint: config.endpoint,
+      endpoint,
       model: config.model
     });
   }
@@ -2072,6 +2144,9 @@ export async function chatWithTools(
   let providerToolParseFailures = 0;
   const useOllamaNativeChat = shouldUseOllamaNativeChat(config);
   const ollamaNativeEndpoint = useOllamaNativeChat ? deriveOllamaNativeChatEndpoint(config.endpoint) : undefined;
+  const openAICompletionEndpoint = useOllamaNativeChat
+    ? config.endpoint
+    : deriveOpenAIChatCompletionsEndpoint(config.endpoint);
   const requestTimeoutMs = resolveRequestTimeoutMs(config.requestTimeoutMs);
   const usageTotals: TokenUsage = {
     promptTokens: 0,
@@ -2088,6 +2163,7 @@ export async function chatWithTools(
     onEvent?.(serializeCompactionTelemetryEvent(telemetry));
   }
 
+  /** Create debug snapshots without dropping provider-specific tool-call metadata. */
   function snapshotMessages(items: ChatMessage[]): ChatMessage[] {
     return items.map(message => ({
       role: message.role,
@@ -2095,6 +2171,7 @@ export async function chatWithTools(
       tool_call_id: message.tool_call_id,
       tool_calls: Array.isArray(message.tool_calls)
         ? message.tool_calls.map(call => ({
+            ...call,
             id: String(call.id ?? ''),
             type: 'function',
             function: {
@@ -2203,7 +2280,7 @@ export async function chatWithTools(
 
       if (useStream) {
         const streamed = await streamOpenAICompatibleChat(
-          config.endpoint,
+          openAICompletionEndpoint,
           payloadBase(config, requestMessages),
           buildHeaders(config),
           requestTimeoutMs,
@@ -2226,7 +2303,7 @@ export async function chatWithTools(
         ...payloadBase(config, requestMessages),
         stream: false
       };
-      const response = await axios.post<CompletionResponse>(config.endpoint, payload, {
+      const response = await axios.post<CompletionResponse>(openAICompletionEndpoint, payload, {
         headers: buildHeaders(config),
         timeout: requestTimeoutMs,
         signal
@@ -2567,7 +2644,7 @@ export async function chatWithTools(
           let streamedTokenCount = 0;
           try {
             const streamed = await streamOpenAICompatibleChat(
-              config.endpoint,
+              openAICompletionEndpoint,
               payload,
               buildHeaders(config),
               requestTimeoutMs,
@@ -2604,7 +2681,7 @@ export async function chatWithTools(
                   retryPayload.parallel_tool_calls = false;
                 }
 
-                const response = await axios.post<CompletionResponse>(config.endpoint, retryPayload, {
+                const response = await axios.post<CompletionResponse>(openAICompletionEndpoint, retryPayload, {
                   headers: buildHeaders(config),
                   timeout: requestTimeoutMs,
                   signal
@@ -2619,7 +2696,7 @@ export async function chatWithTools(
               throw streamError;
             } else {
               onEvent?.('provider:openai-compatible | streaming request failed before any tokens; retrying without stream for this turn.');
-              const response = await axios.post<CompletionResponse>(config.endpoint, payload, {
+              const response = await axios.post<CompletionResponse>(openAICompletionEndpoint, payload, {
                 headers: buildHeaders(config),
                 timeout: requestTimeoutMs,
                 signal
@@ -2630,7 +2707,7 @@ export async function chatWithTools(
             }
           }
         } else {
-          const response = await axios.post<CompletionResponse>(config.endpoint, payload, {
+          const response = await axios.post<CompletionResponse>(openAICompletionEndpoint, payload, {
             headers: buildHeaders(config),
             timeout: requestTimeoutMs,
             signal
@@ -2663,7 +2740,7 @@ export async function chatWithTools(
               retryPayload.tool_choice = 'auto';
               retryPayload.parallel_tool_calls = false;
             }
-            const response = await axios.post<CompletionResponse>(config.endpoint, retryPayload, {
+            const response = await axios.post<CompletionResponse>(openAICompletionEndpoint, retryPayload, {
               headers: buildHeaders(config),
               timeout: requestTimeoutMs,
               signal
@@ -2674,28 +2751,28 @@ export async function chatWithTools(
           } else {
             if (handleProviderToolParseFailure(error, {
               operation: 'Chat completion request',
-              endpoint: config.endpoint,
+              endpoint: openAICompletionEndpoint,
               model: config.model
             })) {
               continue;
             }
             throw formatAxiosFailure(error, {
               operation: 'Chat completion request',
-              endpoint: config.endpoint,
+              endpoint: openAICompletionEndpoint,
               model: config.model
             });
           }
         } else {
           if (handleProviderToolParseFailure(error, {
             operation: 'Chat completion request',
-            endpoint: config.endpoint,
+            endpoint: openAICompletionEndpoint,
             model: config.model
           })) {
             continue;
           }
           throw formatAxiosFailure(error, {
             operation: 'Chat completion request',
-            endpoint: config.endpoint,
+            endpoint: openAICompletionEndpoint,
             model: config.model
           });
         }
