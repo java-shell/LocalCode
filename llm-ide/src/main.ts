@@ -23,7 +23,12 @@ import { listMcpServers, listMcpServersForTarget, saveMcpServers } from './backe
 import { MCPServerManager } from './backend/mcpServerManager';
 import { pruneChatContextDumps } from './backend/chatDebugDumps';
 import { dispatchNotification, sendTestNotification, type NotifyConfig } from './backend/notify';
+import { BrowserSessionManager } from './backend/browserSessionManager';
 import {
+  BrowserCaptureRequest,
+  BrowserInteractionRequest,
+  BrowserNavigateRequest,
+  BrowserSetBoundsRequest,
   ChatSession,
   ChatStreamResult,
   ChatMessage,
@@ -42,7 +47,13 @@ import {
   UiContinuityState,
   WorkspaceState
 } from './shared/types';
-import { executeTool, getAllowedToolDefinitions, runTerminalCommand, toolDefinitions } from './backend/toolRuntime';
+import {
+  executeTool,
+  getAllowedToolDefinitions,
+  getDefaultChatToolNames,
+  runTerminalCommand,
+  toolDefinitions
+} from './backend/toolRuntime';
 import { buildWorkspaceTree, readWorkspaceFile, writeWorkspaceFile } from './backend/workspaceFs';
 import { TurboVecMemory, computeAdaptiveInjectionLimits } from './backend/turboVecMemory';
 import { formatEnvironmentGuidance } from './shared/environment';
@@ -68,6 +79,14 @@ let activeOrchestrationAbortController: AbortController | null = null;
 const fileWatchRefs = new Map<string, { count: number; listener: (curr: fs.Stats, prev: fs.Stats) => void }>();
 let turboMemory: TurboVecMemory | null = null;
 const mcpServerManager = new MCPServerManager();
+const browserSessionManager = new BrowserSessionManager({
+  onStateChanged: state => {
+    if (!mainWindow || mainWindow.isDestroyed()) {
+      return;
+    }
+    mainWindow.webContents.send('browser:event', state);
+  }
+});
 const MAIN_STATE_FILE = 'localcode-main-state.json';
 const DEFAULT_PROMPT_SPEC_VERSION: PromptSpecVersion = 'v2';
 const CONTEXT_COMPACTION_V2_FLAG = 'LOCALCODE_CONTEXT_COMPACTION_V2';
@@ -83,6 +102,7 @@ interface PersistedMainState {
   activeChatSessionIdByWorkspace?: Record<string, string>;
   activeTab?: AppTabKey;
   lastVisitedPanel?: string;
+  browserFeatureEnabled?: boolean;
 }
 
 const uiContinuityState: {
@@ -92,6 +112,7 @@ const uiContinuityState: {
 } = {
   activeChatSessionIdByWorkspace: {}
 };
+let browserFeatureEnabled = false;
 
 // Pending query_user promise for awaiting user response
 let pendingQueryUserResolve: ((response: import('./backend/toolRuntime').QueryUserResponse) => void) | null = null;
@@ -1063,7 +1084,8 @@ function normalizeActiveTab(value: unknown): AppTabKey | undefined {
     raw === 'chat' ||
     raw === 'orchestration' ||
     raw === 'orchestration-advanced' ||
-    raw === 'diagnostics'
+    raw === 'diagnostics' ||
+    raw === 'browser'
   ) {
     return raw;
   }
@@ -1129,6 +1151,7 @@ function restoreLastWorkspaceSelection() {
     );
     uiContinuityState.activeTab = normalizeActiveTab(parsed?.activeTab);
     uiContinuityState.lastVisitedPanel = String(parsed?.lastVisitedPanel ?? '').trim() || undefined;
+    browserFeatureEnabled = Boolean(parsed?.browserFeatureEnabled ?? false);
   } catch {
     // Ignore missing/invalid state file and keep default workspace.
   }
@@ -1140,7 +1163,8 @@ function persistLastWorkspaceSelection() {
     referenceWorkspaces,
     activeChatSessionIdByWorkspace: uiContinuityState.activeChatSessionIdByWorkspace,
     activeTab: uiContinuityState.activeTab,
-    lastVisitedPanel: uiContinuityState.lastVisitedPanel
+    lastVisitedPanel: uiContinuityState.lastVisitedPanel,
+    browserFeatureEnabled
   };
 
   void fs.promises
@@ -1316,10 +1340,15 @@ function createWindow() {
   });
 
   mainWindow.loadFile(appResourcePath('renderer', 'index.html'));
+  browserSessionManager.setHostWindow(mainWindow);
+  mainWindow.on('closed', () => {
+    browserSessionManager.setHostWindow(null);
+  });
 }
 
 app.whenReady().then(async () => {
   restoreLastWorkspaceSelection();
+  browserSessionManager.setFeatureEnabled(browserFeatureEnabled);
 
   try {
     const persistedMcpServers = await listMcpServers();
@@ -1590,9 +1619,10 @@ ipcMain.handle(
       }
 
       const availableToolNames = toolDefinitions.map(def => def.function.name);
+      const defaultChatToolNames = getDefaultChatToolNames();
       const requestedToolNames = Array.isArray(payload.toolNames) && payload.toolNames.length > 0
         ? payload.toolNames
-        : availableToolNames.filter(name => name !== 'delete_path' && name !== 'git_commit');
+        : defaultChatToolNames;
       const mergedToolNames = Array.from(new Set([...requestedToolNames, ...enabledMcpToolNames]));
 
       if (promptSpecVersion === 'v2') {
@@ -1640,6 +1670,7 @@ ipcMain.handle(
       // Build runtime context with memory access for this request
       const chatRuntimeContext = {
         ...runtimeContext(event.sender, 'chat:event', abortController.signal, promptSpecVersion),
+        browserSessionManager,
         turboMemory: turboMemory ?? undefined,
         llmConfig: config,
         subAgentConfig: subAgentProfiles[0]?.config,
@@ -2077,6 +2108,12 @@ ipcMain.handle('chat:list-models', async (_event, payload: { endpoint: string; a
   return catalog;
 });
 
+ipcMain.handle('chat:get-default-tool-names', async () => {
+  return {
+    toolNames: getDefaultChatToolNames()
+  };
+});
+
 ipcMain.handle('memory:diagnostics', async (_event, payload?: { model?: string }) => {
   if (!turboMemory) {
     return {
@@ -2234,6 +2271,56 @@ ipcMain.handle('orch:stop', async () => {
   activeOrchestrationAbortController.abort();
   activeOrchestrationAbortController = null;
   return { stopped: true };
+});
+
+ipcMain.handle('browser:get-feature-state', async () => {
+  return browserSessionManager.getFeatureState();
+});
+
+ipcMain.handle('browser:set-feature-enabled', async (_event, payload: { enabled?: boolean }) => {
+  const enabled = Boolean(payload?.enabled);
+  browserFeatureEnabled = enabled;
+  const feature = browserSessionManager.setFeatureEnabled(enabled);
+  persistLastWorkspaceSelection();
+  return feature;
+});
+
+ipcMain.handle('browser:create-session', async () => {
+  return browserSessionManager.createSession();
+});
+
+ipcMain.handle('browser:destroy-session', async () => {
+  return browserSessionManager.destroySession();
+});
+
+ipcMain.handle('browser:get-state', async () => {
+  return browserSessionManager.getState();
+});
+
+ipcMain.handle('browser:navigate', async (_event, payload: BrowserNavigateRequest) => {
+  return browserSessionManager.navigate(payload ?? {});
+});
+
+ipcMain.handle('browser:get-snapshot', async () => {
+  return browserSessionManager.snapshot();
+});
+
+ipcMain.handle('browser:capture', async (_event, payload: BrowserCaptureRequest) => {
+  return browserSessionManager.capture(payload ?? {});
+});
+
+ipcMain.handle('browser:set-bounds', async (_event, payload: BrowserSetBoundsRequest) => {
+  if (!payload || typeof payload !== 'object') {
+    return { ok: false, reason: 'invalid_payload', state: browserSessionManager.getState() };
+  }
+  return browserSessionManager.setBounds(payload);
+});
+
+ipcMain.handle('browser:interact', async (_event, payload: BrowserInteractionRequest) => {
+  if (!payload || typeof payload !== 'object') {
+    return { ok: false, reason: 'invalid_payload', state: browserSessionManager.getState() };
+  }
+  return browserSessionManager.interact(payload);
 });
 
 ipcMain.handle('workspace:get-state', async () => workspaceState());
@@ -2480,6 +2567,7 @@ ipcMain.handle(
     // Build runtime context with memory access for orchestration
     const orchRuntimeContext = {
       ...runtimeContext(event.sender, 'orch:event', abortController.signal, promptSpecVersion),
+      browserSessionManager,
       turboMemory: turboMemory ?? undefined,
       llmConfig: normalizedPlan?.steps?.[0]
         ? {

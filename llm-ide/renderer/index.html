@@ -89,6 +89,7 @@
           <button id="orchTab" class="tab">Orchestration</button>
           <button id="orchAdvancedTab" class="tab">Advanced Orchestration</button>
           <button id="diagTab" class="tab">Diagnostics</button>
+          <button id="browserTab" class="tab" hidden>Browser</button>
         </div>
 
         <section id="contextUsagePanel" class="context-usage-panel">
@@ -299,6 +300,27 @@
           <pre id="diagRaw" class="diag-raw"></pre>
         </section>
 
+        <section id="browserView" class="view">
+          <div id="browserStatus" class="status">Browser feature is disabled.</div>
+          <label class="label" for="browserUrl">URL</label>
+          <div class="row-inline browser-nav-row">
+            <input id="browserUrl" placeholder="https://example.com" />
+            <button id="browserGo" type="button" class="btn-primary">Go</button>
+          </div>
+          <div class="actions actions-two browser-action-row">
+            <button id="browserBack" type="button">Back</button>
+            <button id="browserForward" type="button">Forward</button>
+            <button id="browserReload" type="button">Reload</button>
+            <button id="browserSnapshot" type="button">Snapshot</button>
+            <button id="browserScreenshot" type="button">Screenshot</button>
+            <button id="browserCreateSession" type="button">Create Session</button>
+            <button id="browserDestroySession" type="button" class="btn-danger">Destroy Session</button>
+          </div>
+          <div id="browserSurfaceHost" class="browser-surface-host"></div>
+          <label class="label">Browser Snapshot</label>
+          <pre id="browserSnapshotOutput" class="diag-raw"></pre>
+        </section>
+
         <section id="orchAdvancedView" class="view">
           <div id="orchAdvancedStatus" class="status">Advanced plan ready</div>
           <label class="label" for="orchAdvancedPrompt">Advanced Orchestration Prompt</label>
@@ -392,6 +414,10 @@
           <label class="orch-tool-item settings-checkbox" for="settingChatDebugDumpsEnabled">
             <input id="settingChatDebugDumpsEnabled" type="checkbox" />
             Enable chat debug dumps
+          </label>
+          <label class="orch-tool-item settings-checkbox" for="settingBrowserEnabled">
+            <input id="settingBrowserEnabled" type="checkbox" />
+            Enable integrated browser surface
           </label>
         </section>
 

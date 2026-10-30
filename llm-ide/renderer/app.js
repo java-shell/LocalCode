@@ -12,7 +12,10 @@ let activeTabKey = 'chat';
 let advancedFullscreenRequested = false;
 const SETTINGS_STORAGE_KEY = 'localcode.settings';
 const PANEL_SIZES_STORAGE_KEY = 'localcode.panelSizes';
-const TAB_KEYS = new Set(['chat', 'orchestration', 'orchestration-advanced', 'diagnostics']);
+const TAB_KEYS = new Set(['chat', 'orchestration', 'orchestration-advanced', 'diagnostics', 'browser']);
+let browserFeatureState = { enabled: false, mode: 'disabled', reason: 'Browser feature is disabled.' };
+let syncBrowserSurfaceBounds = () => {};
+let refreshBrowserFeatureUi = async () => {};
 
 const settingsState = {
   maxToolTurns: 40,
@@ -43,6 +46,7 @@ const settingsState = {
   notifyIncludeExcerpt: false,
   notifyPriority: 0,
   notifyRateLimitSeconds: 15,
+  browserEnabled: false,
   chatSettingsCollapsed: true,
   advancedSettingsCollapsed: true,
   advancedSettingsEnabled: false,
@@ -1226,6 +1230,7 @@ function loadSettings() {
     settingsState.notifyIncludeExcerpt = Boolean(parsed.notifyIncludeExcerpt ?? false);
     settingsState.notifyPriority = Math.max(0, Math.min(5, Number(parsed.notifyPriority ?? 0) || 0));
     settingsState.notifyRateLimitSeconds = clampNotifySeconds(parsed.notifyRateLimitSeconds ?? 15);
+    settingsState.browserEnabled = Boolean(parsed.browserEnabled ?? settingsState.browserEnabled);
     settingsState.chatSettingsCollapsed = Boolean(parsed.chatSettingsCollapsed ?? settingsState.chatSettingsCollapsed);
     settingsState.advancedSettingsCollapsed = Boolean(
       parsed.advancedSettingsCollapsed ?? settingsState.advancedSettingsCollapsed
@@ -1300,6 +1305,7 @@ function loadSettings() {
     settingsState.notifyIncludeExcerpt = false;
     settingsState.notifyPriority = 0;
     settingsState.notifyRateLimitSeconds = 15;
+    settingsState.browserEnabled = false;
     settingsState.chatSettingsCollapsed = true;
     settingsState.advancedSettingsCollapsed = true;
     settingsState.advancedSettingsEnabled = false;
@@ -1579,6 +1585,7 @@ function initResizablePanels() {
     if (editor && typeof editor.layout === 'function') {
       requestAnimationFrame(() => editor.layout());
     }
+    syncBrowserSurfaceBounds();
   }
 
   applyStoredSize('filetreeWidth', '--filetree-width', 180, 560);
@@ -1665,15 +1672,18 @@ function setActiveTab(which) {
   const orchTab = document.getElementById('orchTab');
   const orchAdvancedTab = document.getElementById('orchAdvancedTab');
   const diagTab = document.getElementById('diagTab');
+  const browserTab = document.getElementById('browserTab');
   const chatView = document.getElementById('chatView');
   const orchView = document.getElementById('orchView');
   const orchAdvancedView = document.getElementById('orchAdvancedView');
   const diagView = document.getElementById('diagView');
+  const browserView = document.getElementById('browserView');
 
   const chatOn = which === 'chat';
   const orchOn = which === 'orchestration';
   const orchAdvancedOn = which === 'orchestration-advanced';
   const diagOn = which === 'diagnostics';
+  const browserOn = which === 'browser';
 
   activeTabKey = which;
   settingsState.activeTab = normalizeActiveTabKey(which);
@@ -1681,14 +1691,213 @@ function setActiveTab(which) {
   void persistUiContinuityToMain({ activeTab: settingsState.activeTab, lastVisitedPanel: settingsState.activeTab });
   document.body.classList.toggle('advanced-fullscreen-active', advancedFullscreenRequested && orchAdvancedOn);
 
-  chatTab.classList.toggle('active', chatOn);
-  orchTab.classList.toggle('active', orchOn);
-  orchAdvancedTab.classList.toggle('active', orchAdvancedOn);
-  diagTab.classList.toggle('active', diagOn);
-  chatView.classList.toggle('active', chatOn);
-  orchView.classList.toggle('active', orchOn);
-  orchAdvancedView.classList.toggle('active', orchAdvancedOn);
-  diagView.classList.toggle('active', diagOn);
+  chatTab?.classList.toggle('active', chatOn);
+  orchTab?.classList.toggle('active', orchOn);
+  orchAdvancedTab?.classList.toggle('active', orchAdvancedOn);
+  diagTab?.classList.toggle('active', diagOn);
+  browserTab?.classList.toggle('active', browserOn);
+  chatView?.classList.toggle('active', chatOn);
+  orchView?.classList.toggle('active', orchOn);
+  orchAdvancedView?.classList.toggle('active', orchAdvancedOn);
+  diagView?.classList.toggle('active', diagOn);
+  browserView?.classList.toggle('active', browserOn);
+  syncBrowserSurfaceBounds();
+}
+
+async function initBrowserFeatureUi() {
+  const browserTab = document.getElementById('browserTab');
+  const browserView = document.getElementById('browserView');
+  const browserStatus = document.getElementById('browserStatus');
+  const browserUrl = document.getElementById('browserUrl');
+  const browserGo = document.getElementById('browserGo');
+  const browserBack = document.getElementById('browserBack');
+  const browserForward = document.getElementById('browserForward');
+  const browserReload = document.getElementById('browserReload');
+  const browserSnapshot = document.getElementById('browserSnapshot');
+  const browserScreenshot = document.getElementById('browserScreenshot');
+  const browserSnapshotOutput = document.getElementById('browserSnapshotOutput');
+  const browserCreateSession = document.getElementById('browserCreateSession');
+  const browserDestroySession = document.getElementById('browserDestroySession');
+  const browserSurfaceHost = document.getElementById('browserSurfaceHost');
+
+  if (!browserTab || !browserView || !browserSurfaceHost) {
+    return;
+  }
+
+  const setStatus = text => {
+    if (browserStatus) {
+      browserStatus.textContent = text;
+    }
+  };
+
+  const applyFeatureVisibility = enabled => {
+    browserTab.hidden = !enabled;
+    browserView.hidden = !enabled;
+    if (!enabled && settingsState.activeTab === 'browser') {
+      settingsState.activeTab = 'chat';
+      saveSettings();
+      setActiveTab('chat');
+    }
+  };
+
+  syncBrowserSurfaceBounds = () => {
+    const shouldShow =
+      Boolean(browserFeatureState?.enabled) &&
+      settingsState.activeTab === 'browser' &&
+      !browserTab.hidden;
+
+    if (!shouldShow) {
+      void window.llmIde
+        .setBrowserBounds({ x: 0, y: 0, width: 0, height: 0, visible: false })
+        .catch(() => undefined);
+      return;
+    }
+
+    const rect = browserSurfaceHost.getBoundingClientRect();
+    const x = Math.max(0, Math.floor(rect.left));
+    const y = Math.max(0, Math.floor(rect.top));
+    const width = Math.max(0, Math.floor(rect.width));
+    const height = Math.max(0, Math.floor(rect.height));
+
+    void window.llmIde
+      .setBrowserBounds({ x, y, width, height, visible: true })
+      .catch(() => undefined);
+  };
+
+  window.addEventListener('resize', () => {
+    syncBrowserSurfaceBounds();
+  });
+  browserView.addEventListener('scroll', () => {
+    syncBrowserSurfaceBounds();
+  });
+  if (typeof ResizeObserver !== 'undefined') {
+    const observer = new ResizeObserver(() => {
+      syncBrowserSurfaceBounds();
+    });
+    observer.observe(browserSurfaceHost);
+    window.addEventListener('beforeunload', () => {
+      observer.disconnect();
+    });
+  }
+
+  const refreshState = async () => {
+    const state = await window.llmIde.getBrowserState();
+    if (browserUrl && state?.currentUrl) {
+      browserUrl.value = state.currentUrl;
+    }
+    const session = state?.sessionActive ? 'active' : 'inactive';
+    const loading = state?.loading ? 'loading' : 'idle';
+    const title = state?.title ? ` | ${state.title}` : '';
+    setStatus(`Browser session ${session} (${loading})${title}`);
+    syncBrowserSurfaceBounds();
+    return state;
+  };
+
+  refreshBrowserFeatureUi = async () => {
+    try {
+      const feature = await window.llmIde.getBrowserFeatureState();
+      browserFeatureState = feature && typeof feature === 'object' ? feature : browserFeatureState;
+    } catch {
+      browserFeatureState = { enabled: false, mode: 'disabled', reason: 'Browser feature state is unavailable.' };
+    }
+
+    applyFeatureVisibility(Boolean(browserFeatureState.enabled));
+    if (!browserFeatureState.enabled) {
+      setStatus(browserFeatureState.reason || 'Browser feature is disabled.');
+      syncBrowserSurfaceBounds();
+      return;
+    }
+
+    await refreshState();
+  };
+
+  const offBrowserEvent = window.llmIde.onBrowserEvent(state => {
+    if (browserUrl && state?.currentUrl) {
+      browserUrl.value = state.currentUrl;
+    }
+    const session = state?.sessionActive ? 'active' : 'inactive';
+    const loading = state?.loading ? 'loading' : 'idle';
+    const title = state?.title ? ` | ${state.title}` : '';
+    const error = state?.lastError ? ` | ${state.lastError}` : '';
+    setStatus(`Browser session ${session} (${loading})${title}${error}`);
+    syncBrowserSurfaceBounds();
+  });
+
+  window.addEventListener('beforeunload', () => {
+    offBrowserEvent();
+  });
+
+  const runNavigation = async payload => {
+    const result = await window.llmIde.navigateBrowser(payload);
+    if (result?.ok) {
+      await refreshState();
+      return;
+    }
+    setStatus(`Navigation failed: ${result?.reason || 'unknown reason'}`);
+  };
+
+  browserCreateSession?.addEventListener('click', async () => {
+    const result = await window.llmIde.createBrowserSession();
+    if (!result?.ok) {
+      setStatus(`Session create failed: ${result?.reason || 'unknown reason'}`);
+      return;
+    }
+    await refreshState();
+  });
+
+  browserDestroySession?.addEventListener('click', async () => {
+    const result = await window.llmIde.destroyBrowserSession();
+    if (!result?.ok) {
+      setStatus(`Session destroy failed: ${result?.reason || 'unknown reason'}`);
+      return;
+    }
+    if (browserSnapshotOutput) {
+      browserSnapshotOutput.textContent = '';
+    }
+    await refreshState();
+  });
+
+  browserGo?.addEventListener('click', async () => {
+    const url = String(browserUrl?.value || '').trim();
+    await runNavigation({ type: 'url', url });
+  });
+
+  browserBack?.addEventListener('click', async () => runNavigation({ type: 'back' }));
+  browserForward?.addEventListener('click', async () => runNavigation({ type: 'forward' }));
+  browserReload?.addEventListener('click', async () => runNavigation({ type: 'reload' }));
+
+  browserSnapshot?.addEventListener('click', async () => {
+    const result = await window.llmIde.getBrowserSnapshot();
+    if (!browserSnapshotOutput) {
+      return;
+    }
+    if (!result?.ok) {
+      browserSnapshotOutput.textContent = `Snapshot unavailable: ${result?.reason || 'unknown reason'}`;
+      return;
+    }
+    browserSnapshotOutput.textContent = JSON.stringify(result.snapshot || {}, null, 2);
+  });
+
+  browserScreenshot?.addEventListener('click', async () => {
+    if (!browserSnapshotOutput) {
+      return;
+    }
+    const result = await window.llmIde.captureBrowser({ format: 'png', fullPage: false });
+    if (!result?.ok || !result?.dataBase64) {
+      browserSnapshotOutput.textContent = `Screenshot unavailable: ${result?.reason || 'unknown reason'}`;
+      return;
+    }
+    const byteLength = Math.floor((result.dataBase64.length * 3) / 4);
+    browserSnapshotOutput.textContent = `Screenshot captured (${byteLength} bytes, base64).`;
+  });
+
+  try {
+    await window.llmIde.setBrowserFeatureEnabled({ enabled: Boolean(settingsState.browserEnabled) });
+  } catch {
+    // Keep UI responsive even if feature sync fails.
+  }
+
+  await refreshBrowserFeatureUi();
 }
 
 function appendLog(el, line) {
@@ -2198,6 +2407,7 @@ function initSettingsMenu() {
   const notifyRateInput = document.getElementById('settingNotifyRateLimitSeconds');
   const notifyEventsContainer = document.getElementById('settingNotifyEvents');
   const notifyExcerptInput = document.getElementById('settingNotifyIncludeExcerpt');
+  const browserEnabledInput = document.getElementById('settingBrowserEnabled');
   const notifyTestButton = document.getElementById('settingNotifyTest');
   const notifyStatusEl = document.getElementById('settingNotifyStatus');
   const cancel = document.getElementById('settingsCancel');
@@ -2594,6 +2804,7 @@ function initSettingsMenu() {
     notifyServerInput.value = settingsState.notifyNtfyServer;
     notifyRateInput.value = String(settingsState.notifyRateLimitSeconds);
     notifyExcerptInput.checked = settingsState.notifyIncludeExcerpt;
+    browserEnabledInput.checked = Boolean(settingsState.browserEnabled);
     renderNotifyEventCheckboxes();
     setNotifyStatus('');
     modal.classList.add('open');
@@ -2656,6 +2867,7 @@ function initSettingsMenu() {
     settingsState.notifyEvents = normalizeNotifyEvents(readNotifyEventsFromUi());
     settingsState.notifyIncludeExcerpt = Boolean(notifyExcerptInput.checked);
     settingsState.notifyRateLimitSeconds = clampNotifySeconds(notifyRateInput.value);
+    settingsState.browserEnabled = Boolean(browserEnabledInput.checked);
 
     try {
       const persisted = await saveMcpServersToMain(modalMcpServers);
@@ -2663,6 +2875,14 @@ function initSettingsMenu() {
       setMcpStatus(`Saved ${persisted.length} MCP server(s). Connected: ${connected}.`);
     } catch (error) {
       setMcpStatus(`Failed to save MCP servers: ${error instanceof Error ? error.message : String(error)}`, true);
+      return;
+    }
+
+    try {
+      await window.llmIde.setBrowserFeatureEnabled({ enabled: settingsState.browserEnabled });
+      await refreshBrowserFeatureUi();
+    } catch (error) {
+      setMcpStatus(`Failed to apply browser setting: ${error instanceof Error ? error.message : String(error)}`, true);
       return;
     }
 
@@ -4490,6 +4710,10 @@ async function initChat() {
     setChatRunning(true);
 
     try {
+      const defaultToolNamesResult = await window.llmIde.getDefaultChatToolNames();
+      const chatToolNames = Array.isArray(defaultToolNamesResult?.toolNames)
+        ? defaultToolNamesResult.toolNames
+        : [];
       const advancedOverrides = buildAdvancedConfigOverrides();
       const result = await window.llmIde.chatStream({
         sessionId: activeChatSessionId,
@@ -4518,31 +4742,7 @@ async function initChat() {
         notify: buildNotifyPayload(),
         promptSpecVersion: normalizePromptSpecVersion(settingsState.promptSpecVersion),
         maxToolTurns: settingsState.maxToolTurns,
-        toolNames: [
-          'list_reference_workspaces',
-          'list_mcp_servers',
-          'browser_fetch',
-          'web_search',
-          'query_memory',
-          'list_namespaces',
-          'spawn_sub_agent',
-          'query_user',
-          'list_repo_tree',
-          'list_dir',
-          'file_search',
-          'read_file',
-          'create_file',
-          'write_file',
-          'replace_in_file',
-          'insert_in_file',
-          'create_directory',
-          'move_path',
-          'grep_search',
-          'git_status',
-          'git_diff',
-          'git_add',
-          'run_terminal_command'
-        ]
+        toolNames: chatToolNames
       });
 
       if (!assistantMarkdownRaw && result?.text) {
@@ -7448,6 +7648,7 @@ async function initDiagnostics() {
 
 async function main() {
   loadSettings();
+  await initBrowserFeatureUi();
   try {
     const continuity = await window.llmIde.getUiContinuityState();
     settingsState.activeTab = normalizeActiveTabKey(continuity?.activeTab || settingsState.activeTab);
@@ -7461,6 +7662,10 @@ async function main() {
   document.getElementById('orchTab').addEventListener('click', () => setActiveTab('orchestration'));
   document.getElementById('orchAdvancedTab').addEventListener('click', () => setActiveTab('orchestration-advanced'));
   document.getElementById('diagTab').addEventListener('click', () => setActiveTab('diagnostics'));
+  document.getElementById('browserTab')?.addEventListener('click', () => setActiveTab('browser'));
+  if (!browserFeatureState.enabled && settingsState.activeTab === 'browser') {
+    settingsState.activeTab = 'chat';
+  }
   setActiveTab(settingsState.activeTab);
   document.getElementById('openSample').addEventListener('click', () => {
     openScratchTab(

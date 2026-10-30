@@ -1,5 +1,15 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import {
+  BrowserCaptureRequest,
+  BrowserCaptureResult,
+  BrowserFeatureState,
+  BrowserInteractionRequest,
+  BrowserInteractionResult,
+  BrowserNavigateRequest,
+  BrowserNavigateResult,
+  BrowserSessionState,
+  BrowserSetBoundsRequest,
+  BrowserSnapshot,
   ChatSession,
   ChatSessionSummary,
   ChatTurnCheckpoint,
@@ -40,6 +50,7 @@ type TerminalEventListener = (payload: {
   code?: number | null;
   signal?: string | null;
 }) => void;
+type BrowserEventListener = (payload: BrowserSessionState) => void;
 
 const api = {
   listModels: async (payload: { endpoint: string; apiKey?: string }): Promise<{ models: string[]; contextWindows?: Record<string, number> }> => {
@@ -65,6 +76,9 @@ const api = {
   },
   chatStream: async (payload: ChatStreamRequest): Promise<ChatStreamResult> => {
     return ipcRenderer.invoke('chat:stream', payload);
+  },
+  getDefaultChatToolNames: async (): Promise<{ toolNames: string[] }> => {
+    return ipcRenderer.invoke('chat:get-default-tool-names');
   },
   listChatSessions: async (): Promise<{ sessions: ChatSessionSummary[] }> => {
     return ipcRenderer.invoke('chat:list-sessions');
@@ -137,6 +151,41 @@ const api = {
   },
   interruptTerminalProcess: async (): Promise<{ interrupted: boolean; reason?: string }> => {
     return ipcRenderer.invoke('terminal:interrupt');
+  },
+  getBrowserFeatureState: async (): Promise<BrowserFeatureState> => {
+    return ipcRenderer.invoke('browser:get-feature-state');
+  },
+  setBrowserFeatureEnabled: async (payload: { enabled: boolean }): Promise<BrowserFeatureState> => {
+    return ipcRenderer.invoke('browser:set-feature-enabled', payload);
+  },
+  createBrowserSession: async (): Promise<BrowserNavigateResult> => {
+    return ipcRenderer.invoke('browser:create-session');
+  },
+  destroyBrowserSession: async (): Promise<BrowserNavigateResult> => {
+    return ipcRenderer.invoke('browser:destroy-session');
+  },
+  getBrowserState: async (): Promise<BrowserSessionState> => {
+    return ipcRenderer.invoke('browser:get-state');
+  },
+  navigateBrowser: async (payload: BrowserNavigateRequest): Promise<BrowserNavigateResult> => {
+    return ipcRenderer.invoke('browser:navigate', payload);
+  },
+  getBrowserSnapshot: async (): Promise<{ ok: boolean; reason?: string; snapshot?: BrowserSnapshot; state: BrowserSessionState }> => {
+    return ipcRenderer.invoke('browser:get-snapshot');
+  },
+  captureBrowser: async (payload: BrowserCaptureRequest): Promise<BrowserCaptureResult> => {
+    return ipcRenderer.invoke('browser:capture', payload);
+  },
+  setBrowserBounds: async (payload: BrowserSetBoundsRequest): Promise<BrowserNavigateResult> => {
+    return ipcRenderer.invoke('browser:set-bounds', payload);
+  },
+  interactBrowser: async (payload: BrowserInteractionRequest): Promise<BrowserInteractionResult> => {
+    return ipcRenderer.invoke('browser:interact', payload);
+  },
+  onBrowserEvent: (listener: BrowserEventListener) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: BrowserSessionState) => listener(payload);
+    ipcRenderer.on('browser:event', wrapped);
+    return () => ipcRenderer.removeListener('browser:event', wrapped);
   },
   loadPlan: async (): Promise<OrchestrationPlan> => ipcRenderer.invoke('orch:load-plan'),
   importPlan: async (): Promise<OrchestrationImportResult | null> => ipcRenderer.invoke('orch:import-plan'),

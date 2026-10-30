@@ -14,6 +14,7 @@ import {
   MCPServerRuntimeStatus
 } from '../shared/types';
 import type { TurboVecMemory, TurboVecNamespaceDiagnostics } from './turboVecMemory';
+import type { BrowserSessionManager } from './browserSessionManager';
 
 interface RuntimeSubAgentProfile {
   id: string;
@@ -95,6 +96,7 @@ interface RuntimeContext {
   mcpServerStatuses?: MCPServerRuntimeStatus[];
   mcpToolDefinitions?: ToolDefinition[];
   invokeMcpTool?: (toolName: string, args: Record<string, unknown>) => Promise<unknown>;
+  browserSessionManager?: BrowserSessionManager;
   requestReferenceWriteApproval?: (payload: {
     tool: string;
     summary: string;
@@ -877,6 +879,67 @@ export const toolDefinitions: ToolDefinition[] = [
 
 ];
 
+toolDefinitions.push(
+  {
+    type: 'function',
+    function: {
+      name: 'browser_open_page',
+      description: 'Open a URL in the integrated browser session.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string' }
+        },
+        required: ['url']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_get_snapshot',
+      description: 'Get the current browser page snapshot and state.',
+      parameters: {
+        type: 'object',
+        properties: {}
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'browser_screenshot',
+      description: 'Capture a screenshot of the current browser page when available.',
+      parameters: {
+        type: 'object',
+        properties: {
+          fullPage: { type: 'boolean' }
+        }
+      }
+    }
+  }
+);
+
+const CHAT_TOOL_DENYLIST = new Set<string>(['delete_path', 'git_commit']);
+
+/**
+ * Return the default chat tool allowlist in declaration order.
+ *
+ * Purpose: provide a single backend-owned source of truth for model-safe chat
+ * tools so renderer and main process logic cannot drift from tool registrations.
+ * Inputs: none.
+ * Outputs: ordered tool name array excluding intentionally restricted tools.
+ * Side effects: none.
+ * Errors: none.
+ * Performance: O(n) over registered tools; negligible for current tool counts.
+ * Security: excludes destructive-by-default tools from automatic enablement.
+ */
+export function getDefaultChatToolNames(): string[] {
+  return toolDefinitions
+    .map(definition => definition.function.name)
+    .filter(name => !CHAT_TOOL_DENYLIST.has(name));
+}
+
 export function getAllowedToolDefinitions(names: string[], context?: RuntimeContext): ToolDefinition[] {
   const allowed = new Set(names);
   const combinedToolDefinitions = [
@@ -1172,6 +1235,35 @@ async function browserFetch(args: Record<string, unknown>) {
       redirects.length >= maxRedirects,
     location: typeof response.headers.location === 'string' ? response.headers.location : null
   };
+}
+
+function requireBrowserSessionManager(context?: RuntimeContext): BrowserSessionManager {
+  if (!context?.browserSessionManager) {
+    throw new Error('Browser session manager is unavailable in this runtime context.');
+  }
+  return context.browserSessionManager;
+}
+
+async function browserOpenPage(args: Record<string, unknown>, context?: RuntimeContext) {
+  const manager = requireBrowserSessionManager(context);
+  const create = manager.createSession();
+  if (!create.ok) {
+    return create;
+  }
+
+  const url = String(args.url ?? '').trim();
+  return manager.navigate({ type: 'url', url });
+}
+
+async function browserGetSnapshot(_args: Record<string, unknown>, context?: RuntimeContext) {
+  const manager = requireBrowserSessionManager(context);
+  return manager.snapshot();
+}
+
+async function browserScreenshot(args: Record<string, unknown>, context?: RuntimeContext) {
+  const manager = requireBrowserSessionManager(context);
+  const fullPage = Boolean(args.fullPage ?? false);
+  return manager.capture({ format: 'png', fullPage });
 }
 
 async function webSearch(args: Record<string, unknown>) {
@@ -2745,6 +2837,12 @@ export async function executeTool(name: string, args: unknown, context?: Runtime
       return listDir(refSafeArgs, context);
     case 'browser_fetch':
       return browserFetch(refSafeArgs);
+    case 'browser_open_page':
+      return browserOpenPage(refSafeArgs, context);
+    case 'browser_get_snapshot':
+      return browserGetSnapshot(refSafeArgs, context);
+    case 'browser_screenshot':
+      return browserScreenshot(refSafeArgs, context);
     case 'web_search':
       return webSearch(refSafeArgs);
     case 'list_repo_tree':

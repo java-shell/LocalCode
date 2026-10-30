@@ -400,8 +400,78 @@ export interface WorkspaceState {
   promptSpecVersion?: PromptSpecVersion;
 }
 
+export type BrowserNavigationType = 'url' | 'back' | 'forward' | 'reload' | 'stop';
+
+export interface BrowserFeatureState {
+  enabled: boolean;
+  mode: 'disabled' | 'stub' | 'embedded';
+  reason?: string;
+}
+
+export interface BrowserSessionState {
+  sessionActive: boolean;
+  mode: 'disabled' | 'stub' | 'embedded';
+  currentUrl?: string;
+  title?: string;
+  loading: boolean;
+  lastError?: string;
+  updatedAt: string;
+}
+
+export interface BrowserNavigateRequest {
+  type?: BrowserNavigationType;
+  url?: string;
+}
+
+export interface BrowserNavigateResult {
+  ok: boolean;
+  reason?: string;
+  state: BrowserSessionState;
+}
+
+export interface BrowserSnapshot {
+  url?: string;
+  title?: string;
+  content: string;
+  capturedAt: string;
+}
+
+export interface BrowserCaptureRequest {
+  format?: 'png';
+  fullPage?: boolean;
+}
+
+export interface BrowserCaptureResult {
+  ok: boolean;
+  reason?: string;
+  mimeType?: string;
+  dataBase64?: string;
+  state: BrowserSessionState;
+}
+
+export interface BrowserSetBoundsRequest {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  visible?: boolean;
+}
+
+export interface BrowserInteractionRequest {
+  action: 'click' | 'type' | 'keypress';
+  selector?: string;
+  text?: string;
+  key?: string;
+}
+
+export interface BrowserInteractionResult {
+  ok: boolean;
+  reason?: string;
+  state: BrowserSessionState;
+}
+
 export interface UiContinuityState {
-  activeTab?: 'chat' | 'orchestration' | 'orchestration-advanced' | 'diagnostics';
+  activeTab?: 'chat' | 'orchestration' | 'orchestration-advanced' | 'diagnostics' | 'browser';
   lastVisitedPanel?: string;
   activeChatSessionId?: string;
 }
