@@ -13,6 +13,7 @@ let advancedFullscreenRequested = false;
 const SETTINGS_STORAGE_KEY = 'localcode.settings';
 const PANEL_SIZES_STORAGE_KEY = 'localcode.panelSizes';
 const TAB_KEYS = new Set(['chat', 'orchestration', 'orchestration-advanced', 'diagnostics', 'browser']);
+const PORTRAIT_PANE_KEYS = new Set(['code', 'side']);
 let browserFeatureState = { enabled: false, mode: 'disabled', reason: 'Browser feature is disabled.' };
 let syncBrowserSurfaceBounds = () => {};
 let refreshBrowserFeatureUi = async () => {};
@@ -63,6 +64,7 @@ const settingsState = {
   contextUsageCollapsed: false,
   lockedNamespaces: [],
   activeTab: 'chat',
+  portraitWorkspacePane: 'code',
   chatDraftText: '',
   orchestrationDraftPrompt: '',
   activeChatSessionIdByWorkspace: {}
@@ -71,6 +73,53 @@ const settingsState = {
 function normalizeActiveTabKey(value) {
   const key = String(value || '').trim();
   return TAB_KEYS.has(key) ? key : 'chat';
+}
+
+function normalizePortraitPaneKey(value) {
+  const key = String(value || '').trim().toLowerCase();
+  return PORTRAIT_PANE_KEYS.has(key) ? key : 'code';
+}
+
+function isPortraitViewport() {
+  return window.matchMedia('(orientation: portrait), (max-aspect-ratio: 3/4)').matches;
+}
+
+function applyPortraitWorkspacePaneState() {
+  const pane = normalizePortraitPaneKey(settingsState.portraitWorkspacePane);
+  settingsState.portraitWorkspacePane = pane;
+
+  document.body.classList.toggle('portrait-workspace-pane-code', pane === 'code');
+  document.body.classList.toggle('portrait-workspace-pane-side', pane === 'side');
+
+  const paneButtons = [
+    { id: 'portraitPaneCode', key: 'code' },
+    { id: 'portraitPaneAssistant', key: 'side' }
+  ];
+
+  for (const paneButton of paneButtons) {
+    const element = document.getElementById(paneButton.id);
+    if (!element) continue;
+    const isActive = paneButton.key === pane;
+    element.classList.toggle('active', isActive);
+    element.setAttribute('aria-pressed', String(isActive));
+  }
+}
+
+/**
+ * Update the active portrait pane and persist the preference.
+ *
+ * Purpose: keep one primary pane visible in portrait layouts while preserving
+ * user intent across reloads.
+ * Inputs: next pane key (code/side).
+ * Outputs: none.
+ * Side effects: updates body classes, portrait switcher button state, and
+ * local settings storage.
+ */
+function setPortraitWorkspacePane(nextPane) {
+  settingsState.portraitWorkspacePane = normalizePortraitPaneKey(nextPane);
+  applyPortraitWorkspacePaneState();
+  saveSettings();
+  syncBrowserSurfaceBounds();
 }
 
 function normalizeSessionHintByWorkspace(value) {
@@ -1269,6 +1318,9 @@ function loadSettings() {
     settingsState.contextUsageCollapsed = Boolean(parsed.contextUsageCollapsed ?? settingsState.contextUsageCollapsed);
     settingsState.lockedNamespaces = Array.isArray(parsed.lockedNamespaces) ? parsed.lockedNamespaces : [];
     settingsState.activeTab = normalizeActiveTabKey(parsed.activeTab ?? settingsState.activeTab);
+    settingsState.portraitWorkspacePane = normalizePortraitPaneKey(
+      parsed.portraitWorkspacePane ?? settingsState.portraitWorkspacePane
+    );
     settingsState.chatDraftText = String(parsed.chatDraftText ?? settingsState.chatDraftText);
     settingsState.orchestrationDraftPrompt = String(
       parsed.orchestrationDraftPrompt ?? settingsState.orchestrationDraftPrompt
@@ -1322,6 +1374,7 @@ function loadSettings() {
     settingsState.contextUsageCollapsed = false;
     settingsState.lockedNamespaces = [];
     settingsState.activeTab = 'chat';
+    settingsState.portraitWorkspacePane = 'code';
     settingsState.chatDraftText = '';
     settingsState.orchestrationDraftPrompt = '';
     settingsState.activeChatSessionIdByWorkspace = {};
@@ -1684,6 +1737,11 @@ function setActiveTab(which) {
   const orchAdvancedOn = which === 'orchestration-advanced';
   const diagOn = which === 'diagnostics';
   const browserOn = which === 'browser';
+
+  if (isPortraitViewport() && (chatOn || orchOn || orchAdvancedOn || diagOn || browserOn)) {
+    settingsState.portraitWorkspacePane = 'side';
+    applyPortraitWorkspacePaneState();
+  }
 
   activeTabKey = which;
   settingsState.activeTab = normalizeActiveTabKey(which);
@@ -7648,6 +7706,7 @@ async function initDiagnostics() {
 
 async function main() {
   loadSettings();
+  applyPortraitWorkspacePaneState();
   await initBrowserFeatureUi();
   try {
     const continuity = await window.llmIde.getUiContinuityState();
@@ -7663,6 +7722,9 @@ async function main() {
   document.getElementById('orchAdvancedTab').addEventListener('click', () => setActiveTab('orchestration-advanced'));
   document.getElementById('diagTab').addEventListener('click', () => setActiveTab('diagnostics'));
   document.getElementById('browserTab')?.addEventListener('click', () => setActiveTab('browser'));
+  document.getElementById('portraitPaneCode')?.addEventListener('click', () => setPortraitWorkspacePane('code'));
+  document.getElementById('portraitPaneAssistant')?.addEventListener('click', () => setPortraitWorkspacePane('side'));
+  window.addEventListener('resize', applyPortraitWorkspacePaneState);
   if (!browserFeatureState.enabled && settingsState.activeTab === 'browser') {
     settingsState.activeTab = 'chat';
   }

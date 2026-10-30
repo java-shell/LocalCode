@@ -22,6 +22,10 @@
       </div>
       <div class="topbar-actions">
         <div class="meta">Standalone LLM IDE Platform</div>
+        <div id="portraitWorkspaceSwitcher" class="portrait-workspace-switcher" role="group" aria-label="Portrait workspace panes">
+          <button id="portraitPaneCode" type="button" aria-pressed="false">Code</button>
+          <button id="portraitPaneAssistant" type="button" aria-pressed="false">Assistant</button>
+        </div>
         <button id="openSettings" type="button">Settings</button>
       </div>
     </header>
@@ -219,11 +223,13 @@
               </div>
             </div>
           </div>
-          <label class="label">Prompt</label>
-          <textarea id="chatPrompt" placeholder="Ask for code, analysis, or generation..."></textarea>
-          <div class="actions actions-two">
-            <button id="chatSend" class="btn-primary">Send</button>
-            <button id="chatStop" type="button" class="btn-danger" disabled>Stop</button>
+          <div id="chatComposer" class="chat-composer">
+            <label class="label" for="chatPrompt">Prompt</label>
+            <textarea id="chatPrompt" placeholder="Ask for code, analysis, or generation..."></textarea>
+            <div class="actions actions-two">
+              <button id="chatSend" class="btn-primary">Send</button>
+              <button id="chatStop" type="button" class="btn-danger" disabled>Stop</button>
+            </div>
           </div>
         </section>
 

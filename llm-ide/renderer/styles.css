@@ -84,6 +84,24 @@ body.panel-resizing {
   gap: 10px;
 }
 
+.portrait-workspace-switcher {
+  display: none;
+  align-items: center;
+  gap: 6px;
+}
+
+.portrait-workspace-switcher button {
+  padding: 6px 10px;
+  font-size: 12px;
+  min-height: 34px;
+}
+
+.portrait-workspace-switcher button.active {
+  background: rgba(56, 189, 248, 0.18);
+  border-color: rgba(56, 189, 248, 0.45);
+  color: #d7eeff;
+}
+
 .workspace {
   display: grid;
   grid-template-columns: minmax(180px, var(--filetree-width)) 6px minmax(0, 1fr) 6px minmax(300px, var(--side-panel-width));
@@ -836,6 +854,11 @@ button.btn-danger:hover:not(:disabled) {
 }
 
 .chat-settings-panel {
+  display: grid;
+  gap: 8px;
+}
+
+.chat-composer {
   display: grid;
   gap: 8px;
 }
@@ -1831,6 +1854,111 @@ button.btn-danger:hover:not(:disabled) {
   .editor-panel {
     border-right: none;
     border-bottom: 1px solid var(--border);
+  }
+}
+
+@media (orientation: portrait), (max-aspect-ratio: 3/4) {
+  .topbar {
+    padding: 0 10px;
+    gap: 10px;
+  }
+
+  .meta {
+    display: none;
+  }
+
+  .portrait-workspace-switcher {
+    display: inline-flex;
+  }
+
+  .workspace {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+  }
+
+  .workspace-resizer,
+  .terminal-resizer {
+    display: none;
+  }
+
+  .filetree-panel,
+  .editor-panel,
+  .side-panel {
+    display: none;
+    border-right: none;
+    border-bottom: none;
+    min-height: 0;
+  }
+
+  #filetreeResizeHandle,
+  #sidePanelResizeHandle {
+    display: none;
+  }
+
+  body.portrait-workspace-pane-code .workspace {
+    grid-template-columns: minmax(170px, 38%) 6px minmax(0, 1fr);
+    grid-template-rows: 1fr;
+  }
+
+  body.portrait-workspace-pane-code .filetree-panel {
+    display: grid;
+  }
+
+  body.portrait-workspace-pane-code #filetreeResizeHandle {
+    display: block;
+  }
+
+  body.portrait-workspace-pane-code .editor-panel {
+    display: grid;
+    grid-template-rows: 48px 40px minmax(0, 1fr) minmax(140px, 30vh);
+  }
+
+  body.portrait-workspace-pane-code .side-panel,
+  body.portrait-workspace-pane-code #sidePanelResizeHandle {
+    display: none;
+  }
+
+  body.portrait-workspace-pane-side .workspace {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+  }
+
+  body.portrait-workspace-pane-side .side-panel {
+    display: grid;
+  }
+
+  .tabs {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+  }
+
+  #chatView.view.active {
+    padding-bottom: 0;
+  }
+
+  .chat-settings-panel {
+    max-height: 34vh;
+    overflow: auto;
+    padding-right: 2px;
+  }
+
+  .chat-composer {
+    position: sticky;
+    bottom: 0;
+    z-index: 2;
+    padding-top: 8px;
+    border-top: 1px solid var(--border);
+    background:
+      linear-gradient(180deg, rgba(10, 16, 26, 0.82), rgba(10, 16, 26, 0.95));
+  }
+
+  #chatPrompt {
+    min-height: 120px;
+  }
+
+  .actions.actions-two button {
+    min-height: 40px;
   }
 }
 
