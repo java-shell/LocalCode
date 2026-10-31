@@ -659,3 +659,90 @@ test('openai-compatible compaction retry fits the configured context budget', as
     axiosRef.post = originalPost;
   }
 });
+
+test('chatWithTools consumes queued user guidance between tool turns', async () => {
+  const config: LLMConfig = {
+    provider: 'openai-compatible',
+    endpoint: 'http://localhost:1234/v1/chat/completions',
+    model: 'gpt-test',
+    temperature: 0.2
+  };
+
+  const requests: Array<{ url: string; payload: Record<string, unknown> }> = [];
+  const axiosRef = axios as unknown as {
+    post: (url: string, payload: Record<string, unknown>) => Promise<{ data: EventEmitter }>;
+  };
+  const originalPost = axiosRef.post;
+
+  axiosRef.post = async (url, payload) => {
+    requests.push({ url, payload });
+    const stream = new EventEmitter();
+    const responseNumber = requests.length;
+
+    setImmediate(() => {
+      if (responseNumber === 1) {
+        stream.emit(
+          'data',
+          Buffer.from(
+            'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-1","type":"function","function":{"name":"git_status","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}\n' +
+            'data: [DONE]\n'
+          )
+        );
+      } else {
+        stream.emit(
+          'data',
+          Buffer.from(
+            'data: {"choices":[{"delta":{"content":"Guidance applied."}}]}\n' +
+            'data: {"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":7,"completion_tokens":3,"total_tokens":10}}\n' +
+            'data: [DONE]\n'
+          )
+        );
+      }
+      stream.emit('end');
+    });
+
+    return { data: stream };
+  };
+
+  let consumeCalls = 0;
+  try {
+    const result = await chatWithTools(
+      config,
+      [{ role: 'user', content: 'Check status and summarize.' }],
+      [
+        {
+          type: 'function',
+          function: {
+            name: 'git_status',
+            description: 'Read git status',
+            parameters: { type: 'object', properties: {} }
+          }
+        }
+      ],
+      async () => ({ ok: true, dirty: false }),
+      undefined,
+      40,
+      undefined,
+      () => undefined,
+      {
+        consumeUserMessages: async () => {
+          consumeCalls += 1;
+          if (consumeCalls === 2) {
+            return [{ role: 'user', content: 'Keep it to one sentence.' }];
+          }
+          return [];
+        }
+      }
+    );
+
+    assert.equal(result.text, 'Guidance applied.');
+    assert.equal(requests.length, 2);
+    const secondTurnMessages = requests[1]?.payload.messages as Array<{ role?: string; content?: string }>;
+    const injectedGuidance = secondTurnMessages.some(
+      message => message.role === 'user' && String(message.content ?? '').includes('Keep it to one sentence.')
+    );
+    assert.equal(injectedGuidance, true, JSON.stringify(secondTurnMessages));
+  } finally {
+    axiosRef.post = originalPost;
+  }
+});

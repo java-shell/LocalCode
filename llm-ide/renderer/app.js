@@ -2372,6 +2372,8 @@ function initTerminalPanel() {
   const clearButton = document.getElementById('terminalClear');
   const terminalInput = document.getElementById('terminalInput');
   const terminalSend = document.getElementById('terminalSend');
+  const terminalProcessSelect = document.getElementById('terminalProcessSelect');
+  const terminalInterrupt = document.getElementById('terminalInterrupt');
   const MAX_TERMINAL_CHARS = 200000;
 
   function appendTerminalText(text) {
@@ -2388,14 +2390,72 @@ function initTerminalPanel() {
     appendTerminalText(payload.text);
   });
 
-  const offTerminalEvent = window.llmIde.onTerminalEvent(payload => {
-    if (payload.type === 'start') {
-      appendTerminalText(`\n$ (${payload.cwd}) ${payload.command}\n`);
+  function selectedTerminalPid() {
+    const raw = String(terminalProcessSelect.value || '').trim();
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return undefined;
+    }
+    return Math.trunc(parsed);
+  }
+
+  async function refreshTerminalProcesses() {
+    const prior = selectedTerminalPid();
+    let result;
+    try {
+      result = await window.llmIde.listTerminalProcesses({ includeExited: false, limit: 100 });
+    } catch {
       return;
     }
 
+    const running = Array.isArray(result?.processes)
+      ? result.processes.filter(process => process && process.running)
+      : [];
+
+    terminalProcessSelect.innerHTML = '';
+    if (running.length === 0) {
+      const option = document.createElement('option');
+      option.value = '';
+      option.textContent = 'No running process';
+      terminalProcessSelect.appendChild(option);
+      terminalInterrupt.disabled = true;
+      return;
+    }
+
+    const preferredPid = prior || result?.activePid;
+    for (const process of running) {
+      const option = document.createElement('option');
+      option.value = String(process.pid);
+      const command = String(process.command || '').trim();
+      option.textContent = command
+        ? `PID ${process.pid} - ${command}`
+        : `PID ${process.pid}`;
+      terminalProcessSelect.appendChild(option);
+    }
+
+    if (preferredPid && running.some(process => process.pid === preferredPid)) {
+      terminalProcessSelect.value = String(preferredPid);
+    } else if (result?.activePid && running.some(process => process.pid === result.activePid)) {
+      terminalProcessSelect.value = String(result.activePid);
+    } else {
+      terminalProcessSelect.value = String(running[0].pid);
+    }
+
+    terminalInterrupt.disabled = false;
+  }
+
+  const offTerminalEvent = window.llmIde.onTerminalEvent(payload => {
+    if (payload.type === 'start') {
+      const pidText = payload.pid ? ` [pid=${payload.pid}]` : '';
+      appendTerminalText(`\n$ (${payload.cwd}) ${payload.command}${pidText}\n`);
+      void refreshTerminalProcesses();
+      return;
+    }
+
+    void refreshTerminalProcesses();
     const signalSuffix = payload.signal ? ` signal=${payload.signal}` : '';
-    appendTerminalText(`\n[exit ${payload.code ?? 'unknown'}${signalSuffix}]\n`);
+    const pidSuffix = payload.pid ? ` pid=${payload.pid}` : '';
+    appendTerminalText(`\n[exit ${payload.code ?? 'unknown'}${signalSuffix}${pidSuffix}]\n`);
   });
 
   clearButton.addEventListener('click', () => {
@@ -2407,14 +2467,21 @@ function initTerminalPanel() {
     if (!raw.trim()) return;
 
     const command = raw.trim().toLowerCase();
+    const pid = selectedTerminalPid();
     if (command === '(ctrl+c)' || command === '(ctl+c)') {
-      const result = await window.llmIde.interruptTerminalProcess();
-      appendTerminalText(result.interrupted ? '^C\n' : '[no active process]\n');
+      const result = await window.llmIde.interruptTerminalProcess({ pid });
+      if (result.interrupted) {
+        const pidText = result.pid ? ` pid=${result.pid}` : '';
+        appendTerminalText(`^C${pidText}\n`);
+      } else {
+        appendTerminalText(`[interrupt failed: ${result.reason || 'no active process'}]\n`);
+      }
+      void refreshTerminalProcesses();
       terminalInput.value = '';
       return;
     }
 
-    const result = await window.llmIde.sendTerminalInput({ text: `${raw}\n` });
+    const result = await window.llmIde.sendTerminalInput({ text: `${raw}\n`, pid });
     if (result.sent) {
       appendTerminalText(`> ${raw}\n`);
       terminalInput.value = '';
@@ -2424,9 +2491,23 @@ function initTerminalPanel() {
     const runResult = await window.llmIde.runTerminalCommand({ command: raw });
     if (!runResult.started) {
       appendTerminalText(`[command not started: ${runResult.reason || 'unknown'}]\n`);
+    } else {
+      void refreshTerminalProcesses();
     }
     terminalInput.value = '';
   }
+
+  terminalInterrupt.addEventListener('click', async () => {
+    const pid = selectedTerminalPid();
+    const result = await window.llmIde.interruptTerminalProcess({ pid });
+    if (result.interrupted) {
+      const pidText = result.pid ? ` pid=${result.pid}` : '';
+      appendTerminalText(`^C${pidText}\n`);
+    } else {
+      appendTerminalText(`[interrupt failed: ${result.reason || 'no active process'}]\n`);
+    }
+    void refreshTerminalProcesses();
+  });
 
   terminalSend.addEventListener('click', submitTerminalInput);
   terminalInput.addEventListener('keydown', event => {
@@ -2440,6 +2521,8 @@ function initTerminalPanel() {
     offTerminalOutput();
     offTerminalEvent();
   });
+
+  void refreshTerminalProcesses();
 }
 
 function initSettingsMenu() {
@@ -3071,6 +3154,7 @@ async function initChat() {
   const chatPresetNameInput = document.getElementById('chatPresetNameInput');
   const chatPresetNameCancel = document.getElementById('chatPresetNameCancel');
   const prompt = document.getElementById('chatPrompt');
+  const chatGuidanceIndicator = document.getElementById('chatGuidanceIndicator');
   const send = document.getElementById('chatSend');
   const stop = document.getElementById('chatStop');
   const ollamaThinkMode = document.getElementById('chatOllamaThinkMode');
@@ -3703,6 +3787,42 @@ async function initChat() {
   let assistantReceivedToken = false;
   let markdownRenderQueued = false;
   let chatRunning = false;
+  let guidanceIndicatorResetTimer = null;
+
+  function clearGuidanceIndicatorResetTimer() {
+    if (guidanceIndicatorResetTimer) {
+      window.clearTimeout(guidanceIndicatorResetTimer);
+      guidanceIndicatorResetTimer = null;
+    }
+  }
+
+  function setGuidanceIndicator(state, text, options = {}) {
+    if (!chatGuidanceIndicator) return;
+
+    const keepVisibleWhenIdle = Boolean(options.keepVisibleWhenIdle);
+    clearGuidanceIndicatorResetTimer();
+    chatGuidanceIndicator.classList.remove('chat-guidance-queued', 'chat-guidance-injected');
+
+    if (state === 'queued') {
+      chatGuidanceIndicator.classList.add('chat-guidance-queued');
+      chatGuidanceIndicator.textContent = text || 'Guidance queued';
+      chatGuidanceIndicator.hidden = false;
+      return;
+    }
+
+    if (state === 'injected') {
+      chatGuidanceIndicator.classList.add('chat-guidance-injected');
+      chatGuidanceIndicator.textContent = text || 'Guidance injected';
+      chatGuidanceIndicator.hidden = false;
+      guidanceIndicatorResetTimer = window.setTimeout(() => {
+        setGuidanceIndicator('idle', 'Guidance: waiting for new input', { keepVisibleWhenIdle: false });
+      }, 3000);
+      return;
+    }
+
+    chatGuidanceIndicator.textContent = text || 'Guidance: idle';
+    chatGuidanceIndicator.hidden = !keepVisibleWhenIdle;
+  }
 
   function ensureRunningIndicator() {
     if (runningIndicatorEl && runningIndicatorEl.parentElement === conversation) {
@@ -3735,12 +3855,14 @@ async function initChat() {
 
   function setChatRunning(running) {
     chatRunning = running;
-    send.disabled = running;
+    send.disabled = false;
     stop.disabled = !running;
     if (running) {
       ensureRunningIndicator();
+      setGuidanceIndicator('idle', 'Guidance: ready to queue', { keepVisibleWhenIdle: true });
     } else {
       removeRunningIndicator();
+      setGuidanceIndicator('idle', 'Guidance: idle', { keepVisibleWhenIdle: false });
     }
   }
 
@@ -3946,6 +4068,18 @@ async function initChat() {
 
   const offChatEvent = window.llmIde.onChatEvent(event => {
     applySubAgentActivityEvent(event);
+
+    const rawEvent = String(event ?? '').trim();
+    if (rawEvent.startsWith('[guidance]')) {
+      const lower = rawEvent.toLowerCase();
+      if (lower.includes('queued')) {
+        setGuidanceIndicator('queued', 'Guidance queued');
+      } else if (lower.includes('injected')) {
+        setGuidanceIndicator('injected', 'Guidance injected');
+      }
+    } else if (rawEvent.startsWith('user-guidance:injected:')) {
+      setGuidanceIndicator('injected', 'Guidance injected');
+    }
 
     const parsed = parseChatEvent(event);
     if (!parsed || !parsed.text) {
@@ -4729,6 +4863,42 @@ async function initChat() {
   send.addEventListener('click', async () => {
     const text = prompt.value.trim();
     if (!text) return;
+
+    if (chatRunning) {
+      try {
+        const queued = await window.llmIde.injectChatGuidance({
+          sessionId: activeChatSessionId,
+          content: text
+        });
+
+        if (!queued?.accepted) {
+          const reason = String(queued?.reason || 'rejected');
+          status.textContent = reason === 'session_mismatch'
+            ? 'Guidance rejected: session changed while running'
+            : reason === 'no_active_chat'
+              ? 'Guidance rejected: no active chat run'
+              : reason === 'empty_content'
+                ? 'Guidance rejected: empty message'
+                : 'Guidance rejected';
+          return;
+        }
+
+        appendLog(conversation, `You (guidance): ${text}`);
+        settingsState.chatDraftText = '';
+        saveSettings();
+        prompt.value = '';
+        status.textContent = `Guidance queued${typeof queued.queued === 'number' ? ` (${queued.queued})` : ''}`;
+        setGuidanceIndicator(
+          'queued',
+          `Guidance queued${typeof queued.queued === 'number' ? ` (${queued.queued})` : ''}`
+        );
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : String(error);
+        appendLog(conversation, `[error] Guidance injection failed: ${errorMsg}`);
+        status.textContent = 'Guidance injection failed';
+      }
+      return;
+    }
 
     persistSelectedContextWindow({ syncInput: true, save: true });
 

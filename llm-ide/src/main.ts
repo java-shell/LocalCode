@@ -1,4 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import './backend/crashReportingStartup';
+import { app, BrowserWindow, dialog, ipcMain as electronIpcMain } from 'electron';
+import { createMeasuredIpcMain } from './backend/ipcChurnDiagnostics';
 import * as path from 'path';
 import * as fs from 'fs';
 import { ChildProcessWithoutNullStreams } from 'child_process';
@@ -24,11 +26,14 @@ import { MCPServerManager } from './backend/mcpServerManager';
 import { pruneChatContextDumps } from './backend/chatDebugDumps';
 import { dispatchNotification, sendTestNotification, type NotifyConfig } from './backend/notify';
 import { BrowserSessionManager } from './backend/browserSessionManager';
+import { TerminalProcessRegistry } from './backend/terminalProcessRegistry';
 import {
   BrowserCaptureRequest,
   BrowserInteractionRequest,
   BrowserNavigateRequest,
   BrowserSetBoundsRequest,
+  ChatGuidanceRequest,
+  ChatGuidanceResult,
   ChatSession,
   ChatStreamResult,
   ChatMessage,
@@ -58,23 +63,18 @@ import { buildWorkspaceTree, readWorkspaceFile, writeWorkspaceFile } from './bac
 import { TurboVecMemory, computeAdaptiveInjectionLimits } from './backend/turboVecMemory';
 import { formatEnvironmentGuidance } from './shared/environment';
 
+// Preserve Electron's display/GPU selection. Native crash reporting is diagnostic
+// only; forcing X11/software rendering is not a verified SIGTRAP remedy.
+
+const ipcMain = createMeasuredIpcMain(app, electronIpcMain);
 let mainWindow: BrowserWindow | null = null;
 let selectedWorkspaceDir = process.cwd();
 let referenceWorkspaces: import('./shared/types').ReferenceWorkspace[] = [];
-let activeTerminalProcess: ChildProcessWithoutNullStreams | null = null;
-let activeTerminalMeta: {
-  command?: string;
-  cwd?: string;
-  startedAt?: string;
-  code?: number | null;
-  signal?: string | null;
-} | null = null;
-const terminalWaiters = new Set<(snapshot: {
-  running: boolean;
-  code?: number | null;
-  signal?: string | null;
-}) => void>();
+const terminalProcessRegistry = new TerminalProcessRegistry();
 let activeChatAbortController: AbortController | null = null;
+let activeChatSessionId: string | null = null;
+let activeChatSender: Electron.WebContents | null = null;
+let activeChatGuidanceQueue: Array<{ content: string; createdAt: string }> = [];
 let activeOrchestrationAbortController: AbortController | null = null;
 const fileWatchRefs = new Map<string, { count: number; listener: (curr: fs.Stats, prev: fs.Stats) => void }>();
 let turboMemory: TurboVecMemory | null = null;
@@ -121,17 +121,6 @@ function isProcessRunning(proc: ChildProcessWithoutNullStreams | null): proc is 
   return Boolean(proc && proc.exitCode === null && !proc.killed);
 }
 
-function notifyTerminalWaiters(snapshot: {
-  running: boolean;
-  code?: number | null;
-  signal?: string | null;
-}): void {
-  for (const resolve of terminalWaiters) {
-    resolve(snapshot);
-    terminalWaiters.delete(resolve);
-  }
-}
-
 function setTrackedTerminalProcess(
   child: ChildProcessWithoutNullStreams | null,
   metadata?: {
@@ -143,31 +132,20 @@ function setTrackedTerminalProcess(
   }
 ): void {
   if (child) {
-    activeTerminalProcess = child;
-    activeTerminalMeta = {
+    terminalProcessRegistry.registerStart(child, {
       command: metadata?.command,
-      cwd: metadata?.cwd,
-      startedAt: new Date().toISOString(),
-      code: null,
-      signal: null
-    };
+      cwd: metadata?.cwd
+    });
     return;
   }
 
-  if (metadata?.replaceOnlyIfCurrent && activeTerminalProcess && metadata.replaceOnlyIfCurrent !== activeTerminalProcess) {
+  if (!metadata?.replaceOnlyIfCurrent) {
     return;
   }
 
-  if (activeTerminalMeta) {
-    activeTerminalMeta.code = metadata?.code ?? activeTerminalMeta.code ?? null;
-    activeTerminalMeta.signal = metadata?.signal ?? activeTerminalMeta.signal ?? null;
-  }
-
-  activeTerminalProcess = null;
-  notifyTerminalWaiters({
-    running: false,
-    code: activeTerminalMeta?.code ?? null,
-    signal: activeTerminalMeta?.signal ?? null
+  terminalProcessRegistry.registerEnd(metadata.replaceOnlyIfCurrent, {
+    code: metadata?.code ?? null,
+    signal: metadata?.signal ?? null
   });
 }
 
@@ -180,84 +158,41 @@ function activeTerminalSnapshot(): {
   code?: number | null;
   signal?: string | null;
 } {
-  const running = isProcessRunning(activeTerminalProcess);
-  if (!running) {
-    return {
-      running: false,
-      code: activeTerminalMeta?.code ?? null,
-      signal: activeTerminalMeta?.signal ?? null
-    };
-  }
-
-  return {
-    running: true,
-    pid: activeTerminalProcess?.pid,
-    command: activeTerminalMeta?.command,
-    cwd: activeTerminalMeta?.cwd,
-    startedAt: activeTerminalMeta?.startedAt,
-    code: null,
-    signal: null
-  };
+  return terminalProcessRegistry.getPrimarySnapshot();
 }
 
-function interruptTrackedTerminalProcess(): { interrupted: boolean; reason?: string } {
-  if (!isProcessRunning(activeTerminalProcess)) {
-    return { interrupted: false, reason: 'no_active_process' };
-  }
-  const interrupted = activeTerminalProcess.kill('SIGINT');
-  if (!interrupted) {
-    return { interrupted: false, reason: 'signal_failed' };
-  }
-  return { interrupted: true };
+function interruptTrackedTerminalProcess(payload?: { pid?: number; signal?: NodeJS.Signals }): {
+  interrupted: boolean;
+  reason?: string;
+  pid?: number;
+  signal?: string;
+} {
+  return terminalProcessRegistry.interruptProcess(payload);
 }
 
-async function waitForTrackedTerminalProcess(timeoutMs: number): Promise<{
+async function waitForTrackedTerminalProcess(timeoutMs: number, pid?: number): Promise<{
   running: boolean;
   timedOut?: boolean;
+  pid?: number;
   code?: number | null;
   signal?: string | null;
 }> {
-  if (!isProcessRunning(activeTerminalProcess)) {
-    return {
-      running: false,
-      timedOut: false,
-      code: activeTerminalMeta?.code ?? null,
-      signal: activeTerminalMeta?.signal ?? null
-    };
-  }
+  return terminalProcessRegistry.waitForProcess(timeoutMs, pid);
+}
 
-  const bounded = timeoutMs <= 0 ? 0 : Math.max(1000, Math.min(300000, timeoutMs));
-  if (bounded === 0) {
-    return { running: true, timedOut: true };
-  }
-
-  return await new Promise(resolve => {
-    let settled = false;
-    const finish = (value: {
-      running: boolean;
-      timedOut?: boolean;
-      code?: number | null;
-      signal?: string | null;
-    }) => {
-      if (settled) {
-        return;
-      }
-      settled = true;
-      clearTimeout(timer);
-      terminalWaiters.delete(onDone);
-      resolve(value);
-    };
-
-    const onDone = (snapshot: { running: boolean; code?: number | null; signal?: string | null }) => {
-      finish({ running: snapshot.running, timedOut: false, code: snapshot.code ?? null, signal: snapshot.signal ?? null });
-    };
-
-    const timer = setTimeout(() => {
-      finish({ running: isProcessRunning(activeTerminalProcess), timedOut: true });
-    }, bounded);
-
-    terminalWaiters.add(onDone);
-  });
+function listTrackedTerminalProcesses(payload?: { includeExited?: boolean; limit?: number }): {
+  processes: Array<{
+    pid: number;
+    command?: string;
+    cwd?: string;
+    startedAt: string;
+    running: boolean;
+    code?: number | null;
+    signal?: string | null;
+  }>;
+  activePid?: number;
+} {
+  return terminalProcessRegistry.listProcesses(payload);
 }
 
 function appResourcePath(...segments: string[]): string {
@@ -966,6 +901,7 @@ function runtimeContext(
           type: 'start' | 'end';
           command: string;
           cwd: string;
+          pid?: number;
           code?: number | null;
           signal?: string | null;
         }) => {
@@ -985,8 +921,12 @@ function runtimeContext(
       setTrackedTerminalProcess(child, metadata);
     },
     getActiveTerminalProcessInfo: () => activeTerminalSnapshot(),
-    interruptActiveTerminalProcess: () => interruptTrackedTerminalProcess(),
-    waitForActiveTerminalProcess: (timeoutMs: number) => waitForTrackedTerminalProcess(timeoutMs),
+    getTrackedTerminalProcesses: (payload?: { includeExited?: boolean; limit?: number }) =>
+      listTrackedTerminalProcesses(payload),
+    interruptActiveTerminalProcess: (payload?: { pid?: number; signal?: NodeJS.Signals }) =>
+      interruptTrackedTerminalProcess(payload),
+    waitForActiveTerminalProcess: (timeoutMs: number, pid?: number) =>
+      waitForTrackedTerminalProcess(timeoutMs, pid),
     requestOutsideWorkspaceApproval: async (payload: {
       tool: string;
       summary: string;
@@ -1415,6 +1355,9 @@ ipcMain.handle(
     const checkpointTurnId = String(payload.turnId ?? '').trim();
     const checkpointPrompt = String(payload.prompt ?? '').trim();
     const checkpointModel = String(config.model ?? '').trim();
+    activeChatSessionId = checkpointSessionId || null;
+    activeChatSender = event.sender;
+    activeChatGuidanceQueue = [];
     let streamedAssistantText = '';
     let checkpointStreamingMarked = false;
 
@@ -1802,6 +1745,28 @@ ipcMain.handle(
                 });
               }
               event.sender.send('chat:token', token);
+            },
+            {
+              consumeUserMessages: async () => {
+                if (activeChatGuidanceQueue.length === 0) {
+                  return [];
+                }
+
+                const drained = activeChatGuidanceQueue.splice(0, activeChatGuidanceQueue.length);
+                const userMessages = drained
+                  .map(item => String(item.content ?? '').trim())
+                  .filter(Boolean)
+                  .map(content => ({
+                    role: 'user' as const,
+                    content
+                  }));
+
+                if (userMessages.length > 0) {
+                  event.sender.send('chat:event', `[guidance] injected ${userMessages.length} user message(s) into the active run.`);
+                }
+
+                return userMessages;
+              }
             }
           );
           break;
@@ -1996,10 +1961,51 @@ ipcMain.handle(
     } finally {
       if (activeChatAbortController === abortController) {
         activeChatAbortController = null;
+        activeChatSessionId = null;
+        activeChatSender = null;
+        activeChatGuidanceQueue = [];
       }
     }
   }
 );
+
+ipcMain.handle('chat:inject-guidance', async (event, payload: ChatGuidanceRequest): Promise<ChatGuidanceResult> => {
+  const content = String(payload?.content ?? '').trim();
+  if (!content) {
+    return { accepted: false, reason: 'empty_content' };
+  }
+
+  if (!activeChatAbortController || !activeChatSessionId) {
+    return { accepted: false, reason: 'no_active_chat' };
+  }
+
+  if (activeChatSender && activeChatSender !== event.sender) {
+    return { accepted: false, reason: 'sender_mismatch' };
+  }
+
+  const requestedSessionId = String(payload?.sessionId ?? '').trim();
+  if (requestedSessionId && requestedSessionId !== activeChatSessionId) {
+    return { accepted: false, reason: 'session_mismatch' };
+  }
+
+  const maxGuidanceChars = 2000;
+  const normalizedContent = content.slice(0, maxGuidanceChars);
+  const maxQueuedGuidance = 20;
+  if (activeChatGuidanceQueue.length >= maxQueuedGuidance) {
+    activeChatGuidanceQueue.shift();
+  }
+
+  activeChatGuidanceQueue.push({
+    content: normalizedContent,
+    createdAt: new Date().toISOString()
+  });
+
+  if (activeChatSender && !activeChatSender.isDestroyed()) {
+    activeChatSender.send('chat:event', '[guidance] user guidance queued for next model decision point.');
+  }
+
+  return { accepted: true, queued: activeChatGuidanceQueue.length };
+});
 
 ipcMain.handle('chat:stop', async () => {
   let stopped = false;
@@ -2007,6 +2013,9 @@ ipcMain.handle('chat:stop', async () => {
   if (activeChatAbortController) {
     activeChatAbortController.abort();
     activeChatAbortController = null;
+    activeChatSessionId = null;
+    activeChatSender = null;
+    activeChatGuidanceQueue = [];
     stopped = true;
   }
 
@@ -2017,8 +2026,9 @@ ipcMain.handle('chat:stop', async () => {
     stopped = true;
   }
 
-  if (isProcessRunning(activeTerminalProcess)) {
-    interruptTrackedTerminalProcess();
+  const activeTerminal = activeTerminalSnapshot();
+  if (activeTerminal.running) {
+    interruptTrackedTerminalProcess({ pid: activeTerminal.pid, signal: 'SIGINT' });
     stopped = true;
   }
 
@@ -2221,13 +2231,18 @@ ipcMain.handle('memory:get-locked-namespaces', async () => {
   };
 });
 
-ipcMain.handle('terminal:send-input', async (_event, payload: { text: string }) => {
-  if (!isProcessRunning(activeTerminalProcess) || !activeTerminalProcess.stdin || activeTerminalProcess.stdin.destroyed) {
+ipcMain.handle('terminal:send-input', async (_event, payload: { text: string; pid?: number }) => {
+  const targetPid = Number(payload?.pid);
+  const child = terminalProcessRegistry.getChildForInput(
+    Number.isFinite(targetPid) && targetPid > 0 ? targetPid : undefined
+  );
+
+  if (!child || !isProcessRunning(child) || !child.stdin || child.stdin.destroyed) {
     return { sent: false, reason: 'no_active_process' };
   }
 
   const text = String(payload.text ?? '');
-  activeTerminalProcess.stdin.write(text);
+  child.stdin.write(text);
   return { sent: true };
 });
 
@@ -2237,7 +2252,7 @@ ipcMain.handle('terminal:run-command', async (event, payload: { command: string;
     return { started: false, reason: 'empty_command' };
   }
 
-  if (isProcessRunning(activeTerminalProcess)) {
+  if (activeTerminalSnapshot().running) {
     return { started: false, reason: 'process_active' };
   }
 
@@ -2259,8 +2274,21 @@ ipcMain.handle('terminal:run-command', async (event, payload: { command: string;
   return { started: true };
 });
 
-ipcMain.handle('terminal:interrupt', async () => {
-  return interruptTrackedTerminalProcess();
+ipcMain.handle('terminal:interrupt', async (_event, payload?: { pid?: number; signal?: NodeJS.Signals }) => {
+  const pid = Number(payload?.pid);
+  const signalRaw = String(payload?.signal ?? 'SIGINT').toUpperCase();
+  const allowedSignals: NodeJS.Signals[] = ['SIGINT', 'SIGTERM', 'SIGKILL'];
+  const signal = allowedSignals.includes(signalRaw as NodeJS.Signals)
+    ? (signalRaw as NodeJS.Signals)
+    : 'SIGINT';
+  return interruptTrackedTerminalProcess({
+    pid: Number.isFinite(pid) && pid > 0 ? pid : undefined,
+    signal
+  });
+});
+
+ipcMain.handle('terminal:list-processes', async (_event, payload?: { includeExited?: boolean; limit?: number }) => {
+  return listTrackedTerminalProcesses(payload);
 });
 
 ipcMain.handle('orch:stop', async () => {

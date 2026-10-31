@@ -3,6 +3,112 @@
 LocalCode is a standalone desktop platform built with Electron.
 It is not a VS Code extension.
 
+## Native Crash Diagnostics
+
+### Patched Runtime and IPC Churn — 2026-10-31
+
+Electron is pinned to **42.11.18**. The first fixed 42.x release is **42.11.2**:
+[release notes](https://github.com/electron/electron/releases/tag/v42.11.2) explicitly
+include [backport #53419](https://github.com/electron/electron/pull/53419), fixing
+[IPC template exhaustion #53380](https://github.com/electron/electron/issues/53380).
+Tagged source in both fixed releases packs frame IDs into a BigInt instead of
+creating an ObjectTemplate per IPC event. The installed binary version was checked.
+
+Set `LOCALCODE_IPC_CHURN=1` before launching to opt into measurement. The main process
+writes aggregate channel totals, interval/average/peak rates, and runtime version to
+its user-data debug directory in `ipc-churn.json`. Sampling is every 10 seconds, keeps
+at most 60 windows and 128 channel buckets, and replaces the same file (private mode
+0600 on Unix). Normal quit flushes; native crashes retain the last persisted sample.
+No payloads, prompts, URLs, credentials, renderer IDs, or additional IPC calls are
+recorded/generated. Disabled by default. Counts cover registered LocalCode
+`ipcMain.handle` calls, not internal Electron IPC, unhandled invokes, renderer sends,
+or all V8 template allocations. Peak rates are sampling-window averages, not instantaneous.
+
+Live measurement found an idle `browser:set-bounds` feedback loop at approximately
+33,000 invokes/second. In the first 50.087 seconds, it produced 1,553,272 of 1,553,303
+handled invokes. `setBounds` emitted state on every request, and the renderer's state
+listener sent bounds again. Identical normalized requests now succeed without emitting
+state or touching the view/timestamp, breaking the echo; real bounds changes still apply.
+The feedback loop is covered by failing-before/passing-after tests.
+
+After the correction, the same startup/idle run recorded **7 bounds calls / 36 total
+invokes in 50.125 seconds**, with **zero invokes in each of four subsequent 10-second
+idle windows**. The corrected diagnostic instance was verified mapped and native Wayland.
+This validates the idle feedback fix, not every possible interaction or long-run workload.
+Native Crashpad reporting remains enabled; the existing graphics warnings remain unrelated
+to the demonstrated V8/IPC template-overflow mechanism.
+
+Verification TODO ledger (working tree, not yet committed):
+
+- [x] AI-001: Verify upstream fix, first fixed release, tagged source and installed binary.
+- [x] AI-002: Add bounded opt-in payload-free IPC counters and persistence/compatibility tests.
+- [x] AI-003: Reproduce and break the identical-bounds feedback loop without API changes.
+- [x] AI-004: Measure before/after live churn; build and targeted tests passed 12/12,
+  including the explicit native SIGTRAP fixture. Final full suite: 206 passed, 1 failed,
+  1 skipped (native fixture is opt-in). The remaining renderer reference-workspace
+  tool-list assertion was also failing before the bounds correction. Editor diagnostics
+  and diff whitespace checks passed. Whole-dirty-tree structural gates still flag earlier
+  terminal/guidance work; setBounds has no incompatible callers.
+
+Electron Crashpad starts as the first main-process import, before app readiness and
+renderer creation. Native crashes such as SIGTRAP can produce local minidumps even
+when the main process cannot run JavaScript cleanup. Reports are **never uploaded**;
+the system crash handler remains enabled for independent core-dump evidence.
+
+Startup prints `[crash-reporter] Native crash dumps (local only): <directory>`.
+The directory is Electron's `app.getPath('crashDumps')` (normally
+`~/.config/llm-ide/Crashpad` for Linux development). Search beneath the printed
+directory for `.dmp` files; Crashpad's internal subdirectory layout may vary.
+Preserve the dump, terminal stderr, crash time, and installed Electron version for
+analysis. Minidumps require matching native symbols to obtain useful stacks.
+
+Dumps may contain secrets or user content from process memory. Keep them private,
+share only through a trusted channel, and remove them when no longer needed.
+No custom prompt, URL, workspace, or credential annotations are added. Initialization
+failure is logged without aborting startup. Collection cannot recover earlier crashes,
+normal exits, SIGKILL, or failures before Crashpad starts; a missing dump is not proof
+that no crash occurred. Arbitrary model-terminal programs are not covered by Electron
+Crashpad. Enablement takes effect on the **next application launch** after compilation.
+
+The test suite executes the compiled bootstrap with mocked Electron APIs. An opt-in
+native integration test (`LOCALCODE_TEST_NATIVE_CRASH=1`) deliberately crashes a separate,
+windowless Electron fixture using a temporary profile, checks the minidump header, and
+deletes its test artifacts. Linux explicitly self-signals SIGTRAP; other platforms use
+Electron's `process.crash()`. It never loads LocalCode or the real user profile.
+
+### Diagnostics Change Notes — 2026-10-31
+
+- Added local-only early Crashpad initialization; this is instrumentation, not a SIGTRAP fix.
+- Removed the earlier unvalidated Linux GPU-off/X11 startup overrides after the next
+	build activated them in a Wayland session and an X11 presentation error was reported.
+	Electron again selects its display/GPU backend normally; native reporting remains enabled.
+- Design decision: use Electron's out-of-process reporter rather than unsafe native-exit
+	callbacks; retain the default dump directory and OS crash handler without new dependencies.
+
+Diagnostics TODO ledger (completed in the working tree; not yet committed):
+
+- [x] AI-001: Verify Electron Crashpad API and early-start requirements.
+- [x] AI-002: Enable local-only reporting without changing graphics configuration.
+- [x] AI-003: Build; validate startup/failure tests and real isolated SIGTRAP minidump;
+	document privacy and collection limits.
+
+Launch-regression TODO ledger (working tree, not yet committed):
+
+- [x] AI-001: Verify Wayland environment and compiled X11/software overrides.
+- [x] AI-002: Establish a failing regression test, remove the speculative overrides,
+	and retain Crashpad initialization.
+- [x] AI-003: Rebuild; graphics-preservation and native crash collection tests passed 5/5.
+	Launched LocalCode once; Hyprland reported its window mapped, not hidden, and native
+	Wayland (`xwayland: false`). Crashpad remained enabled. The longstanding Mesa/Wayland
+	warnings still appeared, but the reported X11 presentation error did not.
+
+Validation on 2026-10-31: focused tests 4/4 passed, including a real SIGTRAP dump with
+the `MDMP` header. Full suite: 199 passed, 3 failed, 1 skipped (native test is opt-in).
+Remaining failures: renderer reference-workspace tool-list assertion and two TurboVec
+P3 checks reporting missing `numpy`. Whole-dirty-tree structural checks also flag existing
+terminal/guidance changes outside this diagnostics addition; no incompatible callers of
+`startNativeCrashReporter` were reported.
+
 ## What You Get
 
 - Bottom Model Terminal panel that streams live stdout/stderr while model tools run shell commands.

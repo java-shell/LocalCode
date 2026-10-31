@@ -105,6 +105,10 @@ export interface ChatWithToolsResult {
   };
 }
 
+export interface ChatWithToolsRuntimeHooks {
+  consumeUserMessages?: () => Promise<ChatMessage[] | undefined> | ChatMessage[] | undefined;
+}
+
 type ChatWithToolsDebug = NonNullable<ChatWithToolsResult['debug']>;
 const MAX_TOOL_RESULT_MESSAGE_CHARS = 16000;
 const MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS = 3;
@@ -2135,7 +2139,8 @@ export async function chatWithTools(
   onEvent?: (message: string) => void,
   maxToolTurns = 40,
   signal?: AbortSignal,
-  onToken?: (token: string) => void
+  onToken?: (token: string) => void,
+  runtimeHooks?: ChatWithToolsRuntimeHooks
 ): Promise<ChatWithToolsResult> {
   const messages = [...initialMessages];
   const maxTurns = Math.max(1, Math.min(200, Math.floor(maxToolTurns || 40)));
@@ -2196,6 +2201,40 @@ export async function chatWithTools(
 
   if (useOllamaNativeChat && ollamaNativeEndpoint && toPositiveInteger(config.contextWindowTokens)) {
     onEvent?.(`provider:ollama | using native /api/chat with options.num_ctx=${toPositiveInteger(config.contextWindowTokens)}`);
+  }
+
+  async function injectQueuedUserMessages(stage: string): Promise<number> {
+    if (!runtimeHooks?.consumeUserMessages) {
+      return 0;
+    }
+
+    let queued: ChatMessage[] | undefined;
+    try {
+      queued = await runtimeHooks.consumeUserMessages();
+    } catch (error) {
+      onEvent?.(`user-guidance:consume-failed:${error instanceof Error ? error.message : String(error)}`);
+      return 0;
+    }
+
+    if (!Array.isArray(queued) || queued.length === 0) {
+      return 0;
+    }
+
+    const normalized = queued
+      .filter(message => message && message.role === 'user')
+      .map(message => ({
+        role: 'user' as const,
+        content: String(message.content ?? '').trim()
+      }))
+      .filter(message => message.content.length > 0);
+
+    if (normalized.length === 0) {
+      return 0;
+    }
+
+    messages.push(...normalized);
+    onEvent?.(`user-guidance:injected:${stage}:${normalized.length}`);
+    return normalized.length;
   }
 
   async function requestAssistantWithoutTools(
@@ -2510,6 +2549,7 @@ export async function chatWithTools(
   let consecutiveIdenticalToolCallCount = 0;
 
   for (let i = 0; i < maxTurns; i += 1) {
+    await injectQueuedUserMessages('before-llm-turn');
     onEvent?.(`llm-turn:${i + 1}/${maxTurns}`);
     const messageCountBefore = messages.length;
     let assistant: ChatMessage | undefined;

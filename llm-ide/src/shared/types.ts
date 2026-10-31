@@ -114,6 +114,26 @@ export interface NotifyTestResult {
   status?: number;
 }
 
+export interface TerminalProcessInfo {
+  pid: number;
+  command?: string;
+  cwd?: string;
+  startedAt: string;
+  running: boolean;
+  code?: number | null;
+  signal?: string | null;
+}
+
+export interface TerminalProcessListResult {
+  processes: TerminalProcessInfo[];
+  activePid?: number;
+}
+
+export interface TerminalInterruptRequest {
+  pid?: number;
+  signal?: 'SIGINT' | 'SIGTERM' | 'SIGKILL';
+}
+
 
 export interface ChatStreamRequest {
   config: LLMConfig;
@@ -163,6 +183,17 @@ export interface ModelUsage extends TokenUsage {
 export interface ChatStreamResult {
   text: string;
   usageByModel?: ModelUsage[];
+}
+
+export interface ChatGuidanceRequest {
+  sessionId?: string;
+  content: string;
+}
+
+export interface ChatGuidanceResult {
+  accepted: boolean;
+  queued?: number;
+  reason?: string;
 }
 
 export interface ChatSessionConfig {

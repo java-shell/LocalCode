@@ -10,6 +10,8 @@ import {
   BrowserSessionState,
   BrowserSetBoundsRequest,
   BrowserSnapshot,
+  ChatGuidanceRequest,
+  ChatGuidanceResult,
   ChatSession,
   ChatSessionSummary,
   ChatTurnCheckpoint,
@@ -34,7 +36,9 @@ import {
   WorkspaceState,
   WorkspaceTreeNode,
   QueryUserRequest,
-  QueryUserResponse
+  QueryUserResponse,
+  TerminalInterruptRequest,
+  TerminalProcessListResult
 } from './shared/types';
 
 type ChatTokenListener = (token: string) => void;
@@ -47,6 +51,7 @@ type TerminalEventListener = (payload: {
   type: 'start' | 'end';
   command: string;
   cwd: string;
+  pid?: number;
   code?: number | null;
   signal?: string | null;
 }) => void;
@@ -105,6 +110,9 @@ const api = {
   stopChat: async (): Promise<{ stopped: boolean; reason?: string }> => {
     return ipcRenderer.invoke('chat:stop');
   },
+  injectChatGuidance: async (payload: ChatGuidanceRequest): Promise<ChatGuidanceResult> => {
+    return ipcRenderer.invoke('chat:inject-guidance', payload);
+  },
   sendQueryUserResponse: async (payload: QueryUserResponse): Promise<{ accepted: boolean }> => {
     return ipcRenderer.invoke('chat:query-user-response', payload);
   },
@@ -136,6 +144,7 @@ const api = {
         type: 'start' | 'end';
         command: string;
         cwd: string;
+        pid?: number;
         code?: number | null;
         signal?: string | null;
       }
@@ -143,14 +152,17 @@ const api = {
     ipcRenderer.on('terminal:event', wrapped);
     return () => ipcRenderer.removeListener('terminal:event', wrapped);
   },
-  sendTerminalInput: async (payload: { text: string }): Promise<{ sent: boolean; reason?: string }> => {
+  sendTerminalInput: async (payload: { text: string; pid?: number }): Promise<{ sent: boolean; reason?: string }> => {
     return ipcRenderer.invoke('terminal:send-input', payload);
   },
   runTerminalCommand: async (payload: { command: string; cwd?: string }): Promise<{ started: boolean; reason?: string }> => {
     return ipcRenderer.invoke('terminal:run-command', payload);
   },
-  interruptTerminalProcess: async (): Promise<{ interrupted: boolean; reason?: string }> => {
-    return ipcRenderer.invoke('terminal:interrupt');
+  listTerminalProcesses: async (payload?: { includeExited?: boolean; limit?: number }): Promise<TerminalProcessListResult> => {
+    return ipcRenderer.invoke('terminal:list-processes', payload);
+  },
+  interruptTerminalProcess: async (payload?: TerminalInterruptRequest): Promise<{ interrupted: boolean; reason?: string; pid?: number; signal?: string }> => {
+    return ipcRenderer.invoke('terminal:interrupt', payload);
   },
   getBrowserFeatureState: async (): Promise<BrowserFeatureState> => {
     return ipcRenderer.invoke('browser:get-feature-state');

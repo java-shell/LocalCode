@@ -82,6 +82,12 @@
             <input id="terminalInput" placeholder="Type a command, terminal input, or (ctrl+c)" />
             <button id="terminalSend" type="button" class="btn-primary">Send</button>
           </div>
+          <div class="terminal-process-row">
+            <select id="terminalProcessSelect" title="Select running process to target">
+              <option value="">No running process</option>
+            </select>
+            <button id="terminalInterrupt" type="button" class="btn-danger">Interrupt PID</button>
+          </div>
         </div>
       </section>
 
@@ -226,6 +232,9 @@
           <div id="chatComposer" class="chat-composer">
             <label class="label" for="chatPrompt">Prompt</label>
             <textarea id="chatPrompt" placeholder="Ask for code, analysis, or generation..."></textarea>
+            <div id="chatGuidanceIndicator" class="chat-guidance-indicator" role="status" aria-live="polite" hidden>
+              Guidance: idle
+            </div>
             <div class="actions actions-two">
               <button id="chatSend" class="btn-primary">Send</button>
               <button id="chatStop" type="button" class="btn-danger" disabled>Stop</button>

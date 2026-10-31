@@ -381,7 +381,7 @@ body.advanced-fullscreen-active #orchAdvancedView.view.active {
 .terminal-panel {
   border-top: 1px solid var(--border);
   display: grid;
-  grid-template-rows: 36px 1fr 42px;
+  grid-template-rows: 36px 1fr auto auto;
   min-height: 0;
   background: rgba(5, 10, 18, 0.78);
 }
@@ -416,6 +416,14 @@ body.advanced-fullscreen-active #orchAdvancedView.view.active {
   gap: 8px;
   border-top: 1px solid var(--border);
   padding: 6px 8px;
+}
+
+.terminal-process-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding: 6px 8px 8px;
 }
 
 .side-panel {
@@ -861,6 +869,32 @@ button.btn-danger:hover:not(:disabled) {
 .chat-composer {
   display: grid;
   gap: 8px;
+}
+
+.chat-guidance-indicator {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(148, 163, 184, 0.35);
+  background: rgba(148, 163, 184, 0.14);
+  color: #d4deed;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+.chat-guidance-indicator.chat-guidance-queued {
+  border-color: rgba(251, 191, 36, 0.55);
+  background: rgba(251, 191, 36, 0.16);
+  color: #fde68a;
+}
+
+.chat-guidance-indicator.chat-guidance-injected {
+  border-color: rgba(52, 211, 153, 0.52);
+  background: rgba(16, 185, 129, 0.16);
+  color: #a7f3d0;
 }
 
 .chat-think-toggle {

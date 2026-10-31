@@ -45,7 +45,14 @@ interface RuntimeContext {
   promptSpecVersion?: PromptSpecVersion;
   referenceWorkspaces?: ReferenceWorkspace[];
   onTerminalOutput?: (payload: { source: 'stdout' | 'stderr'; text: string }) => void;
-  onTerminalEvent?: (payload: { type: 'start' | 'end'; command: string; cwd: string; code?: number | null; signal?: string | null }) => void;
+  onTerminalEvent?: (payload: {
+    type: 'start' | 'end';
+    command: string;
+    cwd: string;
+    pid?: number;
+    code?: number | null;
+    signal?: string | null;
+  }) => void;
   setActiveTerminalProcess?: (
     child: ChildProcessWithoutNullStreams | null,
     metadata?: {
@@ -65,13 +72,28 @@ interface RuntimeContext {
     code?: number | null;
     signal?: string | null;
   };
-  interruptActiveTerminalProcess?: () => {
+  getTrackedTerminalProcesses?: (payload?: { includeExited?: boolean; limit?: number }) => {
+    processes: Array<{
+      pid: number;
+      command?: string;
+      cwd?: string;
+      startedAt: string;
+      running: boolean;
+      code?: number | null;
+      signal?: string | null;
+    }>;
+    activePid?: number;
+  };
+  interruptActiveTerminalProcess?: (payload?: { pid?: number; signal?: NodeJS.Signals }) => {
     interrupted: boolean;
     reason?: string;
+    pid?: number;
+    signal?: string;
   };
-  waitForActiveTerminalProcess?: (timeoutMs: number) => Promise<{
+  waitForActiveTerminalProcess?: (timeoutMs: number, pid?: number) => Promise<{
     running: boolean;
     timedOut?: boolean;
+    pid?: number;
     code?: number | null;
     signal?: string | null;
   }>;
@@ -652,7 +674,7 @@ export const toolDefinitions: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'terminal_process_status',
-      description: 'Get status of the currently running terminal command (if any).',
+      description: 'Get status of running terminal commands, including all tracked PIDs and active PID.',
       parameters: {
         type: 'object',
         properties: {}
@@ -663,11 +685,12 @@ export const toolDefinitions: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'wait_for_terminal_process',
-      description: 'Wait for the currently running terminal process to complete, or return when wait timeout is reached.',
+      description: 'Wait for a terminal process to complete by PID (or active PID if omitted), or return when timeout is reached.',
       parameters: {
         type: 'object',
         properties: {
-          timeoutMs: { type: 'number' }
+          timeoutMs: { type: 'number' },
+          pid: { type: 'number' }
         }
       }
     }
@@ -676,10 +699,16 @@ export const toolDefinitions: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'interrupt_terminal_process',
-      description: 'Send Ctrl+C (SIGINT) to the currently running terminal process.',
+      description: 'Send a signal (default SIGINT/Ctrl+C) to a terminal process by PID (or active PID if omitted).',
       parameters: {
         type: 'object',
-        properties: {}
+        properties: {
+          pid: { type: 'number' },
+          signal: {
+            type: 'string',
+            enum: ['SIGINT', 'SIGTERM', 'SIGKILL']
+          }
+        }
       }
     }
   },
@@ -1835,12 +1864,6 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
     return { command, scope, cwd: terminalCwd, success: false, code: 1, signal: null, stdout: '', stderr: errMsg };
   }
 
-  context?.onTerminalEvent?.({
-    type: 'start',
-    command,
-    cwd: terminalCwd
-  });
-
   return await new Promise<{
     command: string;
     scope: ToolScope;
@@ -1862,6 +1885,13 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
     const child = spawn(shellConfig.executable, shellConfig.args, {
       cwd,
       env: process.env
+    });
+
+    context?.onTerminalEvent?.({
+      type: 'start',
+      command,
+      cwd: terminalCwd,
+      pid: child.pid
     });
 
     context?.setActiveTerminalProcess?.(child, {
@@ -1917,6 +1947,7 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
         type: 'end',
         command,
         cwd: terminalCwd,
+        pid: child.pid,
         code: result.code,
         signal: result.signal
       });
@@ -2033,6 +2064,7 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
           type: 'end',
           command,
           cwd: terminalCwd,
+          pid: child.pid,
           code,
           signal
         });
@@ -2050,6 +2082,24 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
 
 function terminalProcessStatus(args: Record<string, unknown>, context?: RuntimeContext) {
   void args;
+  const tracked = context?.getTrackedTerminalProcesses?.({ includeExited: false, limit: 100 });
+  if (tracked) {
+    const activeProcess = tracked.activePid != null
+      ? tracked.processes.find(process => process.pid === tracked.activePid)
+      : tracked.processes[0];
+    return {
+      running: tracked.processes.some(process => process.running),
+      activePid: tracked.activePid ?? activeProcess?.pid,
+      processes: tracked.processes,
+      pid: activeProcess?.pid,
+      command: activeProcess?.command,
+      cwd: activeProcess?.cwd,
+      startedAt: activeProcess?.startedAt,
+      code: activeProcess?.code ?? null,
+      signal: activeProcess?.signal ?? null
+    };
+  }
+
   const info = context?.getActiveTerminalProcessInfo?.();
   if (!info || !info.running) {
     return {
@@ -2071,6 +2121,10 @@ function terminalProcessStatus(args: Record<string, unknown>, context?: RuntimeC
 async function waitForTerminalProcess(args: Record<string, unknown>, context?: RuntimeContext) {
   const rawTimeoutMs = Number(args.timeoutMs ?? 30000);
   const timeoutMs = rawTimeoutMs <= 0 ? 0 : Math.max(1000, Math.min(300000, rawTimeoutMs));
+  const requestedPidRaw = Number(args.pid);
+  const requestedPid = Number.isFinite(requestedPidRaw) && requestedPidRaw > 0
+    ? Math.trunc(requestedPidRaw)
+    : undefined;
 
   const info = context?.getActiveTerminalProcessInfo?.();
   if (!info || !info.running) {
@@ -2082,26 +2136,35 @@ async function waitForTerminalProcess(args: Record<string, unknown>, context?: R
     };
   }
 
-  const waited = await context?.waitForActiveTerminalProcess?.(timeoutMs);
+  const waited = await context?.waitForActiveTerminalProcess?.(timeoutMs, requestedPid);
   if (!waited) {
     return {
       running: true,
       timedOut: true,
-      timeoutMs
+      timeoutMs,
+      pid: requestedPid
     };
   }
 
   return {
     running: waited.running,
     timedOut: Boolean(waited.timedOut),
+    pid: waited.pid ?? requestedPid,
     code: waited.code ?? null,
     signal: waited.signal ?? null
   };
 }
 
 function interruptTerminalProcess(args: Record<string, unknown>, context?: RuntimeContext) {
-  void args;
-  const result = context?.interruptActiveTerminalProcess?.();
+  const requestedPidRaw = Number(args.pid);
+  const requestedPid = Number.isFinite(requestedPidRaw) && requestedPidRaw > 0
+    ? Math.trunc(requestedPidRaw)
+    : undefined;
+  const signalRaw = String(args.signal ?? 'SIGINT').toUpperCase();
+  const signal = (['SIGINT', 'SIGTERM', 'SIGKILL'].includes(signalRaw)
+    ? signalRaw
+    : 'SIGINT') as NodeJS.Signals;
+  const result = context?.interruptActiveTerminalProcess?.({ pid: requestedPid, signal });
   if (!result) {
     return {
       interrupted: false,

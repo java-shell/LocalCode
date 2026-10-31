@@ -364,18 +364,30 @@ export class BrowserSessionManager {
     }
   }
 
+  /** Apply changed normalized viewport bounds; unchanged requests succeed without events.
+   * The renderer synchronizes bounds on browser state events, so emitting for identical
+   * bounds creates an unbounded IPC echo loop. Compare before updating timestamps or views;
+   * real size/position/visibility changes retain their existing application and event behavior.
+   */
   setBounds(request: BrowserSetBoundsRequest): BrowserNavigateResult {
     if (!this.featureState.enabled) {
       return this.disabledResult();
     }
 
-    this.bounds = {
+    const nextBounds = {
       x: Math.max(0, Math.floor(request.x)),
       y: Math.max(0, Math.floor(request.y)),
       width: Math.max(0, Math.floor(request.width)),
       height: Math.max(0, Math.floor(request.height)),
       visible: request.visible !== false
     };
+
+    if (this.bounds && this.bounds.x === nextBounds.x && this.bounds.y === nextBounds.y &&
+        this.bounds.width === nextBounds.width && this.bounds.height === nextBounds.height &&
+        this.bounds.visible === nextBounds.visible) {
+      return { ok: true, state: this.getState() };
+    }
+    this.bounds = nextBounds;
 
     this.state = {
       ...this.state,
