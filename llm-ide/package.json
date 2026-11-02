@@ -11,6 +11,7 @@
     "compile": "npm run build",
     "test": "npm run build && node --test \"out/tests/**/*.test.js\"",
     "watch": "tsc -w -p ./",
+    "prestart": "npm run build",
     "start": "electron .",
     "dev": "npm run build && electron .",
     "dist:linux": "npm run build && electron-builder --linux AppImage",
@@ -72,6 +73,6 @@
   "dependencies": {
     "axios": "^1.6.0",
     "monaco-editor": "^0.52.2",
-    "simple-git": "^3.0.0"
+    "simple-git": "^4.0.2"
   }
 }

@@ -3,6 +3,70 @@
 LocalCode is a standalone desktop platform built with Electron.
 It is not a VS Code extension.
 
+## Startup and Dependency Change Notes — 2026-11-01
+
+Working-tree fixes for version **1.0.1** (not yet packaged or committed):
+
+- **Startup fix:** `npm start` now runs `npm run build` through npm's `prestart`
+	lifecycle hook before launching Electron. The reported `onBrowserEvent` TypeError
+	came from an older compiled preload missing the browser APIs already defined in
+	TypeScript. Rebuilding the main/preload pair keeps it aligned with the renderer;
+	no browser API, permission, or UI behavior was changed. Compile failures prevent launch.
+- **Security fix:** upgraded `simple-git` from 3.36.0 to **4.0.2**, including
+	`@simple-git/argv-parser` **2.0.1**, and migrated the internal import to the named
+	`simpleGit` export required by v4. This resolves the critical Git command/configuration
+	and editor-environment advisories. Existing Git tool inputs/results are unchanged;
+	v4's stricter unsafe-option/environment filtering remains enabled. No unsafe opt-ins
+	or dependency overrides were added. Existing lockfile security updates were retained.
+
+### Audit Status and Remaining Risk
+
+On 2026-11-01, `npm audit --omit=dev` reports **0 vulnerabilities**. The full audit
+reports **15 moderate, 0 high, and 0 critical** findings, all propagated from
+[GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249) in
+Electron Builder's development-only `minimatch` dependency chains. This is a potential
+CPU/memory denial of service from attacker-controlled glob patterns, not a clean full audit.
+
+The installed Electron Builder **26.18.1** still depends on affected versions; even
+**27.0.0-alpha.14** declares affected dependencies. The advisory lists **11.0.1** as
+the first patched `minimatch`. A global override is not compatible with consumers such
+as `dir-compare` that call the older function export. npm's proposed forced fix would
+downgrade Electron Builder to **20.23.1**; that was rejected to preserve packaging.
+`npm audit fix --dry-run` proposes no compatible changes.
+
+Until compatible upstream fixes are available, build only reviewed/trusted source
+and packaging configuration; do not pass untrusted glob patterns to the packaging
+toolchain. Recheck the full audit before each release. The remaining development
+findings are deferred, not suppressed or claimed fixed. Existing installers and
+unpacked distribution artifacts were not regenerated and do not contain these fixes.
+
+### Verification and TODO Ledger
+
+Scope/risk: one startup lifecycle hook, one dependency major-version migration with
+its required import adaptation, and isolated tests. No application API changes or new
+dependencies. Git integration fixtures use disposable repositories, local test identity,
+and disabled hooks/signing; the Electron fixture uses a hidden window and temporary
+profile, without the real application, user data, workspace, or network content.
+
+- [x] **AI-001:** Confirm stale compiled preload and reproduce the missing `prestart`
+	safeguard test failure before applying the fix.
+- [x] **AI-002:** Add `prestart`; retain/extend compiled bridge contract coverage and
+	add an opt-in real context-isolated Electron bridge fixture.
+- [x] **AI-003:** Apply the patched Git dependency/import; Git status, diff, staging,
+	commit, tracked-tree enumeration, and non-repository compatibility tests pass.
+- [x] **AI-004:** Build and editor diagnostics pass; focused tests **10/10 pass**, including
+	real Electron IPC. Full suite: **205 passed, 6 failed, 2 skipped**. Remaining failures
+	were present before these fixes: one renderer reference-workspace assertion, one
+	Windows terminal-timeout assertion, and four TurboVec assertions with a broken Python
+	environment (`failed to locate pyvenv.cfg`). Production audit is clean; diff whitespace
+	checks pass. Completion references are these working-tree changes; no commit/PR exists.
+- [ ] **AI-005 (deferred/upstream):** Resolve the 15 moderate packaging findings when
+	compatible upstream patches exist; validate packaging before adoption.
+
+The real Electron check is opt-in via `LOCALCODE_TEST_ELECTRON_BROWSER=1` when running
+the test suite on a machine capable of launching Electron. The separate native-crash
+fixture remains opt-in and was not needed for this change.
+
 ## Native Crash Diagnostics
 
 ### Patched Runtime and IPC Churn — 2026-10-31
@@ -237,16 +301,15 @@ Access from the **Orchestration** tab → **Import Preset** button:
 ## Run
 
 1. Install dependencies.
-2. Build TypeScript.
-3. Start Electron.
+2. Start Electron; npm automatically builds TypeScript before launch.
 
 Commands:
 
 - `npm install`
-- `npm run build`
 - `npm start`
 
-For a one-shot dev run:
+Use `npm run build` for compilation only. For a one-shot build-and-launch dev run
+(equivalent to `npm start`, not a live-reload watcher):
 
 - `npm run dev`
 
