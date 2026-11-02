@@ -79,6 +79,16 @@ const api = {
   getLockedNamespaces: async (): Promise<{ ok: boolean; lockedNamespaces?: string[]; reason?: string }> => {
     return ipcRenderer.invoke('memory:get-locked-namespaces');
   },
+  /** Send explicit, session-scoped Side-Bar controls; never exposed as a tool. */
+  chatSideBar: async (payload: import('./shared/types').ChatSideBarRequest): Promise<import('./shared/types').ChatSideBarResult> => {
+    return ipcRenderer.invoke('chat:sidebar', payload);
+  },
+  /** Subscribe to metadata-only pause/reply state; return a listener disposer. */
+  onChatSideBarState: (listener: (state: import('./shared/types').ChatSideBarState) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, state: import('./shared/types').ChatSideBarState) => listener(state);
+    ipcRenderer.on('chat:sidebar-state', wrapped);
+    return () => ipcRenderer.removeListener('chat:sidebar-state', wrapped);
+  },
   chatStream: async (payload: ChatStreamRequest): Promise<ChatStreamResult> => {
     return ipcRenderer.invoke('chat:stream', payload);
   },

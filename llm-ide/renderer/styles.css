@@ -871,6 +871,37 @@ button.btn-danger:hover:not(:disabled) {
   gap: 8px;
 }
 
+/* Side-Bar reuses the established composer/theme instead of a separate UI stack. */
+.actions.chat-composer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chat-composer-actions button {
+  flex: 1 1 auto;
+}
+
+.chat-sidebar-status {
+  padding: 8px 10px;
+  border: 1px solid #649ba8;
+  border-radius: 8px;
+  background: #19313b;
+  color: #e0f7ff;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.chat-sidebar-status[hidden] {
+  display: none;
+}
+
+.chat-sidebar-active #chatSideBar {
+  border-color: #9adeee;
+  color: #e0f7ff;
+  background: #19313b;
+}
+
 .chat-guidance-indicator {
   justify-self: start;
   display: inline-flex;
@@ -883,6 +914,10 @@ button.btn-danger:hover:not(:disabled) {
   color: #d4deed;
   font-size: 11px;
   letter-spacing: 0.02em;
+}
+
+.chat-guidance-indicator[hidden] {
+  display: none;
 }
 
 .chat-guidance-indicator.chat-guidance-queued {

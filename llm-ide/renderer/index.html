@@ -235,8 +235,10 @@
             <div id="chatGuidanceIndicator" class="chat-guidance-indicator" role="status" aria-live="polite" hidden>
               Guidance: idle
             </div>
-            <div class="actions actions-two">
+            <div id="chatSideBarStatus" class="chat-sidebar-status" role="status" aria-live="polite" hidden></div>
+            <div class="actions chat-composer-actions">
               <button id="chatSend" class="btn-primary">Send</button>
+              <button id="chatSideBar" type="button" aria-pressed="false" aria-describedby="chatSideBarStatus" disabled>Start Side-Bar</button>
               <button id="chatStop" type="button" class="btn-danger" disabled>Stop</button>
             </div>
           </div>

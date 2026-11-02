@@ -107,6 +107,8 @@ export interface ChatWithToolsResult {
 
 export interface ChatWithToolsRuntimeHooks {
   consumeUserMessages?: () => Promise<ChatMessage[] | undefined> | ChatMessage[] | undefined;
+  /** Cooperative pause after all pending tool results; replies do not use work turns. */
+  atSafeBoundary?: (replyWithoutTools: (content: string) => Promise<string>) => Promise<void>;
 }
 
 type ChatWithToolsDebug = NonNullable<ChatWithToolsResult['debug']>;
@@ -1627,10 +1629,12 @@ function ollamaResponseToAssistant(response: OllamaNativeChatResponse): ChatMess
   };
 }
 
+/** Build the OpenAI wire body, excluding local display labels and reserving runtime-controlled tool fields. */
 function payloadBase(config: LLMConfig, messages: ChatMessage[]): Record<string, unknown> {
   const payload: Record<string, unknown> = {
     model: normalizeOpenAICompatibleModelId(config.endpoint, config.model),
-    messages,
+    // UI/persistence labels are not part of the OpenAI message schema.
+    messages: messages.map(({ sideBar: _sideBar, ...message }) => message),
     temperature: config.temperature
   };
   if ((config.maxTokens ?? 0) > 0) {
@@ -2131,6 +2135,14 @@ export async function listModels(config: Pick<LLMConfig, 'endpoint' | 'apiKey' |
   return catalog.models;
 }
 
+/**
+ * Run budgeted model/tool turns with coherent call/result history. Optional
+ * runtime hooks inject guidance and cooperatively pause at safe boundaries;
+ * tool-free Side-Bar replies share context/usage but not the work-turn counter.
+ * Provider and cancellation errors propagate. Tool errors become tool results.
+ * The caller owns persistence and the user-only pause controls; no new model
+ * permissions or automated decisions are introduced by these hooks.
+ */
 export async function chatWithTools(
   config: LLMConfig,
   initialMessages: ChatMessage[],
@@ -2239,10 +2251,21 @@ export async function chatWithTools(
 
   async function requestAssistantWithoutTools(
     prompt: string,
-    options?: { disableThinking?: boolean; normalizeOutput?: boolean }
+    options?: { disableThinking?: boolean; normalizeOutput?: boolean; sideBar?: boolean }
   ): Promise<string | null> {
+    // Legacy function definitions in advanced settings must not bypass the
+    // tool-free Side-Bar contract. All other generation settings are retained.
+    const requestConfig = options?.sideBar ? {
+      ...config,
+      openaiParameters: Object.fromEntries(Object.entries(config.openaiParameters ?? {})
+        .filter(([key]) => !['functions', 'function_call', 'parallel_tool_calls'].includes(key)))
+    } : config;
     const summaryMessages: ChatMessage[] = [
       ...messages,
+      ...(options?.sideBar ? [{
+        role: 'system' as const,
+        content: 'Side-Bar mode: work is paused. Answer only the user\'s conversational question using the context to date. Do not call tools, continue implementation, or expose hidden reasoning. This is not a request to finish the task. Work resumes only when the user explicitly resumes it.'
+      }] : []),
       {
         role: 'user',
         content: prompt
@@ -2274,6 +2297,16 @@ export async function chatWithTools(
 
     let streamedTokenCount = 0;
 
+    /** Reject unsolicited Side-Bar calls without executing them; share text normalization across transports. */
+    const responseText = (assistant?: ChatMessage): string | null => {
+      if (options?.sideBar && assistant?.tool_calls?.length) {
+        throw new Error('Side-Bar requires a text response; tools are disabled.');
+      }
+      const text = String(assistant?.content ?? '').trim();
+      if (!text) return null;
+      return options?.normalizeOutput ? normalizeThinkingSummaryOutput(text) : text;
+    };
+
     const attemptRequest = async (requestMessages: ChatMessage[], useStream: boolean) => {
       streamedTokenCount = 0;
       const countToken = () => {
@@ -2282,7 +2315,7 @@ export async function chatWithTools(
 
       if (useOllamaNativeChat && ollamaNativeEndpoint) {
         const payload = buildOllamaNativePayload(
-          { ...config, ollamaThink: options?.disableThinking ? false : config.ollamaThink },
+          { ...requestConfig, ollamaThink: options?.disableThinking ? false : config.ollamaThink },
           normalizeForStrictSystemTemplates(ensureOllamaUserPrompt(requestMessages)),
           []
         );
@@ -2310,17 +2343,13 @@ export async function chatWithTools(
         usageTotals.completionTokens += usage.completionTokens;
         usageTotals.totalTokens += usage.totalTokens;
         usageTotals.requests += 1;
-        const text = String(response.assistant?.content ?? '').trim();
-        if (!text) {
-          return null;
-        }
-        return options?.normalizeOutput ? normalizeThinkingSummaryOutput(text) : text;
+        return responseText(response.assistant);
       }
 
       if (useStream) {
         const streamed = await streamOpenAICompatibleChat(
           openAICompletionEndpoint,
-          payloadBase(config, requestMessages),
+          payloadBase(requestConfig, requestMessages),
           buildHeaders(config),
           requestTimeoutMs,
           signal,
@@ -2331,15 +2360,11 @@ export async function chatWithTools(
         usageTotals.completionTokens += usage.completionTokens;
         usageTotals.totalTokens += usage.totalTokens;
         usageTotals.requests += 1;
-        const text = String(streamed.assistant?.content ?? '').trim();
-        if (!text) {
-          return null;
-        }
-        return options?.normalizeOutput ? normalizeThinkingSummaryOutput(text) : text;
+        return responseText(streamed.assistant);
       }
 
       const payload: Record<string, unknown> = {
-        ...payloadBase(config, requestMessages),
+        ...payloadBase(requestConfig, requestMessages),
         stream: false
       };
       const response = await axios.post<CompletionResponse>(openAICompletionEndpoint, payload, {
@@ -2352,11 +2377,7 @@ export async function chatWithTools(
       usageTotals.completionTokens += usage.completionTokens;
       usageTotals.totalTokens += usage.totalTokens;
       usageTotals.requests += 1;
-      const text = String(response.data.choices?.[0]?.message?.content ?? '').trim();
-      if (!text) {
-        return null;
-      }
-      return options?.normalizeOutput ? normalizeThinkingSummaryOutput(text) : text;
+      return responseText(response.data.choices?.[0]?.message);
     };
 
     try {
@@ -2409,6 +2430,34 @@ export async function chatWithTools(
         }
       }
       throw error;
+    }
+  }
+
+  /**
+   * Offer the live, coherent history to the optional pause gate. Side-Bar
+   * exchanges use the existing tool-free provider/overflow path, append only
+   * successful pairs, and never increment the outer work-turn counter.
+   */
+  async function visitSafeBoundary(): Promise<void> {
+    if (signal?.aborted) throw new Error('Chat request canceled');
+    let exchanges = 0;
+    await runtimeHooks?.atSafeBoundary?.(async content => {
+      const text = await requestAssistantWithoutTools(content, { disableThinking: true, sideBar: true });
+      if (signal?.aborted) throw new Error('Chat request canceled');
+      if (!text) throw new Error('Side-Bar returned an empty response. Please retry.');
+      messages.push(
+        { role: 'user', content, sideBar: true },
+        { role: 'assistant', content: text, sideBar: true }
+      );
+      exchanges += 1;
+      return text;
+    });
+    if (signal?.aborted) throw new Error('Chat request canceled');
+    if (exchanges > 0) {
+      messages.push({
+        role: 'system',
+        content: 'Side-Bar has ended. Resume the original work from the completed tool results, incorporating the user\'s Side-Bar decisions and corrections. Do not treat the last conversational question as a replacement task. Respect any user instruction to stop or change scope.'
+      });
     }
   }
 
@@ -2550,6 +2599,7 @@ export async function chatWithTools(
 
   for (let i = 0; i < maxTurns; i += 1) {
     await injectQueuedUserMessages('before-llm-turn');
+    await visitSafeBoundary();
     onEvent?.(`llm-turn:${i + 1}/${maxTurns}`);
     const messageCountBefore = messages.length;
     let assistant: ChatMessage | undefined;
@@ -2825,6 +2875,7 @@ export async function chatWithTools(
     usageTotals.requests += 1;
     if (!assistant) {
       const recoveredSummary = await requestFinalSummary('missing-assistant-message');
+      await visitSafeBoundary();
       return {
         text: recoveredSummary ?? '',
         usage: usageTotals,
@@ -2859,6 +2910,7 @@ export async function chatWithTools(
         messageCountAfter: messages.length,
         assistantToolCalls: 0
       });
+      await visitSafeBoundary();
       return {
         text: finalText,
         usage: usageTotals,
@@ -3054,6 +3106,8 @@ export async function chatWithTools(
       messageCountAfter: messages.length,
       assistantToolCalls
     });
+    await injectQueuedUserMessages('after-tool-batch');
+    await visitSafeBoundary();
   }
 
   const exhaustedMessage = `Tool-call budget reached (${maxTurns}) for this response.`;
@@ -3070,6 +3124,7 @@ export async function chatWithTools(
     );
     if (summary) {
       onEvent?.('final-summary:received:tool-budget-exhausted');
+      await visitSafeBoundary();
       return {
         text: `${exhaustedMessage}\n\n${summary}`,
         usage: usageTotals,
@@ -3083,6 +3138,7 @@ export async function chatWithTools(
     onEvent?.(`final-summary:failed:tool-budget-exhausted:${error instanceof Error ? error.message : String(error)}`);
   }
 
+  await visitSafeBoundary();
   return {
     text: `${exhaustedMessage}\n\nSummary unavailable. Please continue from this state or raise the per-step tool-call budget.`,
     usage: usageTotals,

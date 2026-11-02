@@ -12,10 +12,12 @@ function getChatSessionStorePath(): string {
   return path.join(app.getPath('userData'), 'chat-sessions.json');
 }
 
+/** Normalize persisted visible messages, retaining optional Side-Bar labels for legacy-compatible reloads. */
 function normalizeChatMessage(message: ChatMessage): ChatMessage {
   return {
     role: message.role,
     content: String(message.content ?? ''),
+    sideBar: message.sideBar === true ? true : undefined,
     tool_call_id: message.tool_call_id ? String(message.tool_call_id) : undefined,
     tool_calls: Array.isArray(message.tool_calls)
       ? message.tool_calls.map(call => ({

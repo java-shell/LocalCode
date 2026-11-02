@@ -27,6 +27,8 @@ export interface ToolCall {
 export interface ChatMessage {
   role: ChatRole;
   content: string;
+  /** Display/persistence metadata only; never forwarded as a provider parameter. */
+  sideBar?: boolean;
   tool_call_id?: string;
   tool_calls?: ToolCall[];
 }
@@ -194,6 +196,24 @@ export interface ChatGuidanceResult {
   accepted: boolean;
   queued?: number;
   reason?: string;
+}
+
+export interface ChatSideBarState {
+  sessionId: string;
+  mode: 'running' | 'pending' | 'paused' | 'closed';
+  busy: boolean;
+}
+
+export interface ChatSideBarRequest {
+  sessionId: string;
+  action: 'start' | 'resume' | 'message';
+  content?: string;
+}
+
+export interface ChatSideBarResult {
+  accepted: boolean;
+  reason?: string;
+  text?: string;
 }
 
 export interface ChatSessionConfig {

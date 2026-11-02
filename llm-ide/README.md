@@ -3,6 +3,39 @@
 LocalCode is a standalone desktop platform built with Electron.
 It is not a VS Code extension.
 
+## Chat Side-Bar — feature v1.0.0 (2026-11-02)
+
+While a chat task is running, click **Start Side-Bar** beside **Send** to pull
+the assistant aside without stopping its work permanently:
+
+1. The button changes to **Cancel Side-Bar** while the current model request
+	and its entire tool batch finish. No tool operation is interrupted. If a
+	`query_user` question is pending, answer it first so that tool can finish.
+2. Once paused, use **Send Side-Bar** for one user message / one assistant
+	reply at a time. Tools, MCP calls, and sub-agents cannot be invoked by these
+	replies. Send and Resume are disabled while a reply is being generated.
+3. Click **Resume Work** to continue the same task and remaining work-turn
+	budget. All successful Side-Bar exchanges stay in its live context and are
+	saved in chat history with Side-Bar labels. **Stop** still cancels the run.
+
+Side-Bar messages do **not** consume work turns; their actual model requests
+and tokens still contribute to usage totals. They see the current working
+context: instructions, prior conversation, memory already injected, and tool
+results. The model's existing context-window limits and compaction policies
+still apply; this is not unlimited raw-history retention. The active provider
+and model remain those of the running task.
+
+Known limitations: Side-Bar is available only during an active Chat run, not
+Orchestration or idle chat. Replies appear as complete messages (not partial
+streams). Restarting the app restores saved exchanges, not the in-memory paused
+execution; existing interrupted-run recovery applies. Failed replies retain the
+draft and leave work paused. Session switching, creation, and deletion are locked
+while a run owns the history. No new dependencies or settings migration are needed.
+
+Design, risk assessment, test evidence, and the task ledger are recorded in
+[CHAT_SIDEBAR.md](CHAT_SIDEBAR.md). Existing UI/theme conventions are retained
+instead of introducing the Flask-based Assistant Coach scaffold into Electron.
+
 ## Startup and Dependency Change Notes — 2026-11-01
 
 Working-tree fixes for version **1.0.1** (not yet packaged or committed):

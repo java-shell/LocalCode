@@ -3156,6 +3156,8 @@ async function initChat() {
   const prompt = document.getElementById('chatPrompt');
   const chatGuidanceIndicator = document.getElementById('chatGuidanceIndicator');
   const send = document.getElementById('chatSend');
+  const sideBarButton = document.getElementById('chatSideBar');
+  const sideBarStatus = document.getElementById('chatSideBarStatus');
   const stop = document.getElementById('chatStop');
   const ollamaThinkMode = document.getElementById('chatOllamaThinkMode');
   const ollamaStreamingMode = document.getElementById('chatOllamaStreamingMode');
@@ -3338,13 +3340,14 @@ async function initChat() {
     return cleaned.length > 56 ? `${cleaned.slice(0, 56)}...` : cleaned;
   }
 
-  function renderAssistantMessage(markdownText) {
+  /** Render sanitized assistant Markdown with an optional persisted Side-Bar label; returns live DOM handles. */
+  function renderAssistantMessage(markdownText, sideBar = false) {
     const assistantRow = document.createElement('div');
     assistantRow.className = 'log-line log-line-assistant';
 
     const assistantLabel = document.createElement('div');
     assistantLabel.className = 'assistant-label';
-    assistantLabel.textContent = 'Assistant:';
+    assistantLabel.textContent = sideBar ? 'Assistant (Side-Bar):' : 'Assistant:';
 
     const assistantMarkdown = document.createElement('div');
     assistantMarkdown.className = 'assistant-markdown';
@@ -3363,11 +3366,11 @@ async function initChat() {
     for (const message of messages) {
       if (!message || typeof message !== 'object') continue;
       if (message.role === 'assistant') {
-        renderAssistantMessage(String(message.content || ''));
+        renderAssistantMessage(String(message.content || ''), message.sideBar === true);
         continue;
       }
       if (message.role === 'user') {
-        appendLog(conversation, `You: ${String(message.content || '')}`);
+        appendLog(conversation, `You${message.sideBar ? ' (Side-Bar)' : ''}: ${String(message.content || '')}`);
       }
     }
   }
@@ -3787,7 +3790,116 @@ async function initChat() {
   let assistantReceivedToken = false;
   let markdownRenderQueued = false;
   let chatRunning = false;
+  let sideBarMode = 'running';
+  let sideBarReplyBusy = false;
+  let sideBarUiBusy = false;
+  let sideBarControlBusy = false;
   let guidanceIndicatorResetTimer = null;
+
+  /**
+   * Keep the existing composer in work/guidance or one-at-a-time Side-Bar mode.
+   * Pending pauses cannot send guidance accidentally; session changes stay
+   * locked until the owning run unwinds. Uses native accessible buttons/status.
+   */
+  function syncSideBarControls() {
+    const paused = sideBarMode === 'paused';
+    const pending = sideBarMode === 'pending';
+    const busy = sideBarReplyBusy || sideBarUiBusy || sideBarControlBusy;
+    sideBarButton.textContent = {
+      running: 'Start Side-Bar', pending: 'Cancel Side-Bar', paused: 'Resume Work', closed: 'Start Side-Bar'
+    }[sideBarMode];
+    sideBarButton.disabled = !chatRunning || busy || sideBarMode === 'closed';
+    sideBarButton.setAttribute('aria-pressed', String(paused || pending));
+    send.textContent = paused ? 'Send Side-Bar' : 'Send';
+    send.disabled = pending || busy || sideBarMode === 'closed';
+    sideBarStatus.hidden = !chatRunning || sideBarMode === 'running';
+    sideBarStatus.textContent = {
+      running: '',
+      pending: 'Side-Bar requested. Waiting for the current model/tool turn to finish. Answer any pending model question first.',
+      paused: busy ? 'Side-Bar: waiting for the model reply… Work remains paused.'
+        : 'Side-Bar: work paused. No tools or work turns used. Resume Work when ready.',
+      closed: 'Chat stopping…'
+    }[sideBarMode];
+    document.getElementById('chatComposer').classList.toggle('chat-sidebar-active', paused || pending);
+    chatSessionList.disabled = chatRunning;
+    chatNewSession.disabled = chatRunning;
+    chatDeleteSession.disabled = chatRunning;
+    if (paused || pending) setGuidanceIndicator('idle', '', { keepVisibleWhenIdle: false });
+  }
+
+  /** Receive only this session's pause state; never treat Side-Bar text as work tokens. */
+  const offSideBarState = window.llmIde.onChatSideBarState(state => {
+    if (state.sessionId !== activeChatSessionId || !chatRunning) return;
+    const entering = state.mode === 'paused' && sideBarMode !== 'paused';
+    sideBarMode = state.mode;
+    sideBarReplyBusy = Boolean(state.busy);
+    if (entering) {
+      closeAssistantBlock();
+      removeRunningIndicator();
+      prompt.focus();
+    } else if (state.mode === 'running') {
+      ensureRunningIndicator();
+    }
+    syncSideBarControls();
+  });
+
+  /** Request/cancel a cooperative pause or resume the same run; report IPC rejection without losing drafts. */
+  sideBarButton.addEventListener('click', async () => {
+    if (!chatRunning || sideBarControlBusy || sideBarUiBusy || sideBarReplyBusy) return;
+    sideBarControlBusy = true;
+    syncSideBarControls();
+    try {
+      const result = await window.llmIde.chatSideBar({
+        sessionId: activeChatSessionId,
+        action: sideBarMode === 'running' ? 'start' : 'resume'
+      });
+      if (!result?.accepted) status.textContent = `Side-Bar unavailable: ${result?.reason || 'rejected'}`;
+    } catch (error) {
+      status.textContent = `Side-Bar failed: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      sideBarControlBusy = false;
+      syncSideBarControls();
+    }
+  });
+
+  /**
+   * Send one conversational message, then save its successful pair using the
+   * existing session store. No guidance queue, new work run, or tool budget is
+   * involved. Hold UI controls through persistence to avoid resume/save races.
+   * Provider failures retain the draft and leave work paused for retry/stop.
+   */
+  async function sendSideBarMessage(text) {
+    if (sideBarUiBusy || sideBarReplyBusy || sideBarControlBusy) return;
+    sideBarUiBusy = true;
+    syncSideBarControls();
+    try {
+      const result = await window.llmIde.chatSideBar({
+        sessionId: activeChatSessionId, action: 'message', content: text
+      });
+      if (!result?.accepted) {
+        status.textContent = `Side-Bar message rejected: ${result?.reason || 'rejected'}`;
+        return;
+      }
+      activeChatMessages.push(
+        { role: 'user', content: text, sideBar: true },
+        { role: 'assistant', content: result.text, sideBar: true }
+      );
+      appendLog(conversation, `You (Side-Bar): ${text}`);
+      renderAssistantMessage(result.text, true);
+      if (prompt.value.trim() === text) {
+        prompt.value = '';
+        settingsState.chatDraftText = '';
+        saveSettings();
+      }
+      await persistActiveChatSession();
+      status.textContent = 'Side-Bar reply received. Work remains paused.';
+    } catch (error) {
+      status.textContent = `Side-Bar failed: ${error instanceof Error ? error.message : String(error)}`;
+    } finally {
+      sideBarUiBusy = false;
+      syncSideBarControls();
+    }
+  }
 
   function clearGuidanceIndicatorResetTimer() {
     if (guidanceIndicatorResetTimer) {
@@ -3853,6 +3965,7 @@ async function initChat() {
     runningIndicatorEl = null;
   }
 
+  /** Toggle run indicators and session ownership locks; ending a run also resets Side-Bar controls. */
   function setChatRunning(running) {
     chatRunning = running;
     send.disabled = false;
@@ -3861,9 +3974,12 @@ async function initChat() {
       ensureRunningIndicator();
       setGuidanceIndicator('idle', 'Guidance: ready to queue', { keepVisibleWhenIdle: true });
     } else {
+      sideBarMode = 'running';
+      sideBarReplyBusy = false;
       removeRunningIndicator();
       setGuidanceIndicator('idle', 'Guidance: idle', { keepVisibleWhenIdle: false });
     }
+    syncSideBarControls();
   }
 
   function ensureAssistantMessageRendered() {
@@ -4822,9 +4938,11 @@ async function initChat() {
     await loadChatSessionById(chatSessionList.value);
   });
   chatNewSession.addEventListener('click', async () => {
+    if (chatRunning) return;
     await createNewChatSession();
   });
   chatDeleteSession.addEventListener('click', async () => {
+    if (chatRunning) return;
     if (!activeChatSessionId) return;
     const removed = await window.llmIde.deleteChatSession({ id: activeChatSessionId });
     if (!removed?.deleted) {
@@ -4863,6 +4981,12 @@ async function initChat() {
   send.addEventListener('click', async () => {
     const text = prompt.value.trim();
     if (!text) return;
+
+    if (sideBarMode === 'paused') {
+      await sendSideBarMessage(text);
+      return;
+    }
+    if (sideBarMode !== 'running' || sideBarControlBusy || sideBarUiBusy) return;
 
     if (chatRunning) {
       try {
@@ -5021,6 +5145,7 @@ async function initChat() {
   });
 
   window.addEventListener('beforeunload', () => {
+    offSideBarState();
     offToken();
     offChatEvent();
     offQueryUser();

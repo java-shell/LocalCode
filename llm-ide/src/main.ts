@@ -5,6 +5,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { ChildProcessWithoutNullStreams } from 'child_process';
 import { chatWithTools, listModelCatalog } from './backend/llmClient';
+import { ChatSideBar } from './backend/chatSideBar';
 import { runOrchestration } from './backend/orchestrationEngine';
 import { deleteChatSession, listChatSessions, loadChatSession, saveChatSession } from './backend/chatSessionStore';
 import {
@@ -34,6 +35,8 @@ import {
   BrowserSetBoundsRequest,
   ChatGuidanceRequest,
   ChatGuidanceResult,
+  ChatSideBarRequest,
+  ChatSideBarResult,
   ChatSession,
   ChatStreamResult,
   ChatMessage,
@@ -75,6 +78,7 @@ let activeChatAbortController: AbortController | null = null;
 let activeChatSessionId: string | null = null;
 let activeChatSender: Electron.WebContents | null = null;
 let activeChatGuidanceQueue: Array<{ content: string; createdAt: string }> = [];
+let activeChatSideBar: ChatSideBar | null = null;
 let activeOrchestrationAbortController: AbortController | null = null;
 const fileWatchRefs = new Map<string, { count: number; listener: (curr: fs.Stats, prev: fs.Stats) => void }>();
 let turboMemory: TurboVecMemory | null = null;
@@ -1324,6 +1328,7 @@ app.on('window-all-closed', () => {
 ipcMain.handle(
   'chat:stream',
   async (event, payload: ChatStreamRequest): Promise<ChatStreamResult> => {
+    if (activeChatAbortController) throw new Error('A chat run is already active.');
     const durableRunId = createDurableRunId('chat');
     const config: LLMConfig = {
       ...payload.config,
@@ -1358,6 +1363,13 @@ ipcMain.handle(
     activeChatSessionId = checkpointSessionId || null;
     activeChatSender = event.sender;
     activeChatGuidanceQueue = [];
+    const sideBar = new ChatSideBar(checkpointSessionId, state => {
+      if (!event.sender.isDestroyed()) event.sender.send('chat:sidebar-state', state);
+    });
+    activeChatSideBar = sideBar;
+    // Closing a renderer must not leave the run waiting forever at a pause gate.
+    const onSenderDestroyed = () => abortController.abort();
+    event.sender.once('destroyed', onSenderDestroyed);
     let streamedAssistantText = '';
     let checkpointStreamingMarked = false;
 
@@ -1419,13 +1431,6 @@ ipcMain.handle(
     const messages: ChatMessage[] = [];
     const systemPromptSections: string[] = [];
     const promptSpecVersion = normalizePromptSpecVersion(payload.promptSpecVersion);
-    const enabledMcpServers = await listMcpServersForTarget('chat');
-    const enabledMcpToolDefs = mcpServerManager.getToolDefinitionsForTarget('chat');
-    const enabledMcpToolNames = enabledMcpToolDefs.map(tool => tool.function.name);
-    const enabledMcpServerIds = new Set(enabledMcpServers.map(server => server.id));
-    const mcpRuntimeStatuses = mcpServerManager
-      .getRuntimeStatus()
-      .filter(status => enabledMcpServerIds.has(status.serverId));
     let recalledMemorySystemSection = '';
     let recalledPromptTokens = 0;
     const normalizedHistoryMessages = Array.isArray(payload.historyMessages)
@@ -1442,6 +1447,15 @@ ipcMain.handle(
       .filter(message => (message.role === 'user' || message.role === 'assistant') && message.content.trim().length > 0);
 
     try {
+      // Startup failures must unwind the same ownership/pause gate as failures
+      // during generation; otherwise the next chat would remain locked out.
+      const enabledMcpServers = await listMcpServersForTarget('chat');
+      const enabledMcpToolDefs = mcpServerManager.getToolDefinitionsForTarget('chat');
+      const enabledMcpToolNames = enabledMcpToolDefs.map(tool => tool.function.name);
+      const enabledMcpServerIds = new Set(enabledMcpServers.map(server => server.id));
+      const mcpRuntimeStatuses = mcpServerManager
+        .getRuntimeStatus()
+        .filter(status => enabledMcpServerIds.has(status.serverId));
       await upsertDurableRun({
         runId: durableRunId,
         kind: 'chat',
@@ -1663,6 +1677,7 @@ ipcMain.handle(
 
       while (attempt <= chatMaxRetries) {
         const attemptMessages: ChatMessage[] = [...messages];
+        if (attempt > 0) attemptMessages.push(...sideBar.transcript);
         streamedTokenCount = 0;
         if (retryErrorDetail) {
           attemptMessages.push({
@@ -1747,6 +1762,7 @@ ipcMain.handle(
               event.sender.send('chat:token', token);
             },
             {
+              atSafeBoundary: reply => sideBar.atBoundary(reply, abortController.signal),
               consumeUserMessages: async () => {
                 if (activeChatGuidanceQueue.length === 0) {
                   return [];
@@ -1959,15 +1975,39 @@ ipcMain.handle(
       }
       throw error;
     } finally {
+      sideBar.close();
+      event.sender.removeListener('destroyed', onSenderDestroyed);
       if (activeChatAbortController === abortController) {
         activeChatAbortController = null;
         activeChatSessionId = null;
         activeChatSender = null;
         activeChatGuidanceQueue = [];
+        activeChatSideBar = null;
       }
     }
   }
 );
+
+/**
+ * Route user-only Side-Bar controls to the owning run. Sender/session checks
+ * prevent cross-window/history injection. Provider failures reject only this
+ * invoke; the work loop stays paused and can be retried, resumed, or stopped.
+ */
+ipcMain.handle('chat:sidebar', async (event, payload: ChatSideBarRequest): Promise<ChatSideBarResult> => {
+  if (!activeChatAbortController || activeChatAbortController.signal.aborted || !activeChatSideBar) {
+    return { accepted: false, reason: 'no_active_chat' };
+  }
+  if (event.sender !== activeChatSender) return { accepted: false, reason: 'sender_mismatch' };
+  if (!payload?.sessionId || payload.sessionId !== activeChatSessionId) {
+    return { accepted: false, reason: 'session_mismatch' };
+  }
+  switch (payload.action) {
+    case 'start': return activeChatSideBar.start();
+    case 'resume': return activeChatSideBar.resume();
+    case 'message': return activeChatSideBar.message(payload.content ?? '');
+    default: return { accepted: false, reason: 'invalid_action' };
+  }
+});
 
 ipcMain.handle('chat:inject-guidance', async (event, payload: ChatGuidanceRequest): Promise<ChatGuidanceResult> => {
   const content = String(payload?.content ?? '').trim();
@@ -1977,6 +2017,10 @@ ipcMain.handle('chat:inject-guidance', async (event, payload: ChatGuidanceReques
 
   if (!activeChatAbortController || !activeChatSessionId) {
     return { accepted: false, reason: 'no_active_chat' };
+  }
+
+  if (activeChatSideBar && activeChatSideBar.state.mode !== 'running') {
+    return { accepted: false, reason: 'sidebar_active' };
   }
 
   if (activeChatSender && activeChatSender !== event.sender) {
@@ -2012,10 +2056,8 @@ ipcMain.handle('chat:stop', async () => {
 
   if (activeChatAbortController) {
     activeChatAbortController.abort();
-    activeChatAbortController = null;
-    activeChatSessionId = null;
-    activeChatSender = null;
-    activeChatGuidanceQueue = [];
+    activeChatSideBar?.close();
+    // The stream's finally owns cleanup; keep the run locked until it unwinds.
     stopped = true;
   }
 
