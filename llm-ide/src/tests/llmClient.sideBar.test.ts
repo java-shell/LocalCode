@@ -25,12 +25,14 @@ function deferred<T>() {
  */
 async function withResponses(
   responses: ChatMessage[],
-  run: (requests: Array<Record<string, any>>) => Promise<void>
+  run: (requests: Array<Record<string, any>>) => Promise<void>,
+  validate?: (payload: Record<string, any>) => void
 ): Promise<void> {
   const requests: Array<Record<string, any>> = [];
   const original = axios.post;
   axios.post = (async (_url: string, payload: Record<string, any>) => {
     requests.push(JSON.parse(JSON.stringify(payload)));
+    validate?.(payload);
     const message = responses.shift();
     assert.ok(message, 'unexpected extra model request');
     const usage = { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 };
@@ -192,4 +194,90 @@ test('a pause requested during a final text response is honored before the run r
     assert.equal(requests.length, 2);
     assert.ok(result.debug?.finalMessages.some(message => message.content === 'Here is the update.'));
   });
+});
+
+/** Model the llama.cpp/Qwen template constraint without a live endpoint or private conversation. */
+function requireLeadingSystem(payload: Record<string, any>): void {
+  const misplaced = payload.messages.some((message: ChatMessage, index: number) => index > 0 && message.role === 'system');
+  if (misplaced) {
+    throw new axios.AxiosError('Request failed with status code 500', 'ERR_BAD_RESPONSE', undefined, undefined, {
+      status: 500, statusText: 'Internal Server Error', headers: {}, config: {} as any,
+      data: { error: { message: 'System message must be at the beginning.' } }
+    });
+  }
+}
+
+test('strict OpenAI templates accept Side-Bar and resumed work without losing tool history or user decisions', async () => {
+  const gate = new ChatSideBar('strict-session', () => {});
+  let toolCount = 0;
+  const config: LLMConfig = {
+    provider: 'openai-compatible', endpoint: 'http://provider.invalid/chat/completions',
+    model: 'qwen-test', temperature: 0.2
+  };
+  await withResponses([
+    toolBatch(), { role: 'assistant', content: 'Both files read.' },
+    { role: 'assistant', content: 'I will preserve the API.' },
+    { role: 'assistant', content: 'Work complete.' }
+  ], async requests => {
+    const result = await chatWithTools(config, [
+      { role: 'system', content: 'Preserve the public API.' },
+      { role: 'user', content: 'Implement the fix.' }
+    ], [tool], async () => { toolCount += 1; gate.start(); return { evidence: `file-${toolCount}` }; },
+    undefined, 2, undefined, undefined, {
+      atSafeBoundary: async reply => {
+        const waiting = gate.atBoundary(reply);
+        if (gate.state.mode === 'paused') {
+          try {
+            assert.equal((await gate.message('Status?')).text, 'Both files read.');
+            assert.equal((await gate.message('Keep API unchanged.')).text, 'I will preserve the API.');
+          } finally { gate.resume(); }
+        }
+        await waiting;
+      }
+    });
+    assert.equal(result.text, 'Work complete.');
+    assert.equal(requests.length, 4);
+    assert.equal(toolCount, 2);
+    for (const request of requests) {
+      assert.equal(request.messages[0].role, 'system');
+      assert.equal(request.messages.filter((message: ChatMessage) => message.role === 'system').length, 1);
+      assert.ok(request.messages[0].content.includes('Preserve the public API.'));
+    }
+    assert.ok(requests[1].messages[0].content.includes('Side-Bar mode'));
+    assert.ok(requests[3].messages[0].content.includes('Side-Bar has ended'));
+    assert.ok(!requests[3].messages[0].content.includes('Side-Bar mode'), 'temporary pause instruction must not persist');
+    assert.ok(JSON.stringify(requests[3].messages).includes('Keep API unchanged.'));
+    assert.equal(requests[3].messages.filter((message: ChatMessage) => message.role === 'tool').length, 2);
+    assert.equal(result.debug?.turns.length, 2);
+  }, requireLeadingSystem);
+});
+
+test('Side-Bar provider errors include response detail but do not expose Axios request objects', async () => {
+  const original = axios.post;
+  const secret = 'private-test-api-key';
+  axios.post = (async () => {
+    throw new axios.AxiosError('Request failed with status code 500', 'ERR_BAD_RESPONSE', {
+      headers: { Authorization: `Bearer ${secret}` }, data: 'private-test-conversation'
+    } as any, undefined, {
+      status: 500, statusText: 'Internal Server Error', config: {} as any, headers: {},
+      data: { error: { message: 'Synthetic provider failure' } }
+    });
+  }) as typeof axios.post;
+  try {
+    await assert.rejects(chatWithTools({
+      provider: 'openai-compatible', endpoint: 'http://provider.invalid/chat/completions',
+      model: 'qwen-test', temperature: 0.2
+    }, [{ role: 'user', content: 'Fix.' }], [], async () => ({}), undefined, 2, undefined, undefined, {
+      atSafeBoundary: async reply => { await reply('Status?'); }
+    }), error => {
+      assert.ok(error instanceof Error);
+      assert.equal(axios.isAxiosError(error), false);
+      assert.match(error.message, /Side-Bar chat request failed/);
+      assert.match(error.message, /status=500/);
+      assert.match(error.message, /Synthetic provider failure/);
+      assert.ok(!('config' in error));
+      assert.ok(!JSON.stringify(error).includes(secret));
+      return true;
+    });
+  } finally { axios.post = original; }
 });

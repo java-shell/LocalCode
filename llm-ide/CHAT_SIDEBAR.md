@@ -1,6 +1,7 @@
-# Chat Side-Bar v1.0.0
+# Chat Side-Bar v1.0.1
 
-Released in source: 2026-11-02T00:00:00Z (uncommitted working-tree feature).
+Initial feature committed as `bd3c457` on 2026-11-02; v1.0.1 correction is
+currently an uncommitted source change.
 AI-assisted implementation; maintainer review required before release.
 
 ## Decision / non-breaking contract
@@ -70,7 +71,8 @@ artifacts were not modified by this task and have not been rebuilt for Side-Bar.
 
 ## Verification / TODO Ledger
 
-Completion references are this working-tree change set; no commit/PR was created.
+AI-001–AI-004 completion reference: `bd3c457`. AI-005–AI-007 refer to the current
+uncommitted correction; no new commit/PR has been created.
 
 - [x] AI-001: Trace chat lifecycle, provider transports, counters, persistence,
   and UI seams; select optional safe-boundary hook.
@@ -106,4 +108,46 @@ Final verification (2026-11-02):
   transitions and the small controller rather than abstracting two guards.
 
 Release history: v1.0.0 adds Side-Bar without changing normal chat turn semantics.
-No further features are committed to this release.
+
+## v1.0.1 — strict OpenAI-compatible template correction
+
+Root cause: a synthetic request to the reported llama.cpp/Qwen endpoint reproduced
+HTTP 500 with `System message must be at the beginning.` The temporary Side-Bar
+system instruction followed tool history; the resume instruction was also appended
+late. Plain chat and the equivalent request without the misplaced system message
+returned HTTP 200. This was not a timeout or evidence of context overflow.
+
+Reuse `normalizeForStrictSystemTemplates` for every Side-Bar transport attempt
+(including fallback/compaction retries), and consolidate the resume instruction
+into the live history's leading system block. Tool-call/result ordering and user
+decisions remain intact; the temporary pause instruction never enters resumed
+history. Normal chat without Side-Bar is unchanged. Normalization is linear in
+message count and uses a temporary array, without new dependencies or I/O.
+
+Side-Bar provider errors now use the existing bounded response formatter rather
+than propagating Axios objects with prompt-bearing request config/auth headers
+through Electron. Provider response text is diagnostic data, not a guarantee of
+redaction if a provider itself echoes sensitive content.
+
+- [x] AI-005: Reproduce with synthetic history; establish provider template cause.
+- [x] AI-006: Add failing-before tests for strict Side-Bar/resume ordering and raw
+  Axios errors, then apply the non-breaking correction.
+- [x] AI-007: Build and verify; update design/release notes.
+
+Correction verification (2026-11-02):
+
+- Both new regressions failed before the patch; **44/44** focused client,
+  Side-Bar lifecycle, and UI contract tests now pass. Build, editor diagnostics,
+  and whitespace checks pass.
+- Compiled client with synthetic completed tool history against the actual
+  provider: two Side-Bar replies and resumed work succeeded, **3 requests / 1
+  work turn**. No private chat history or file content was sent. This checks the
+  provider/client seam, not a new interactive Electron UI end-to-end run.
+- Full suite: **226 tests; 223 passed, 1 failed, 2 skipped**. Same unrelated
+  pre-existing reference-workspace source assertion described above.
+- Quality delta: **0 gating regressions**; minor complexity/size/churn findings
+  remain in the existing large client. A callback-only test validator was falsely
+  flagged as dead code despite being exercised. `chatWithTools` contract unchanged,
+  0 incompatible callers.
+- Generated distributions remain untouched. Rebuild completed; restart the
+  source-run app to load the correction. Packaged apps require a separate rebuild.

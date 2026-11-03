@@ -3,7 +3,11 @@
 LocalCode is a standalone desktop platform built with Electron.
 It is not a VS Code extension.
 
-## Chat Side-Bar — feature v1.0.0 (2026-11-02)
+## Chat Side-Bar — feature v1.0.1 (2026-11-02)
+
+Compatibility fix: Side-Bar and resumed requests now keep system instructions at
+the beginning for strict OpenAI-compatible templates (including llama.cpp/Qwen).
+Provider failures show bounded diagnostics instead of raw Axios request objects.
 
 While a chat task is running, click **Start Side-Bar** beside **Send** to pull
 the assistant aside without stopping its work permanently:

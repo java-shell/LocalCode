@@ -2308,6 +2308,10 @@ export async function chatWithTools(
     };
 
     const attemptRequest = async (requestMessages: ChatMessage[], useStream: boolean) => {
+      // llama.cpp/Qwen also enforces leading-only system messages through the
+      // OpenAI API. Normalize every Side-Bar attempt (including fallback and
+      // overflow retries), without changing the live tool/conversation history.
+      if (options?.sideBar) requestMessages = normalizeForStrictSystemTemplates(requestMessages);
       streamedTokenCount = 0;
       const countToken = () => {
         streamedTokenCount += 1;
@@ -2442,7 +2446,16 @@ export async function chatWithTools(
     if (signal?.aborted) throw new Error('Chat request canceled');
     let exchanges = 0;
     await runtimeHooks?.atSafeBoundary?.(async content => {
-      const text = await requestAssistantWithoutTools(content, { disableThinking: true, sideBar: true });
+      let text: string | null;
+      try {
+        text = await requestAssistantWithoutTools(content, { disableThinking: true, sideBar: true });
+      } catch (error) {
+        // Return a bounded provider diagnosis, not an Axios object whose config
+        // Electron would log with the entire conversation and auth headers.
+        throw formatAxiosFailure(error, {
+          operation: 'Side-Bar chat request', endpoint: config.endpoint, model: config.model
+        });
+      }
       if (signal?.aborted) throw new Error('Chat request canceled');
       if (!text) throw new Error('Side-Bar returned an empty response. Please retry.');
       messages.push(
@@ -2458,6 +2471,10 @@ export async function chatWithTools(
         role: 'system',
         content: 'Side-Bar has ended. Resume the original work from the completed tool results, incorporating the user\'s Side-Bar decisions and corrections. Do not treat the last conversational question as a replacement task. Respect any user instruction to stop or change scope.'
       });
+      // The next tool-enabled work request uses this same live array. Keep its
+      // resume instruction in the leading system block for strict templates too.
+      const normalized = normalizeForStrictSystemTemplates(messages);
+      messages.splice(0, messages.length, ...normalized);
     }
   }
 
