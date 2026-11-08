@@ -1,4 +1,5 @@
 import { ChildProcessWithoutNullStreams, spawn } from 'child_process';
+import { buildMcpHttpHeaders } from './mcpHttpHeaders';
 import type {
   MCPServerConfig,
   MCPServerRuntimeStatus,
@@ -341,11 +342,14 @@ class MCPStdioClient {
 
 class MCPHttpClient implements MCPClient {
   private readonly endpoint: string;
+  private readonly customHeaders: MCPServerConfig['headers'];
   private nextId = 1;
   private started = false;
 
+  /** Snapshot endpoint/header settings; refresh creates a new client after edits. */
   constructor(config: MCPServerConfig) {
     this.endpoint = String(config.endpoint ?? '').trim();
+    this.customHeaders = config.headers && Object.keys(config.headers).length ? { ...config.headers } : undefined;
   }
 
   async start(): Promise<void> {
@@ -387,16 +391,15 @@ class MCPHttpClient implements MCPClient {
     this.started = false;
   }
 
+  /** POST a notification with configured headers; credential-bearing requests use status-only errors. */
   private async notify(method: string, params: unknown): Promise<void> {
     if (!this.started) {
       return;
     }
     const response = await fetch(this.endpoint, {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        accept: 'application/json, text/event-stream'
-      },
+      headers: buildMcpHttpHeaders(this.customHeaders),
+      redirect: this.customHeaders ? 'error' : 'follow',
       body: JSON.stringify({
         jsonrpc: '2.0',
         method,
@@ -404,11 +407,19 @@ class MCPHttpClient implements MCPClient {
       } satisfies JSONRPCMessage)
     });
     if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      throw new Error(`MCP notify failed (${response.status}): ${body.slice(0, 500)}`);
+      const body = this.customHeaders ? '' : await response.text().catch(() => '');
+      if (this.customHeaders) await response.body?.cancel();
+      const detail = this.customHeaders ? '.' : `: ${body.slice(0, 500)}`;
+      throw new Error(`MCP notify failed (${response.status})${detail}`);
     }
   }
 
+  /**
+   * POST JSON-RPC with validated custom headers on every request. IDs increment
+   * synchronously before I/O; configuration is immutable during concurrent calls.
+   * Reject network/protocol errors; do not include remote diagnostic bodies when
+   * credentials are configured, since servers may echo request header values.
+   */
   private async request(method: string, params: unknown): Promise<unknown> {
     if (!this.started) {
       throw new Error('MCP client is not connected.');
@@ -419,10 +430,9 @@ class MCPHttpClient implements MCPClient {
 
     const response = await fetch(this.endpoint, {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        accept: 'application/json, text/event-stream'
-      },
+      headers: buildMcpHttpHeaders(this.customHeaders),
+      // Arbitrary credential headers are not stripped on cross-origin redirects by fetch.
+      redirect: this.customHeaders ? 'error' : 'follow',
       body: JSON.stringify({
         jsonrpc: '2.0',
         id,
@@ -432,8 +442,10 @@ class MCPHttpClient implements MCPClient {
     });
 
     if (!response.ok) {
-      const body = await response.text().catch(() => '');
-      throw new Error(`MCP HTTP request failed (${response.status}): ${body.slice(0, 500)}`);
+      const body = this.customHeaders ? '' : await response.text().catch(() => '');
+      if (this.customHeaders) await response.body?.cancel();
+      const detail = this.customHeaders ? '.' : `: ${body.slice(0, 500)}`;
+      throw new Error(`MCP HTTP request failed (${response.status})${detail}`);
     }
 
     const contentType = String(response.headers.get('content-type') ?? '').toLowerCase();
@@ -441,9 +453,13 @@ class MCPHttpClient implements MCPClient {
       throw new Error(`MCP HTTP response is not JSON for method ${method}.`);
     }
 
-    const payload = await response.json() as JSONRPCMessage;
+    const payload = await response.json().catch(() => {
+      throw new Error(`MCP HTTP response contains invalid JSON for method ${method}.`);
+    }) as JSONRPCMessage;
     if (payload.error) {
-      throw new Error(`MCP error ${payload.error.code}: ${payload.error.message}`);
+      const detail = this.customHeaders ? '' : `: ${payload.error.message}`;
+      const code = this.customHeaders && !Number.isInteger(payload.error.code) ? 'unknown' : payload.error.code;
+      throw new Error(`MCP error ${code}${detail}`);
     }
     return payload.result;
   }

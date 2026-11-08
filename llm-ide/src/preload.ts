@@ -268,6 +268,7 @@ const api = {
     ipcRenderer.invoke('workspace:update-reference-workspace', payload),
   listMcpServers: async (): Promise<{ servers: MCPServerConfig[]; runtime?: MCPServerRuntimeStatus[] }> =>
     ipcRenderer.invoke('mcp:list-servers'),
+  /** Save server configs (including optional HTTP headers); main validates and reconnects. Do not log credentials. */
   saveMcpServers: async (payload: { servers: MCPServerConfig[] }): Promise<{ servers: MCPServerConfig[]; runtime?: MCPServerRuntimeStatus[] }> =>
     ipcRenderer.invoke('mcp:save-servers', payload),
   getMcpRuntimeStatus: async (): Promise<{ runtime: MCPServerRuntimeStatus[] }> =>

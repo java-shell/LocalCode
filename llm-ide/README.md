@@ -3,6 +3,31 @@
 LocalCode is a standalone desktop platform built with Electron.
 It is not a VS Code extension.
 
+## MCP HTTP Headers — feature v1.1.0 (2026-11-06)
+
+Open **Settings → MCP Servers**, add or edit a server, and select **http**.
+The **Custom Headers (HTTP, JSON)** field accepts a JSON object of string values,
+including `Authorization`, `X-API-Key`, or tenant headers. Click **Save** to persist
+and reconnect. A blank field or `{}` clears custom headers. Invalid JSON/header
+syntax leaves Settings open with an error; header drafts survive runtime refreshes.
+
+The existing `window.llmIde.saveMcpServers({ servers })` method now accepts optional
+`headers: Record<string, string>` on each server config. Headers are sent on every
+HTTP JSON-RPC request and notification. Custom names override default headers
+case-insensitively; absent headers retain existing defaults. Stdio and SSE transports
+do not send these headers and otherwise remain unchanged.
+
+**Credential safety:** values are visible in the editor and stored locally without
+encryption in the existing MCP settings file. Use HTTPS for remote credentials and
+protect the application profile. Header values are excluded from model-facing server
+listings. Credential-bearing HTTP requests reject redirects; configure the final URL
+directly. Remote error bodies/messages are omitted when custom headers are present
+to prevent credential echoes in runtime diagnostics.
+
+Release notes, design/risk notes, tests, and the completed task ledger are in
+[MCP_HTTP_HEADERS.md](MCP_HTTP_HEADERS.md). No dependencies, IPC channels, settings
+migration, or packaging changes are required.
+
 ## Chat Side-Bar — feature v1.0.1 (2026-11-02)
 
 Compatibility fix: Side-Bar and resumed requests now keep system instructions at

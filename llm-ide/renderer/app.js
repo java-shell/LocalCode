@@ -444,6 +444,7 @@ function normalizeSubAgentProfiles(rawProfiles) {
   return normalized;
 }
 
+/** Create an unsaved MCP settings draft; empty headers keep legacy HTTP defaults. */
 function createDefaultMcpServer(index = 0) {
   const id = `mcp-server-${index + 1}`;
   return {
@@ -455,7 +456,8 @@ function createDefaultMcpServer(index = 0) {
     command: '',
     args: [],
     endpoint: '',
-    env: {}
+    env: {},
+    headers: {}
   };
 }
 
@@ -466,6 +468,7 @@ function normalizeMcpTransport(value) {
   return 'stdio';
 }
 
+/** Copy persisted MCP settings for editing; header values stay out of general localStorage settings. */
 function normalizeMcpServerList(rawServers) {
   const source = Array.isArray(rawServers) ? rawServers : [];
   const normalized = [];
@@ -513,7 +516,10 @@ function normalizeMcpServerList(rawServers) {
       command,
       args,
       endpoint,
-      env
+      env,
+      headers: item.headers && typeof item.headers === 'object' && !Array.isArray(item.headers)
+        ? { ...item.headers }
+        : {}
     });
   }
 
@@ -536,8 +542,18 @@ async function loadMcpServersFromMain() {
   }
 }
 
+/**
+ * Parse HTTP header drafts and persist via the existing settings bridge, which
+ * validates HTTP syntax before writing/reconnecting. Reject malformed JSON with
+ * value-free errors; retain drafts on failure and strip UI-only fields before IPC.
+ */
 async function saveMcpServersToMain(servers) {
-  const normalized = normalizeMcpServerList(servers);
+  const normalized = normalizeMcpServerList(servers.map(server => ({
+    ...server,
+    headers: server.transport === 'http' && typeof server.headersJson === 'string'
+      ? parseMcpHeadersJson(server.headersJson)
+      : server.headers
+  })));
   const result = await window.llmIde.saveMcpServers({ servers: normalized });
   mcpServerState.servers = normalizeMcpServerList(result?.servers);
   const runtimeEntries = Array.isArray(result?.runtime) ? result.runtime : [];
@@ -546,6 +562,21 @@ async function saveMcpServersToMain(servers) {
   );
   mcpServerState.loaded = true;
   return mcpServerState.servers;
+}
+
+/** Parse a blank or JSON string-map draft without echoing credential-bearing input on errors. */
+function parseMcpHeadersJson(text) {
+  let headers;
+  try {
+    headers = text.trim() ? JSON.parse(text) : {};
+  } catch {
+    throw new Error('HTTP headers must be valid JSON.');
+  }
+  if (!headers || typeof headers !== 'object' || Array.isArray(headers)
+      || Object.values(headers).some(value => typeof value !== 'string')) {
+    throw new Error('HTTP headers must be a JSON object of string values.');
+  }
+  return headers;
 }
 
 async function refreshMcpRuntimeFromMain() {
@@ -2723,6 +2754,7 @@ function initSettingsMenu() {
     mcpStatusEl.classList.toggle('notify-status-error', Boolean(isError));
   }
 
+  /** Render isolated settings drafts, preserving header text across refreshes; only HTTP enables the editor. */
   function renderMcpServersEditor() {
     if (!mcpServersEditor) return;
     mcpServersEditor.innerHTML = '';
@@ -2817,6 +2849,29 @@ function initSettingsMenu() {
         server.endpoint = endpointInput.value.trim();
       });
 
+      const headersLabel = document.createElement('label');
+      headersLabel.className = 'label';
+      headersLabel.textContent = 'Custom Headers (HTTP, JSON)';
+
+      const headersInput = document.createElement('textarea');
+      headersInput.id = `settingMcpHeaders-${index}`;
+      headersLabel.htmlFor = headersInput.id;
+      headersInput.rows = 4;
+      headersInput.spellcheck = false;
+      headersInput.setAttribute('autocomplete', 'off');
+      headersInput.setAttribute('aria-describedby', `settingMcpHeadersHelp-${index}`);
+      headersInput.placeholder = '{"Authorization": "Bearer YOUR_TOKEN", "X-API-Key": "YOUR_KEY"}';
+      headersInput.value = server.headersJson ?? (Object.keys(server.headers || {}).length
+        ? JSON.stringify(server.headers, null, 2) : '');
+      headersInput.addEventListener('input', () => {
+        server.headersJson = headersInput.value;
+      });
+
+      const headersHelp = document.createElement('div');
+      headersHelp.id = `settingMcpHeadersHelp-${index}`;
+      headersHelp.className = 'settings-help';
+      headersHelp.textContent = 'HTTP only. Use a JSON object of string values; blank clears headers. Values are visible here and stored locally without encryption. Use HTTPS for remote credentials.';
+
       const enableChatLabel = document.createElement('label');
       enableChatLabel.className = 'orch-tool-item settings-checkbox';
       const enableChatInput = document.createElement('input');
@@ -2848,6 +2903,7 @@ function initSettingsMenu() {
         renderMcpServersEditor();
       });
 
+      /** Enable transport-specific fields without discarding drafts when switching transport. */
       function syncTransportInputs() {
         const transport = normalizeMcpTransport(transportSelect.value);
         server.transport = transport;
@@ -2855,6 +2911,7 @@ function initSettingsMenu() {
         commandInput.disabled = !stdioMode;
         argsInput.disabled = !stdioMode;
         endpointInput.disabled = stdioMode;
+        headersInput.disabled = transport !== 'http';
       }
 
       transportSelect.addEventListener('change', syncTransportInputs);
@@ -2873,6 +2930,9 @@ function initSettingsMenu() {
       card.appendChild(argsInput);
       card.appendChild(endpointLabel);
       card.appendChild(endpointInput);
+      card.appendChild(headersLabel);
+      card.appendChild(headersInput);
+      card.appendChild(headersHelp);
       card.appendChild(enableChatLabel);
       card.appendChild(enableOrchLabel);
       if (runtime && runtime.lastError) {

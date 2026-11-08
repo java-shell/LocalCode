@@ -62,6 +62,8 @@ export interface MCPServerConfig {
   args?: string[];
   endpoint?: string;
   env?: Record<string, string>;
+  /** Optional HTTP request headers; values may contain credentials. Never expose to models/logs. */
+  headers?: Record<string, string>;
 }
 
 export type MCPServerLifecycleState = 'disconnected' | 'connecting' | 'connected' | 'error';

@@ -2,6 +2,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { app } from 'electron';
 import { MCPServerConfig, MCPServerTarget, MCPServerTransport } from '../shared/types';
+import { normalizeMcpHttpHeaders } from './mcpHttpHeaders';
 
 interface MCPServerStoreFile {
   version: 1;
@@ -19,6 +20,7 @@ function normalizeTransport(value: unknown): MCPServerTransport {
   return 'stdio';
 }
 
+/** Normalize persisted server fields; validate optional headers without exposing values in errors. */
 function normalizeMcpServer(entry: Partial<MCPServerConfig> | undefined, index: number): MCPServerConfig | null {
   const id = String(entry?.id ?? '').trim() || `mcp-server-${index + 1}`;
   const label = String(entry?.label ?? '').trim() || id;
@@ -55,7 +57,8 @@ function normalizeMcpServer(entry: Partial<MCPServerConfig> | undefined, index: 
     command: command || undefined,
     args: args.length > 0 ? args : undefined,
     endpoint: endpoint || undefined,
-    env: Object.keys(env).length > 0 ? env : undefined
+    env: Object.keys(env).length > 0 ? env : undefined,
+    headers: normalizeMcpHttpHeaders(entry?.headers)
   };
 }
 
@@ -109,6 +112,12 @@ export async function listMcpServers(): Promise<MCPServerConfig[]> {
   return store.servers;
 }
 
+/**
+ * Persist normalized server settings, including optional HTTP headers, and return
+ * the saved list. Validation runs before disk writes; invalid headers or I/O
+ * failures reject. Credentials stay in the existing local settings file (not
+ * encrypted); callers must not log returned configs and should serialize saves.
+ */
 export async function saveMcpServers(servers: MCPServerConfig[]): Promise<MCPServerConfig[]> {
   const normalized = normalizeMcpServers(servers);
   await writeStore({

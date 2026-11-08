@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, IncomingMessage, ServerResponse } from 'node:http';
 import { MCPServerManager } from '../backend/mcpServerManager';
+import type { MCPServerConfig } from '../shared/types';
 
 interface RpcRequest {
   id?: number;
@@ -92,7 +93,8 @@ function buildMockRpcResponse(request: RpcRequest): unknown {
   };
 }
 
-async function createMockHttpMcpServer(): Promise<MockHttpServer> {
+/** Local JSON-RPC fixture; optional observer validates headers for every request phase. */
+async function createMockHttpMcpServer(observe?: (req: IncomingMessage, rpc: RpcRequest) => void): Promise<MockHttpServer> {
   const server = createServer(async (req, res) => {
     if (req.url !== '/mcp' || req.method !== 'POST') {
       res.statusCode = 404;
@@ -100,6 +102,7 @@ async function createMockHttpMcpServer(): Promise<MockHttpServer> {
       return;
     }
     const request = await readJsonBody(req);
+    observe?.(req, request);
     writeJson(res, buildMockRpcResponse(request));
   });
 
@@ -382,5 +385,128 @@ test('MCPServerManager connects SSE transport, discovers tools, and invokes tool
   } finally {
     await manager.dispose();
     await mock.close();
+  }
+});
+
+/** Verify authenticated request/notification phases, reconfiguration, clearing, and workflow targeting. */
+test('HTTP custom headers reach every RPC phase and change or clear after settings refresh', async () => {
+  const observed: Array<{ method?: string; authorization?: string; tenant?: string; accept?: string; contentType?: string }> = [];
+  const mock = await createMockHttpMcpServer((req, rpc) => observed.push({
+    method: rpc.method,
+    authorization: req.headers.authorization,
+    tenant: req.headers['x-tenant'] as string | undefined,
+    accept: req.headers.accept,
+    contentType: req.headers['content-type']
+  }));
+  const manager = new MCPServerManager();
+  const config: MCPServerConfig = {
+    id: 'headers-http', label: 'Headers HTTP', transport: 'http', endpoint: mock.endpoint,
+    enabledForChat: true, enabledForOrchestration: true,
+    headers: { Authorization: 'Bearer test-token', 'X-Tenant': 'test-tenant', Accept: 'application/json' }
+  };
+  try {
+    await manager.configure([config]);
+    await manager.refreshAll();
+    assert.equal(manager.getRuntimeStatus()[0].lifecycle, 'connected');
+    const tool = manager.getToolDefinitionsForTarget('chat')[0].function.name;
+    assert.equal(manager.getToolDefinitionsForTarget('orchestration')[0].function.name, tool);
+    await manager.invokeTool(tool, { text: 'authenticated' });
+    assert.deepEqual(observed.map(item => item.method), [
+      'initialize', 'notifications/initialized', 'tools/list', 'tools/call'
+    ]);
+    for (const item of observed) {
+      assert.equal(item.authorization, 'Bearer test-token');
+      assert.equal(item.tenant, 'test-tenant');
+      assert.equal(item.accept, 'application/json');
+      assert.equal(item.contentType, 'application/json');
+    }
+    observed.length = 0;
+    await manager.configure([{ ...config, headers: { Authorization: 'Bearer rotated-token' } }]);
+    await manager.refreshAll();
+    await manager.invokeTool(tool, { text: 'rotated' });
+    assert.equal(observed.length, 4);
+    assert.ok(observed.every(item => item.authorization === 'Bearer rotated-token' && !item.tenant));
+    observed.length = 0;
+    await manager.configure([{ ...config, headers: {} }]);
+    await manager.refreshAll();
+    await manager.invokeTool(tool, { text: 'cleared' });
+    assert.equal(observed.length, 4);
+    assert.ok(observed.every(item => !item.authorization && !item.tenant));
+    assert.ok(observed.every(item => item.accept === 'application/json, text/event-stream'));
+  } finally {
+    await manager.dispose();
+    await mock.close();
+  }
+});
+
+/** Exercise validation before I/O and value-free status errors with a deliberately invalid test token. */
+test('HTTP invalid headers fail safely before sending a request', async () => {
+  let requests = 0;
+  const mock = await createMockHttpMcpServer(() => { requests += 1; });
+  const manager = new MCPServerManager();
+  try {
+    await manager.configure([{
+      id: 'invalid', label: 'Invalid', transport: 'http', endpoint: mock.endpoint,
+      enabledForChat: true, enabledForOrchestration: true,
+      headers: { Authorization: 'test-secret\r\nX-Injected: yes' }
+    }]);
+    await manager.refreshAll();
+    const status = manager.getRuntimeStatus()[0];
+    assert.equal(status.lifecycle, 'error');
+    assert.match(status.lastError || '', /invalid name or value/);
+    assert.doesNotMatch(JSON.stringify(status), /test-secret|X-Injected/);
+    assert.equal(requests, 0);
+  } finally {
+    await manager.dispose();
+    await mock.close();
+  }
+});
+
+/** Local hostile endpoint fixture; ensure credential echoes/redirects do not escape into status or another origin. */
+test('HTTP credential headers block redirects and keep remote error bodies out of runtime status', async () => {
+  let mode: 'http-error' | 'rpc-error' | 'invalid-json' | 'redirect' = 'http-error';
+  let forwarded = 0;
+  const destination = createServer((_req, res) => { forwarded += 1; res.end(); });
+  await new Promise<void>(resolve => destination.listen(0, '127.0.0.1', resolve));
+  const destAddress = destination.address();
+  assert.ok(destAddress && typeof destAddress !== 'string');
+  const server = createServer(async (req, res) => {
+    const rpc = await readJsonBody(req);
+    const secret = String(req.headers['x-api-key']);
+    if (mode === 'redirect') {
+      res.writeHead(307, { location: `http://127.0.0.1:${destAddress.port}/leak` });
+      res.end();
+    } else if (mode === 'rpc-error') {
+      writeJson(res, { jsonrpc: '2.0', id: rpc.id, error: { code: -32000, message: secret } });
+    } else if (mode === 'invalid-json') {
+      res.setHeader('content-type', 'application/json');
+      res.end(`invalid-json ${secret}`);
+    } else {
+      res.statusCode = 401;
+      res.end(secret);
+    }
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const manager = new MCPServerManager();
+  try {
+    await manager.configure([{
+      id: 'private', label: 'Private', transport: 'http', endpoint: `http://127.0.0.1:${address.port}/mcp`,
+      enabledForChat: true, enabledForOrchestration: true, headers: { 'X-API-Key': 'test-private-key' }
+    }]);
+    for (const nextMode of ['http-error', 'rpc-error', 'invalid-json', 'redirect'] as const) {
+      mode = nextMode;
+      await manager.refreshAll();
+      assert.equal(manager.getRuntimeStatus()[0].lifecycle, 'error');
+      assert.doesNotMatch(JSON.stringify(manager.getRuntimeStatus()), /test-private-key/);
+    }
+    assert.equal(forwarded, 0);
+  } finally {
+    await manager.dispose();
+    await Promise.all([
+      new Promise<void>(resolve => server.close(() => resolve())),
+      new Promise<void>(resolve => destination.close(() => resolve()))
+    ]);
   }
 });

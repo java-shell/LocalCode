@@ -62,3 +62,16 @@ test('list_mcp_servers returns an empty list when no servers are configured', as
   assert.equal(result.count, 0);
   assert.deepEqual(result.servers, []);
 });
+
+/** Header credentials remain configuration-only, never part of model-visible server/tool listings. */
+test('list_mcp_servers does not expose HTTP header credentials', async () => {
+  const result = await executeTool('list_mcp_servers', {}, {
+    workspaceDir: '/mock/workspace', rootDir: '/mock/workspace',
+    mcpServers: [{
+      id: 'private', label: 'Private', transport: 'http', endpoint: 'https://example.invalid/mcp',
+      enabledForChat: true, enabledForOrchestration: true,
+      headers: { Authorization: 'Bearer test-private', 'X-API-Key': 'test-private-key' }
+    }]
+  } as any);
+  assert.doesNotMatch(JSON.stringify(result), /test-private|Authorization|X-API-Key|headers/);
+});
