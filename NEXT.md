@@ -39,7 +39,7 @@ Largest files: [llm-ide/renderer/app.js](llm-ide/renderer/app.js) (8,281 lines),
 
 ## P0 — Land the in-flight work
 
-- [x] **AI-011 — Fix the stale contract test.**
+- [x] **AI-011 — Fix the stale contract test.** (`8047799`)
   [llm-ide/src/tests/renderer.referenceWorkspace.test.ts](llm-ide/src/tests/renderer.referenceWorkspace.test.ts)
   asserted a hardcoded `toolNames: ['list_reference_workspaces', 'list_mcp_servers'` literal in
   `renderer/app.js`, while commit `e1bf313` deliberately moved chat tool names to the backend IPC
@@ -49,7 +49,7 @@ Largest files: [llm-ide/renderer/app.js](llm-ide/renderer/app.js) (8,281 lines),
   The assertion now verifies the real source of truth: `getDefaultChatToolNames()` exposes both
   discovery tools. Suite result: **269 tests, 267 passed, 0 failed, 2 skipped**.
 
-- [x] **AI-012 — Commit the tool-call budget work.**
+- [x] **AI-012 — Commit the tool-call budget work.** (`887eaa1`)
   Ceiling raised 200 → 1000 for chat, orchestration steps and `spawn_sub_agent` children; chat
   default 40 → 250; sub-agent ceiling 50 → 1000 with the narrow default of 8 preserved. One module,
   [llm-ide/src/shared/toolBudget.ts](llm-ide/src/shared/toolBudget.ts), is now consumed by the
@@ -58,7 +58,7 @@ Largest files: [llm-ide/renderer/app.js](llm-ide/renderer/app.js) (8,281 lines),
   silently re-clamped downstream. Orchestration preset defaults (40/60/10) are unchanged, so
   existing plans behave exactly as before.
 
-- [x] **AI-013 — Commit the Ollama capability-compatibility work.**
+- [x] **AI-013 — Commit the Ollama capability-compatibility work.** (`b286f42`)
   One shared `requestOllamaNative` adapter in
   [llm-ide/src/backend/llmClient.ts](llm-ide/src/backend/llmClient.ts) replaces three duplicated
   transport branches. An explicit HTTP 400 `does not support thinking` is retried once without
@@ -67,11 +67,11 @@ Largest files: [llm-ide/renderer/app.js](llm-ide/renderer/app.js) (8,281 lines),
   model. Streaming HTTP error bodies are decoded as text, bounded to 64 KiB and two seconds, instead
   of serializing socket internals. Saved settings are not rewritten.
 
-- [x] **AI-014 — Stop versioning build artifacts.**
+- [x] **AI-014 — Stop versioning build artifacts.** (`c2efc0b`)
   `llm-ide/dist/` is now ignored and removed from the index (176 LFS-tracked files, ~2.6 GB).
   Installers should be published as GitHub Release assets instead of committed binaries.
 
-- [ ] **AI-017 — Open PRs and tag a release.**
+- [ ] **AI-017 — Open PRs and tag a release.** (commits `8047799`…`bb1b589` are local on `main`)
   The commits on `main` are local; `origin` could not be reached from this environment (no
   credentials). Push `main`, open PRs per feature if branch-based review is preferred, cut
   `v1.0.2` (or `v1.1.0`) and attach the AppImage/NSIS artifacts as release assets so
