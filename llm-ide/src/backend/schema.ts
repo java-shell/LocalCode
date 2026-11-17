@@ -1,4 +1,5 @@
 import { OrchestrationPlan } from '../shared/types';
+import { MAX_TOOL_TURNS } from '../shared/toolBudget';
 
 function baseStageId(value: unknown, index: number): string {
   const trimmed = String(value ?? '').trim();
@@ -210,8 +211,8 @@ export function validatePlan(value: unknown): string[] {
     }
     if (step.maxToolTurns !== undefined) {
       const maxToolTurns = Number(step.maxToolTurns);
-      if (!Number.isInteger(maxToolTurns) || maxToolTurns < 1 || maxToolTurns > 200) {
-        errors.push(`steps[${i}].maxToolTurns must be an integer between 1 and 200 when provided.`);
+      if (!Number.isInteger(maxToolTurns) || maxToolTurns < 1 || maxToolTurns > MAX_TOOL_TURNS) {
+        errors.push(`steps[${i}].maxToolTurns must be an integer between 1 and ${MAX_TOOL_TURNS} when provided.`);
       }
     }
     if (step.maxRetries !== undefined) {

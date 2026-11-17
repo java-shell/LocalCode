@@ -18,8 +18,13 @@ let browserFeatureState = { enabled: false, mode: 'disabled', reason: 'Browser f
 let syncBrowserSurfaceBounds = () => {};
 let refreshBrowserFeatureUi = async () => {};
 
+// Mirrors src/shared/toolBudget.ts (the renderer is a plain script and cannot
+// import the TypeScript module). Keep these two values in sync with that file.
+const MAX_TOOL_TURNS_LIMIT = 1000;
+const DEFAULT_MAX_TOOL_TURNS = 250;
+
 const settingsState = {
-  maxToolTurns: 40,
+  maxToolTurns: DEFAULT_MAX_TOOL_TURNS,
   requestTimeoutMs: 180000,
   provider: 'ollama',
   endpoint: 'http://localhost:11434/v1/chat/completions',
@@ -259,9 +264,22 @@ const OLLAMA_REQUEST_TEMPLATE = JSON.stringify(
 
 const MAX_SAVED_QUICK_PRESETS = 50;
 
+/**
+ * Clamp a Max Tool Turns value into the range the backend accepts.
+ *
+ * Purpose: keep the settings field and every consumer (chat IPC, orchestration
+ * step editor, saved presets) inside the same 1..1000 budget the backend enforces,
+ * so a value saved in the UI is never silently reduced later.
+ * Inputs: raw numeric input from a number field, preset, or saved settings file.
+ * Outputs: integer 1..1000; non-finite input falls back to the 250 default.
+ * Side effects: none. Errors: none (invalid input falls back).
+ * Performance: O(1).
+ * Rationale: mirrors src/shared/toolBudget.ts clampToolTurns; the renderer is a
+ * plain script and cannot import the TypeScript module, so the two must stay in sync.
+ */
 function clampMaxToolTurns(value) {
-  if (!Number.isFinite(value)) return 40;
-  return Math.max(1, Math.min(200, Math.floor(value)));
+  if (!Number.isFinite(value)) return DEFAULT_MAX_TOOL_TURNS;
+  return Math.max(1, Math.min(MAX_TOOL_TURNS_LIMIT, Math.floor(value)));
 }
 
 function clampRequestTimeoutMs(value) {
@@ -371,7 +389,7 @@ function normalizeSavedQuickPresets(value) {
       endpoint,
       model,
       apiKey: String(item.apiKey ?? ''),
-      maxToolTurns: clampMaxToolTurns(Number(item.maxToolTurns ?? 40)),
+      maxToolTurns: clampMaxToolTurns(Number(item.maxToolTurns ?? DEFAULT_MAX_TOOL_TURNS)),
       requestTimeoutMs: clampRequestTimeoutMs(Number(item.requestTimeoutMs ?? 180000)),
       contextWindowTokens: clampContextWindowTokens(Number(item.contextWindowTokens ?? 0)),
       advancedSettingsEnabled: Boolean(item.advancedSettingsEnabled ?? false),
@@ -1243,7 +1261,7 @@ function loadSettings() {
     const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
     if (!raw) return;
     const parsed = JSON.parse(raw);
-    settingsState.maxToolTurns = clampMaxToolTurns(Number(parsed.maxToolTurns ?? 40));
+    settingsState.maxToolTurns = clampMaxToolTurns(Number(parsed.maxToolTurns ?? DEFAULT_MAX_TOOL_TURNS));
     settingsState.requestTimeoutMs = clampRequestTimeoutMs(Number(parsed.requestTimeoutMs ?? 180000));
     settingsState.provider = normalizeProvider(parsed.provider ?? settingsState.provider);
     settingsState.endpoint = String(parsed.endpoint ?? settingsState.endpoint).trim() || settingsState.endpoint;
@@ -1360,7 +1378,7 @@ function loadSettings() {
       parsed.activeChatSessionIdByWorkspace
     );
   } catch {
-    settingsState.maxToolTurns = 40;
+    settingsState.maxToolTurns = DEFAULT_MAX_TOOL_TURNS;
     settingsState.requestTimeoutMs = 180000;
     settingsState.provider = 'ollama';
     settingsState.endpoint = 'http://localhost:11434/v1/chat/completions';

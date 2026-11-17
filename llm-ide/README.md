@@ -3,6 +3,41 @@
 LocalCode is a standalone desktop platform built with Electron.
 It is not a VS Code extension.
 
+## Tool-Call Budget — 1000 turns (2026-11-17)
+
+The maximum tool-call budget is now **1000 tool turns** for chat, orchestration
+steps and `spawn_sub_agent` children. The chat default is **250** (was 40);
+`spawn_sub_agent` keeps its narrow default of **8** and can be raised to 1000 per
+child. Settings → **Max Tool Turns** accepts 1-1000.
+
+A single module, [`src/shared/toolBudget.ts`](src/shared/toolBudget.ts), is the
+source of truth (`MAX_TOOL_TURNS`, `DEFAULT_CHAT_TOOL_TURNS`,
+`MAX_SUB_AGENT_TOOL_TURNS`, `DEFAULT_SUB_AGENT_TOOL_TURNS` plus `clampToolTurns`
+and `clampSubAgentToolTurns`). The renderer settings clamp, the chat IPC handler,
+`chatWithTools`, the orchestration step clamp, the plan schema validator and the
+sub-agent runtime all consume it, so a value accepted in the UI is no longer
+silently re-clamped to a smaller ceiling downstream (previously 200 for
+chat/orchestration and 50 for sub-agents).
+
+`renderer/app.js` mirrors the two values as `MAX_TOOL_TURNS_LIMIT` /
+`DEFAULT_MAX_TOOL_TURNS`; it is a plain script and cannot import the TypeScript
+module, so `src/tests/renderer.toolBudget.contract.test.ts` fails if they drift.
+
+**Safety:** 1000 is a deliberate ceiling, not an unbounded loop. The identical
+tool-call repeat guard (`MAX_CONSECUTIVE_IDENTICAL_TOOL_CALLS`) and context
+compaction still stop runaway sessions well before it, and no new tool
+permissions are granted. A larger ceiling does raise worst-case wall time,
+provider request count and context pressure. Orchestration step and preset
+defaults are unchanged (40/60/10) so existing plans behave exactly as before.
+
+Verified with `npm test`: **269 tests, 267 passed, 0 failed, 2 skipped** (the two
+skips are the Electron-native crash minidump and context-isolation preload tests,
+both environment-gated). New coverage: `src/tests/toolBudget.test.ts`,
+`src/tests/llmClient.toolBudgetCeiling.test.ts`,
+`src/tests/planSchema.toolBudget.test.ts`,
+`src/tests/renderer.toolBudget.contract.test.ts`, and two reworked sub-agent
+ceiling tests.
+
 ## MCP HTTP Headers — feature v1.1.0 (2026-11-06)
 
 Open **Settings → MCP Servers**, add or edit a server, and select **http**.
@@ -251,6 +286,7 @@ terminal/guidance changes outside this diagnostics addition; no incompatible cal
 | --- | --- |
 | **Streaming Responses** | Token-by-token display of model output in markdown |
 | **Tool Calling** | 23+ tools available (filesystem, git, web, memory, interaction, delegation, MCP introspection) |
+| **Tool-Call Budget** | Up to 1000 tool turns per chat run, orchestration step or `spawn_sub_agent` child (chat default 250, sub-agent default 8). Set in Settings → **Max Tool Turns** |
 | **Session Management** | Create, switch, and delete chat sessions with full history |
 | **TurboVec Memory** | Inject recalled memories from workspace or global namespaces |
 | **Context Windows** | Per-model context window configuration with auto-detection hints; overflow retries compact history to the configured safe budget |
@@ -430,6 +466,7 @@ Line-oriented file tools use 1-based numbering consistently:
 - [src/backend/orchestrationEngine.ts](src/backend/orchestrationEngine.ts) Step runner
 - [src/backend/toolRuntime.ts](src/backend/toolRuntime.ts) Local tool implementations
 - [src/backend/schema.ts](src/backend/schema.ts) Plan schema, validation, and presets
+- [src/shared/toolBudget.ts](src/shared/toolBudget.ts) Tool-turn ceiling and defaults shared by every layer
 - [src/backend/notify.ts](src/backend/notify.ts) Outbound ntfy notifications
 - [renderer/index.html](renderer/index.html) Desktop UI shell
 - [renderer/app.js](renderer/app.js) UI logic + Monaco wiring

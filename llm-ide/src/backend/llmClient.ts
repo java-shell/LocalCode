@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { clampToolTurns, DEFAULT_CHAT_TOOL_TURNS } from '../shared/toolBudget';
 import { ChatMessage, LLMConfig, TokenUsage, ToolDefinition } from '../shared/types';
 
 interface CompletionResponse {
@@ -2149,13 +2150,15 @@ export async function chatWithTools(
   tools: ToolDefinition[],
   executeTool: (name: string, args: unknown) => Promise<unknown>,
   onEvent?: (message: string) => void,
-  maxToolTurns = 40,
+  maxToolTurns = DEFAULT_CHAT_TOOL_TURNS,
   signal?: AbortSignal,
   onToken?: (token: string) => void,
   runtimeHooks?: ChatWithToolsRuntimeHooks
 ): Promise<ChatWithToolsResult> {
   const messages = [...initialMessages];
-  const maxTurns = Math.max(1, Math.min(200, Math.floor(maxToolTurns || 40)));
+  // Ceiling comes from shared/toolBudget so the UI, IPC handler, plan schema and
+  // this loop accept the same maximum instead of re-clamping to a smaller value.
+  const maxTurns = clampToolTurns(maxToolTurns, DEFAULT_CHAT_TOOL_TURNS);
   let activeTools = tools;
   const isToolAllowed = (name: string): boolean => activeTools.some(tool => tool.function.name === name);
   let providerToolParseFailures = 0;

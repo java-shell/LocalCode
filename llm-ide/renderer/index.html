@@ -418,7 +418,7 @@
           <div class="settings-section-title">Chat Behavior</div>
           <div class="settings-grid">
             <label class="label" for="settingMaxToolTurns">Max Tool Turns</label>
-            <input id="settingMaxToolTurns" type="number" min="1" max="200" step="1" />
+            <input id="settingMaxToolTurns" type="number" min="1" max="1000" step="1" />
             <label class="label" for="settingRequestTimeoutMs">Request Timeout (ms)</label>
             <input id="settingRequestTimeoutMs" type="number" min="1000" max="3600000" step="1000" />
             <label class="label" for="settingPromptSpecVersion">Prompt Policy Version</label>
@@ -427,7 +427,7 @@
               <option value="v2">v2 (revised)</option>
             </select>
           </div>
-          <div class="settings-help">Defaults: 40 tool turns, 180000 ms (3 minutes).</div>
+          <div class="settings-help">Defaults: 250 tool turns (max 1000), 180000 ms (3 minutes).</div>
           <label class="orch-tool-item settings-checkbox" for="settingChatDebugDumpsEnabled">
             <input id="settingChatDebugDumpsEnabled" type="checkbox" />
             Enable chat debug dumps

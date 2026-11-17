@@ -65,6 +65,7 @@ import {
 import { buildWorkspaceTree, readWorkspaceFile, writeWorkspaceFile } from './backend/workspaceFs';
 import { TurboVecMemory, computeAdaptiveInjectionLimits } from './backend/turboVecMemory';
 import { formatEnvironmentGuidance } from './shared/environment';
+import { clampToolTurns, DEFAULT_CHAT_TOOL_TURNS, MAX_SUB_AGENT_TOOL_TURNS, DEFAULT_SUB_AGENT_TOOL_TURNS } from './shared/toolBudget';
 
 // Preserve Electron's display/GPU selection. Native crash reporting is diagnostic
 // only; forcing X11/software rendering is not a verified SIGTRAP remedy.
@@ -547,7 +548,7 @@ function formatToolAvailabilityGuidance(toolNames: string[]): string {
         '- You can delegate narrow, well-scoped parallel tasks via spawn_sub_agent.',
         '- Use sub-agents when delegation will clearly improve speed or reduce context switching.',
         '- Avoid over-delegation: do not spawn sub-agents for trivial or tightly-coupled steps you can complete directly.',
-        '- Sub-agent tool turns are clamped to 1-50 per run; omit maxToolTurns to use the default of 8.',
+        `- Sub-agent tool turns are clamped to 1-${MAX_SUB_AGENT_TOOL_TURNS} per run; omit maxToolTurns to use the default of ${DEFAULT_SUB_AGENT_TOOL_TURNS}.`,
         '- Before spawning, define a focused objective, expected output, and the minimum tool set needed.',
         '- Integrate sub-agent results, verify quality, and keep final responsibility in this main chat turn.'
       ].join('\n')
@@ -1746,7 +1747,7 @@ ipcMain.handle(
               }
               event.sender.send('chat:event', message);
             },
-            payload.maxToolTurns ?? 40,
+            clampToolTurns(payload.maxToolTurns ?? DEFAULT_CHAT_TOOL_TURNS, DEFAULT_CHAT_TOOL_TURNS),
             abortController.signal,
             token => {
               streamedTokenCount += 1;

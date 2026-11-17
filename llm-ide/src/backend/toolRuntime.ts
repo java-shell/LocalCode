@@ -15,6 +15,7 @@ import {
 } from '../shared/types';
 import type { TurboVecMemory, TurboVecNamespaceDiagnostics } from './turboVecMemory';
 import type { BrowserSessionManager } from './browserSessionManager';
+import { clampSubAgentToolTurns, DEFAULT_SUB_AGENT_TOOL_TURNS, MAX_SUB_AGENT_TOOL_TURNS } from '../shared/toolBudget';
 
 interface RuntimeSubAgentProfile {
   id: string;
@@ -820,7 +821,7 @@ export const toolDefinitions: ToolDefinition[] = [
           },
           maxToolTurns: {
             type: 'number',
-            description: 'Optional cap for sub-agent tool turns. Default 8, max 50.'
+            description: `Optional cap for sub-agent tool turns. Default ${DEFAULT_SUB_AGENT_TOOL_TURNS}, max ${MAX_SUB_AGENT_TOOL_TURNS}.`
           },
           tasks: {
             type: 'array',
@@ -845,7 +846,7 @@ export const toolDefinitions: ToolDefinition[] = [
                 },
                 maxToolTurns: {
                   type: 'number',
-                  description: 'Optional cap for this task. Default 8, max 50.'
+                  description: `Optional cap for this task. Default ${DEFAULT_SUB_AGENT_TOOL_TURNS}, max ${MAX_SUB_AGENT_TOOL_TURNS}.`
                 }
               },
               required: ['prompt', 'toolNames']
@@ -2527,7 +2528,7 @@ async function spawnSubAgent(
   const childToolNames = requestedChildToolNames.filter(name => name !== 'spawn_sub_agent');
   const childToolDefs = getAllowedToolDefinitions(childToolNames, context);
   const childAllowed = new Set(childToolNames);
-  const maxToolTurns = Math.max(1, Math.min(50, Math.floor(Number(args.maxToolTurns ?? 8) || 8)));
+  const maxToolTurns = clampSubAgentToolTurns(args.maxToolTurns ?? DEFAULT_SUB_AGENT_TOOL_TURNS);
   const promptSpecVersion = normalizePromptSpecVersion(context?.promptSpecVersion);
 
   const messages: ChatMessage[] = [

@@ -214,7 +214,7 @@
         <strong>Settings</strong>
       </div>
       <label class="label" for="settingMaxToolTurns">Max Tool Turns (Chat)</label>
-      <input id="settingMaxToolTurns" type="number" min="1" max="200" step="1" />
+      <input id="settingMaxToolTurns" type="number" min="1" max="1000" step="1" />
       <label class="label" for="settingRequestTimeoutMs">LLM Request Timeout (ms)</label>
       <input id="settingRequestTimeoutMs" type="number" min="1000" max="600000" step="1000" />
       <label class="label" for="settingEndpoint">Default Endpoint</label>
@@ -228,7 +228,7 @@
       <input id="settingModel" placeholder="llama3" />
       <label class="label" for="settingApiKey">Default API Key (optional)</label>
       <input id="settingApiKey" type="password" placeholder="sk-..." />
-      <div class="settings-help">Defaults: max tool turns 40, timeout 180000 ms (3 minutes).</div>
+      <div class="settings-help">Defaults: max tool turns 250 (max 1000), timeout 180000 ms (3 minutes).</div>
       <div class="settings-actions">
         <button id="settingsCancel" type="button">Cancel</button>
         <button id="settingsSave" type="button">Save</button>

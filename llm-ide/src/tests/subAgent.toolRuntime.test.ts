@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { executeTool } from '../backend/toolRuntime';
 import * as llmClient from '../backend/llmClient';
 import type { ChatMessage, LLMConfig, ToolDefinition } from '../shared/types';
+import {
+  DEFAULT_SUB_AGENT_TOOL_TURNS,
+  MAX_SUB_AGENT_TOOL_TURNS
+} from '../shared/toolBudget';
 
 /**
  * Temporarily replace llmClient.chatWithTools so spawn_sub_agent behavior can be tested offline.
@@ -341,7 +345,7 @@ test('spawn_sub_agent can fan out parallel tasks in one tool call', async () => 
   });
 });
 
-test('spawn_sub_agent clamps maxToolTurns to 50', async () => {
+test('spawn_sub_agent clamps maxToolTurns to the shared 1000 ceiling', async () => {
   await withMockedChatWithTools(async (
     _config: LLMConfig,
     _initialMessages: ChatMessage[],
@@ -350,7 +354,7 @@ test('spawn_sub_agent clamps maxToolTurns to 50', async () => {
     _onEvent?: (message: string) => void,
     maxToolTurns?: number
   ) => {
-    assert.equal(maxToolTurns, 50);
+    assert.equal(maxToolTurns, 1000);
     return {
       text: 'Clamped tool-turn run completed.',
       usage: { promptTokens: 3, completionTokens: 4, totalTokens: 7, requests: 1 }
@@ -359,10 +363,36 @@ test('spawn_sub_agent clamps maxToolTurns to 50', async () => {
     const result = await executeTool('spawn_sub_agent', {
       prompt: 'Use a high tool-turn budget.',
       toolNames: ['read_file'],
-      maxToolTurns: 999
+      maxToolTurns: 9999
     }, makeContext() as any) as { ok: boolean; findings: string };
 
     assert.equal(result.ok, true);
     assert.match(result.findings, /Clamped tool-turn run completed/);
+  });
+});
+
+test('spawn_sub_agent accepts a maxToolTurns value at the 1000 ceiling', async () => {
+  await withMockedChatWithTools(async (
+    _config: LLMConfig,
+    _initialMessages: ChatMessage[],
+    _tools: ToolDefinition[],
+    _executeTool: (name: string, args: unknown) => Promise<unknown>,
+    _onEvent?: (message: string) => void,
+    maxToolTurns?: number
+  ) => {
+    assert.equal(maxToolTurns, 1000);
+    return {
+      text: 'Full ceiling tool-turn run completed.',
+      usage: { promptTokens: 3, completionTokens: 4, totalTokens: 7, requests: 1 }
+    };
+  }, async () => {
+    const result = await executeTool('spawn_sub_agent', {
+      prompt: 'Use the full sub-agent tool-turn ceiling.',
+      toolNames: ['read_file'],
+      maxToolTurns: 1000
+    }, makeContext() as any) as { ok: boolean; findings: string };
+
+    assert.equal(result.ok, true);
+    assert.match(result.findings, /Full ceiling tool-turn run completed/);
   });
 });

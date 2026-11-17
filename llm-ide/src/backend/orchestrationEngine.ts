@@ -19,6 +19,7 @@ import {
 } from '../shared/types';
 import { RetrievedMemoryItem, computeAdaptiveInjectionLimits } from './turboVecMemory';
 import { formatEnvironmentGuidance } from '../shared/environment';
+import { clampToolTurns, DEFAULT_CHAT_TOOL_TURNS } from '../shared/toolBudget';
 
 export interface RuntimeContext {
   workspaceDir: string;
@@ -491,7 +492,7 @@ async function runStepWithRetries(
   const COMPLETION_TOOL = 'complete_orchestration_task';
   const DOWNSTREAM_STAGE_TOOL = 'call_downstream_stage';
   const stepToolCalls: Array<{ name: string; intent: string; timestamp: string }> = [];
-  const stepMaxToolTurns = Math.max(1, Math.min(200, Math.floor(Number(step.maxToolTurns ?? 40) || 40)));
+  const stepMaxToolTurns = clampToolTurns(step.maxToolTurns ?? DEFAULT_CHAT_TOOL_TURNS, DEFAULT_CHAT_TOOL_TURNS);
   const maxRetries = clampMaxRetries(step.maxRetries);
   const staticAllowedToolNames = step.tools.filter(tool => tool.enabled).map(tool => tool.name);
   const discoveredMcpToolNames = Array.isArray(runtimeContext?.mcpToolDefinitions)
