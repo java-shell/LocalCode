@@ -319,6 +319,9 @@ The root [.gitignore](.gitignore) excludes generated and dependency-heavy direct
 
 - `llm-ide/node_modules/`
 - `llm-ide/out/`
+- `llm-ide/dist/` — packaged installers (`AppImage`, `nsis`, `zip`) and `*-unpacked/` trees are
+  build output, not source. Earlier releases committed them through Git LFS (~2.6 GB); publish each
+  build as a GitHub Release asset instead. See [NEXT.md](NEXT.md).
 
 ## Troubleshooting
 

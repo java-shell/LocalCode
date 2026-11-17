@@ -5,3 +5,4 @@ out/
 *.log
 llm-ide/src/backend/turbovec_memory/stackoverflow/memory.jsonl
 llm-ide/src/backend/turbovec_memory/stackoverflow/memory.tvec
+llm-ide/dist/
