@@ -20,6 +20,7 @@ import {
 import { RetrievedMemoryItem, computeAdaptiveInjectionLimits } from './turboVecMemory';
 import { formatEnvironmentGuidance } from '../shared/environment';
 import { clampToolTurns, DEFAULT_CHAT_TOOL_TURNS } from '../shared/toolBudget';
+import { loadAiRules, formatAiRulesGuidance } from './workspaceFs';
 
 export interface RuntimeContext {
   workspaceDir: string;
@@ -43,6 +44,11 @@ export interface RuntimeContext {
   invokeMcpTool?: (toolName: string, args: Record<string, unknown>) => Promise<unknown>;
   allowedToolNames?: string[];
   onAgentEvent?: (message: string) => void;
+  /**
+   * Pre-loaded `.ai-rules` guidance for this run. Read once per orchestration run (see
+   * runOrchestration) and reused by every stage so the folder is not re-read per step.
+   */
+  aiRulesContent?: string | null;
 }
 
 export interface OrchestrationMemoryAdapter {
@@ -545,6 +551,12 @@ async function runStepWithRetries(
       messages.push({ role: 'system', content: environmentGuidance });
     }
 
+    // Workspace coding rules from .ai-rules/, cached for the whole run.
+    const aiRulesGuidance = formatAiRulesGuidance(runtimeContext?.aiRulesContent);
+    if (aiRulesGuidance) {
+      messages.push({ role: 'system', content: aiRulesGuidance });
+    }
+
     if (lastErrorDetail) {
       messages.push({
         role: 'system',
@@ -634,6 +646,7 @@ async function runStepWithRetries(
             mcpToolDefinitions: runtimeContext?.mcpToolDefinitions,
             invokeMcpTool: runtimeContext?.invokeMcpTool,
             allowedToolNames,
+            aiRulesContent: runtimeContext?.aiRulesContent,
             onAgentEvent: (message: string) => {
               onEvent?.(`${step.name}:iteration:${iteration}:${message}`);
             }
@@ -1060,6 +1073,21 @@ export async function runOrchestration(
   const completionMarker = String(plan.completionMarker ?? 'TASK_COMPLETE').trim();
   const loopLimit = loopUntilComplete ? maxLoops : 1;
 
+  // TODO item 1.4: read .ai-rules once for the whole run instead of once per step/loop.
+  // An explicit aiRulesContent on the context (chat hands its already-loaded copy down) wins.
+  const cachedAiRules =
+    runtimeContext && Object.prototype.hasOwnProperty.call(runtimeContext, 'aiRulesContent')
+      ? runtimeContext.aiRulesContent
+      : runtimeContext?.workspaceDir
+        ? (await loadAiRules(runtimeContext.workspaceDir))?.content ?? null
+        : null;
+  const runRuntimeContext: RuntimeContext | undefined = runtimeContext
+    ? { ...runtimeContext, aiRulesContent: cachedAiRules }
+    : undefined;
+  if (runRuntimeContext?.aiRulesContent) {
+    onEvent?.('[ai-rules] injected workspace guidance.');
+  }
+
   const allSteps: OrchestrationRunStep[] = [];
   let iterationPrompt = userPrompt;
   let finalOutput = '';
@@ -1085,7 +1113,7 @@ export async function runOrchestration(
           iteration,
           options,
           onEvent,
-          runtimeContext,
+          runRuntimeContext,
           memoryAdapter,
           signal,
           allSteps.length,
@@ -1098,7 +1126,7 @@ export async function runOrchestration(
           iteration,
           options,
           onEvent,
-          runtimeContext,
+          runRuntimeContext,
           memoryAdapter,
           signal,
           storeIntermediateOutputs

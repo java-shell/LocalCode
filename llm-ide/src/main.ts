@@ -62,7 +62,13 @@ import {
   runTerminalCommand,
   toolDefinitions
 } from './backend/toolRuntime';
-import { buildWorkspaceTree, readWorkspaceFile, writeWorkspaceFile } from './backend/workspaceFs';
+import {
+  buildWorkspaceTree,
+  readWorkspaceFile,
+  writeWorkspaceFile,
+  loadAiRules,
+  formatAiRulesGuidance
+} from './backend/workspaceFs';
 import { TurboVecMemory, computeAdaptiveInjectionLimits } from './backend/turboVecMemory';
 import { formatEnvironmentGuidance } from './shared/environment';
 import { clampToolTurns, DEFAULT_CHAT_TOOL_TURNS, MAX_SUB_AGENT_TOOL_TURNS, DEFAULT_SUB_AGENT_TOOL_TURNS } from './shared/toolBudget';
@@ -1432,6 +1438,8 @@ ipcMain.handle(
     const messages: ChatMessage[] = [];
     const systemPromptSections: string[] = [];
     const promptSpecVersion = normalizePromptSpecVersion(payload.promptSpecVersion);
+    // Workspace guidance from .ai-rules/, read once per request and reused by sub-agents.
+    const aiRules = await loadAiRules(selectedWorkspaceDir);
     let recalledMemorySystemSection = '';
     let recalledPromptTokens = 0;
     const normalizedHistoryMessages = Array.isArray(payload.historyMessages)
@@ -1610,6 +1618,11 @@ ipcMain.handle(
         systemPromptSections.push(recalledMemorySystemSection);
       }
 
+      const aiRulesGuidance = formatAiRulesGuidance(aiRules?.content);
+      if (aiRulesGuidance) {
+        systemPromptSections.push(aiRulesGuidance);
+      }
+
       if (systemPromptSections.length > 0) {
         messages.push({ role: 'system', content: systemPromptSections.join('\n\n') });
       }
@@ -1642,6 +1655,8 @@ ipcMain.handle(
         },
         activeNamespaces: chatNamespaces.length > 0 ? chatNamespaces : undefined,
         allowedToolNames: mergedToolNames,
+        // Hand the already-loaded rules to sub-agents so they are not re-read per spawn.
+        aiRulesContent: aiRules?.content ?? null,
         onAgentEvent: (message: string) => {
           event.sender.send('chat:event', message);
         },
@@ -1664,6 +1679,12 @@ ipcMain.handle(
       };
 
       event.sender.send('chat:event', `[prompt] using ${promptSpecVersion} prompt policy.`);
+      if (aiRules) {
+        event.sender.send(
+          'chat:event',
+          `[ai-rules] injected workspace guidance. (${aiRules.files.length} file(s): ${aiRules.files.join(', ')})`
+        );
+      }
 
       const toolDefs = getAllowedToolDefinitions(mergedToolNames, chatRuntimeContext);
 

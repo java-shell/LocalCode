@@ -16,6 +16,7 @@ import {
 import type { TurboVecMemory, TurboVecNamespaceDiagnostics } from './turboVecMemory';
 import type { BrowserSessionManager } from './browserSessionManager';
 import { clampSubAgentToolTurns, DEFAULT_SUB_AGENT_TOOL_TURNS, MAX_SUB_AGENT_TOOL_TURNS } from '../shared/toolBudget';
+import { loadAiRules, formatAiRulesGuidance } from './workspaceFs';
 
 interface RuntimeSubAgentProfile {
   id: string;
@@ -126,6 +127,11 @@ interface RuntimeContext {
     referenceLabel: string;
     targets: string[];
   }) => Promise<boolean>;
+  /**
+   * Pre-loaded `.ai-rules` guidance. The parent chat/orchestration request loads it once and
+   * passes it down so every sub-agent follows the same workspace rules without re-reading disk.
+   */
+  aiRulesContent?: string | null;
 }
 
 /** Tool scope: 'workspace', 'root', or a reference workspace id prefixed with 'ref:' */
@@ -507,7 +513,7 @@ export const toolDefinitions: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'write_file',
-      description: 'Write full content to a file in selected scope. Use only for short files; prefer replace_in_file or insert_in_file for large files.',
+      description: 'Write full content to a file in selected scope. Use only for short files; prefer replace_in_file or insert_in_file for large files. Follow any .ai-rules/ guidance for this workspace.',
       parameters: {
         type: 'object',
         properties: { path: { type: 'string' }, content: { type: 'string', maxLength: 4000 }, scope: scopeProperty },
@@ -2320,7 +2326,8 @@ function fallbackSubAgentProfile(context?: RuntimeContext): RuntimeSubAgentProfi
 
 async function runParallelSubAgentTasks(
   args: Record<string, unknown>,
-  context?: RuntimeContext
+  context: RuntimeContext | undefined,
+  batchAiRules: string | null
 ): Promise<SpawnSubAgentResult | null> {
   const rawTasks = Array.isArray(args.tasks) ? args.tasks : [];
   if (rawTasks.length === 0) {
@@ -2352,6 +2359,12 @@ async function runParallelSubAgentTasks(
     endpoint?: string;
   }> = new Array(tasks.length);
 
+  // Fan-out tasks share one rules read; each child still gets the workspace guidance.
+  const batchContext: RuntimeContext = {
+    ...(context as RuntimeContext),
+    aiRulesContent: batchAiRules
+  };
+
   let cursor = 0;
   const workers = Array.from({ length: Math.min(maxParallel, tasks.length) }, async () => {
     while (true) {
@@ -2367,7 +2380,7 @@ async function runParallelSubAgentTasks(
         prompt: task.prompt,
         toolNames: Array.isArray(task.toolNames) ? task.toolNames : args.toolNames,
         maxToolTurns: task.maxToolTurns ?? args.maxToolTurns
-      }, context);
+      }, batchContext);
 
       results[currentIndex] = {
         index: currentIndex,
@@ -2451,7 +2464,15 @@ async function spawnSubAgent(
     };
   }
 
-  const batchResult = await runParallelSubAgentTasks(args, context);
+  // Sub-agents follow the same workspace rules as their parent. Use the copy already loaded by
+  // the parent chat/orchestration request when present; otherwise read it once here so nested
+  // spawns and fan-out batches still comply without re-reading per task.
+  const inheritedAiRules: string | null =
+    context && Object.prototype.hasOwnProperty.call(context, 'aiRulesContent')
+      ? context.aiRulesContent ?? null
+      : (await loadAiRules(context?.workspaceDir ?? process.cwd()))?.content ?? null;
+
+  const batchResult = await runParallelSubAgentTasks(args, context, inheritedAiRules);
   if (batchResult) {
     return batchResult;
   }
@@ -2531,6 +2552,8 @@ async function spawnSubAgent(
   const maxToolTurns = clampSubAgentToolTurns(args.maxToolTurns ?? DEFAULT_SUB_AGENT_TOOL_TURNS);
   const promptSpecVersion = normalizePromptSpecVersion(context?.promptSpecVersion);
 
+  const childAiRulesGuidance = formatAiRulesGuidance(inheritedAiRules);
+
   const messages: ChatMessage[] = [
     {
       role: 'system',
@@ -2566,6 +2589,10 @@ async function spawnSubAgent(
     }
   ];
 
+  if (childAiRulesGuidance) {
+    messages.splice(1, 0, { role: 'system', content: childAiRulesGuidance });
+  }
+
   const childContext: RuntimeContext = {
     workspaceDir: context?.workspaceDir ?? process.cwd(),
     rootDir: context?.rootDir ?? process.cwd(),
@@ -2585,7 +2612,8 @@ async function spawnSubAgent(
     subAgentDepth: (context?.subAgentDepth ?? 0) + 1,
     onQueryUser: context?.onQueryUser,
     requestReferenceWriteApproval: context?.requestReferenceWriteApproval,
-    onAgentEvent: context?.onAgentEvent
+    onAgentEvent: context?.onAgentEvent,
+    aiRulesContent: inheritedAiRules
   };
 
   context?.onAgentEvent?.(

@@ -324,8 +324,10 @@ test('spawn_sub_agent can fan out parallel tasks in one tool call', async () => 
       batch?: { total: number; succeeded: number; failed: number; maxParallel: number };
     }>;
 
-    for (let i = 0; i < 20 && callCount < 2; i += 1) {
-      await Promise.resolve();
+    // Fan-out now performs an async .ai-rules lookup before dispatching children, so wait on
+    // real time rather than a fixed number of microtask ticks.
+    for (let i = 0; i < 100 && callCount < 2; i += 1) {
+      await new Promise(resolve => setTimeout(resolve, 10));
     }
 
     assert.equal(callCount, 2);
