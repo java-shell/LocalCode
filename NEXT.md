@@ -6,7 +6,7 @@ Status legend: `[x]` done in this pass, `[ ]` still open.
 ## Task Start Declaration
 
 - **Task**: Review the application, record findings, and land the P0 cleanup items
-- **Type**: Multi-step with TODO Ledger (AI-011 … AI-016)
+- **Type**: Multi-step with TODO Ledger (AI-011 … AI-023)
 - **Applicable Rules**: Change Safety Protocol (§5), Testing Requirements (§6), Documentation Deliverables (§8), CI/CD Best Practices (§23), Token Optimization and Efficiency (§26)
 - **Breaking Changes**: None. `llm-ide/dist/` is removed from version control (build output moves to release assets); no runtime or API behavior changes.
 - **Clarifications Needed**: None
@@ -39,7 +39,7 @@ Largest files: [llm-ide/renderer/app.js](llm-ide/renderer/app.js) (8,281 lines),
 
 ## P0 — Land the in-flight work
 
-- [x] **AI-011 — Fix the stale contract test.** (`8047799`)
+- [x] **AI-011 — Fix the stale contract test.** (`effdafa`)
   [llm-ide/src/tests/renderer.referenceWorkspace.test.ts](llm-ide/src/tests/renderer.referenceWorkspace.test.ts)
   asserted a hardcoded `toolNames: ['list_reference_workspaces', 'list_mcp_servers'` literal in
   `renderer/app.js`, while commit `e1bf313` deliberately moved chat tool names to the backend IPC
@@ -49,7 +49,7 @@ Largest files: [llm-ide/renderer/app.js](llm-ide/renderer/app.js) (8,281 lines),
   The assertion now verifies the real source of truth: `getDefaultChatToolNames()` exposes both
   discovery tools. Suite result: **269 tests, 267 passed, 0 failed, 2 skipped**.
 
-- [x] **AI-012 — Commit the tool-call budget work.** (`887eaa1`)
+- [x] **AI-012 — Commit the tool-call budget work.** (`4a8fcf2`)
   Ceiling raised 200 → 1000 for chat, orchestration steps and `spawn_sub_agent` children; chat
   default 40 → 250; sub-agent ceiling 50 → 1000 with the narrow default of 8 preserved. One module,
   [llm-ide/src/shared/toolBudget.ts](llm-ide/src/shared/toolBudget.ts), is now consumed by the
@@ -58,7 +58,7 @@ Largest files: [llm-ide/renderer/app.js](llm-ide/renderer/app.js) (8,281 lines),
   silently re-clamped downstream. Orchestration preset defaults (40/60/10) are unchanged, so
   existing plans behave exactly as before.
 
-- [x] **AI-013 — Commit the Ollama capability-compatibility work.** (`b286f42`)
+- [x] **AI-013 — Commit the Ollama capability-compatibility work.** (`36bd080`)
   One shared `requestOllamaNative` adapter in
   [llm-ide/src/backend/llmClient.ts](llm-ide/src/backend/llmClient.ts) replaces three duplicated
   transport branches. An explicit HTTP 400 `does not support thinking` is retried once without
@@ -67,11 +67,11 @@ Largest files: [llm-ide/renderer/app.js](llm-ide/renderer/app.js) (8,281 lines),
   model. Streaming HTTP error bodies are decoded as text, bounded to 64 KiB and two seconds, instead
   of serializing socket internals. Saved settings are not rewritten.
 
-- [x] **AI-014 — Stop versioning build artifacts.** (`c2efc0b`)
+- [x] **AI-014 — Stop versioning build artifacts.** (`7ac32b7`)
   `llm-ide/dist/` is now ignored and removed from the index (176 LFS-tracked files, ~2.6 GB).
   Installers should be published as GitHub Release assets instead of committed binaries.
 
-- [ ] **AI-017 — Open PRs and tag a release.** (commits `8047799`…`bb1b589` are local on `main`)
+- [ ] **AI-017 — Open PRs and tag a release.** (commits `effdafa`…`90a1c6b` are local on `main`)
   The commits on `main` are local; `origin` could not be reached from this environment (no
   credentials). Push `main`, open PRs per feature if branch-based review is preferred, cut
   `v1.0.2` (or `v1.1.0`) and attach the AppImage/NSIS artifacts as release assets so
@@ -79,13 +79,24 @@ Largest files: [llm-ide/renderer/app.js](llm-ide/renderer/app.js) (8,281 lines),
 
 ## P1 — Real gaps in the roadmap
 
-- [ ] **AI-018 — `.ai-rules` auto-injection is still 0/5 implemented.**
-  [markdown-reference/TODO.md](markdown-reference/TODO.md) Phase 1–2 items 1.1–1.4 remain PENDING
-  and `loadAiRules()` does not exist anywhere in `llm-ide/src`. Highest-value unimplemented planned
-  feature, and it matters most here because this repository depends on `.ai-rules/rules.md` for
-  agent behavior. Planned shape: `loadAiRules(workspaceDir)` in `workspaceFs.ts` (sorted `.md`
-  files, `README.md` first, ~8 KB cap), injected as a system message after memory injection and
-  before the user prompt in the `chat:stream` handler, plus per-orchestration caching.
+- [x] **AI-018 — `.ai-rules` auto-injection implemented (5/5).** (`026aa65`)
+  [markdown-reference/TODO.md](markdown-reference/TODO.md) items 1.1–1.5 are now complete, and the
+  root README claim that LocalCode injects `.ai-rules/` is finally true.
+  `loadAiRules()` + `formatAiRulesGuidance()` live in
+  [llm-ide/src/backend/workspaceFs.ts](llm-ide/src/backend/workspaceFs.ts): direct `.md` children
+  only, `README.md` and `RULES-QUICKREF.md` first, `## .ai-rules/<file>` headers, a 4000-char
+  per-file cap and an 8000-char total cap that includes headers and separators. It returns `null`
+  when the folder is absent or holds no readable Markdown, and never throws.
+  Injection points: chat (`main.ts`, appended to `systemPromptSections` before the single joined
+  system message, plus a `[ai-rules] injected workspace guidance.` event), every orchestration
+  stage (`orchestrationEngine.ts`, after `step.systemPrompt`/environment guidance), and sub-agents
+  including `tasks[]` fan-out batches. The read happens once per chat request and once per
+  orchestration run and is threaded down through `RuntimeContext.aiRulesContent`.
+  Two refinements beyond the original plan: the per-file cap exists because this repo's
+  `rules.md` is 105 KB and would otherwise crowd out the overview files; and sub-agents now
+  inherit the rules, which the plan left unspecified. New coverage:
+  `workspaceFs.aiRules.test.ts`, `aiRules.promptInjection.test.ts`,
+  `main.aiRulesInjection.contract.test.ts`.
 
 - [ ] **AI-019 — No CI and no linter.**
   [.github/](.github) contains only `copilot-instructions.md`; there is no `workflows/`, no
@@ -135,8 +146,9 @@ App-local design notes stay beside the app: [llm-ide/CHAT_SIDEBAR.md](llm-ide/CH
 
 ## Verification
 
-- `cd llm-ide && npm test` → **269 tests, 267 passed, 0 failed, 2 skipped** (the two skips are the
+- `cd llm-ide && npm test` → **285 tests, 283 passed, 0 failed, 2 skipped** (the two skips are the
   Electron-native crash minidump test and the context-isolation preload test, both environment-gated).
+  The `.ai-rules` work added 16 tests across three files.
 - `git status` after the commits is clean apart from ignored `dist/`, `out/` and `node_modules/`.
 - No runtime source changed in this pass except the test assertion; behavior of chat, orchestration,
   tool runtime and packaging is unchanged.

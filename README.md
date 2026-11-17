@@ -40,7 +40,7 @@ It brings an editor, chat, workflow runner, and live terminal output into one lo
 - Connect to OpenAI-compatible `/v1/chat/completions` endpoints.
 - Stream responses and model events into the chat output.
 - Enable or disable model tool access by name.
-- Adjust max tool turns, bounded from `1` to `200`.
+- Adjust max tool turns, bounded from `1` to `1000`.
 
 ### Orchestration Workflows
 
@@ -112,7 +112,7 @@ When a model calls `query_user`, an info toast notification appears with a "blip
 1. Model receives user prompt + system context (memory, .ai-rules)
 2. Model decides to call tools based on available permissions
 3. Each tool executes locally; results are streamed to the model
-4. Model can make up to `maxToolTurns` rounds of tool calls (default: 40, max: 200)
+4. Model can make up to `maxToolTurns` rounds of tool calls (chat default: 250, max: 1000)
 5. Final response is streamed back to the chat panel
 
 ## TurboVec Memory
@@ -179,10 +179,16 @@ Create a `.ai-rules/` folder in your workspace to provide automatic guidance to 
 ### How It Works
 
 1. Place `.md` files inside `.ai-rules/` at your workspace root
-2. On every chat or orchestration request, LocalCode reads all `.md` files (README.md first, then alphabetical)
-3. Content is concatenated and injected as a system message **before** the user prompt
-4. Total content is capped at ~8000 characters to protect context window
-5. If the folder doesn't exist, this step is silently skipped
+2. On every chat or orchestration request, LocalCode reads the `.md` files in that folder
+   (`README.md` and `RULES-QUICKREF.md` first, then alphabetical). Nested folders are not read.
+3. Each file is capped at 4000 characters and the combined block at 8000 characters, so one large
+   rules file cannot crowd out the overview files
+4. Content is concatenated under `## .ai-rules/<file>` headers and injected as system context
+   **before** the user prompt — in chat, in every orchestration stage, and in spawned sub-agents
+5. The read happens once per request (and once per orchestration run), then is reused by stages
+   and sub-agents instead of being re-read
+6. The event log shows `[ai-rules] injected workspace guidance.` when rules were loaded
+7. If the folder doesn't exist, or has no readable Markdown, this step is silently skipped
 
 ### Example Structure
 

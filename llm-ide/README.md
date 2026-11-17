@@ -3,6 +3,46 @@
 LocalCode is a standalone desktop platform built with Electron.
 It is not a VS Code extension.
 
+## `.ai-rules` Workspace Guidance — 2026-11-17
+
+A workspace that contains a `.ai-rules/` folder now has its guidance injected automatically
+into every model request. Previously the root README described this behavior but no code
+implemented it; `loadAiRules()` in [`src/backend/workspaceFs.ts`](src/backend/workspaceFs.ts)
+closes that gap.
+
+**Loading rules** — direct `.md` children of `.ai-rules/` only (nested folders are not read,
+so a stray subdirectory cannot widen the read scope). `README.md` and `RULES-QUICKREF.md` come
+first, then the rest alphabetically. Each file is capped at `AI_RULES_PER_FILE_MAX_CHARS`
+(4000) and the combined block at `AI_RULES_MAX_CHARS` (8000), counting the
+`## .ai-rules/<file>` headers and separators, so a single oversized file cannot crowd out the
+overview files. `loadAiRules()` returns `null` when the folder is missing or contains no
+readable Markdown, and an unreadable file is skipped rather than raised — missing guidance must
+never fail the user's request.
+
+**Injection points**
+
+| Path | Where the rules land |
+| --- | --- |
+| Chat (`src/main.ts`) | Appended to `systemPromptSections` before the single joined system message, so rules arrive after memory/MCP guidance and before the user prompt. Emits `[ai-rules] injected workspace guidance.` on the `chat:event` channel. |
+| Orchestration (`src/backend/orchestrationEngine.ts`) | One system message per stage, after `step.systemPrompt` and environment guidance. Read once at `runOrchestration()` and reused by every stage and loop. |
+| Sub-agents (`src/backend/toolRuntime.ts`) | Inserted into the child message list after the sub-agent identity prompt, for both single runs and `tasks[]` fan-out batches. |
+
+The loaded copy is threaded down through `RuntimeContext.aiRulesContent`, so stages and
+sub-agents never re-read disk. `formatAiRulesGuidance()` keeps the wording identical across all
+three paths and states that the rules refine, but do not override, the system policies above
+them — workspace-authored text is treated as guidance, not elevated privilege.
+
+**Verification:** `src/tests/workspaceFs.aiRules.test.ts` (absent folder, empty folder,
+ordering, per-file and total caps, nested-path rejection, unreadable file),
+`src/tests/aiRules.promptInjection.test.ts` (orchestration stage placement, per-run caching,
+no-`.ai-rules` no-op, sub-agent inheritance and self-load) and
+`src/tests/main.aiRulesInjection.contract.test.ts` (chat wiring in both `src/main.ts` and
+`out/main.js`). Full suite: **285 tests, 283 passed, 0 failed, 2 skipped**.
+
+**Non-breaking:** workspaces without `.ai-rules/` are unaffected. In this repository the feature
+injects 8000 characters of `README.md`, `RULES-QUICKREF.md` and `AI-RULES-REVIEW.md` per request;
+`rules.md` (105 KB) is not reachable within the budget, which is why the quick reference exists.
+
 ## Tool-Call Budget — 1000 turns (2026-11-17)
 
 The maximum tool-call budget is now **1000 tool turns** for chat, orchestration
@@ -335,6 +375,7 @@ terminal/guidance changes outside this diagnostics addition; no incompatible cal
 - Monaco-based code editor with tab management and dirty-state tracking.
 - Chat panel with streaming responses, tool calling, and TurboVec memory integration.
 - Simple and Advanced orchestration for multi-step AI workflows.
+- Automatic `.ai-rules/` workspace guidance injected into chat, orchestration and sub-agent requests.
 - Toast notifications with audio alerts for completion and errors.
 
 ## Feature Reference

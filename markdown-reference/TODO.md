@@ -12,6 +12,24 @@ Three feature areas to implement in LocalCode (llm-ide):
 
 ## 1. `.ai-rules` Folder Auto-Loading
 
+### Status: ✅ COMPLETE
+
+Landed in `llm-ide/src/backend/workspaceFs.ts` (`loadAiRules()` + `formatAiRulesGuidance()`),
+`main.ts` (chat), `orchestrationEngine.ts` (stages, cached per run) and `toolRuntime.ts`
+(sub-agents, including fan-out batches). Tests: `workspaceFs.aiRules.test.ts`,
+`aiRules.promptInjection.test.ts`, `main.aiRulesInjection.contract.test.ts`.
+
+Two deliberate refinements to the original plan:
+
+- **Per-file cap of 4000 chars in addition to the 8000-char total.** `rules.md` in this repo is
+  105 KB; with only a total cap it would consume the whole budget and `README.md` /
+  `RULES-QUICKREF.md` would never reach the model. Each file is capped separately, and the
+  `## .ai-rules/<file>` headers plus separators count against the total, so the injected block
+  never exceeds 8000 characters.
+- **Sub-agents inherit the rules.** The plan did not say whether `spawn_sub_agent` children should
+  see `.ai-rules`. They now do: the parent request loads the rules once and passes them down via
+  `RuntimeContext.aiRulesContent`, so nested and parallel children comply without extra disk reads.
+
 ### Goal
 
 When a workspace contains a `.ai-rules/` folder, the model should automatically read its contents (rules, guidance files) and inject them as system context **before** processing any user prompt. If the folder does not exist, this step is silently skipped.
@@ -32,8 +50,8 @@ When a workspace contains a `.ai-rules/` folder, the model should automatically 
 **File:** `llm-ide/src/backend/workspaceFs.ts`
 
 ```
-[ ] Add function:
-    export async function loadAiRules(workspaceDir: string): Promise<string | null>
+[x] Add function:
+    export async function loadAiRules(workspaceDir: string): Promise<AiRules | null>
     
     Logic:
     a. Check if `.ai-rules/` directory exists via fs.access()
@@ -49,7 +67,7 @@ When a workspace contains a `.ai-rules/` folder, the model should automatically 
 **File:** `llm-ide/src/main.ts` (inside `chat:stream` handler, ~line 500-600)
 
 ```
-[ ] After memory injection block (~line 555), add:
+[x] After memory injection block (~line 555), add:
     
     const aiRulesContent = await loadAiRules(selectedWorkspaceDir);
     if (aiRulesContent) {
@@ -71,7 +89,7 @@ When a workspace contains a `.ai-rules/` folder, the model should automatically 
 **File:** `llm-ide/src/backend/orchestrationEngine.ts` (inside `runStepWithRetries()`, ~line 305-340)
 
 ```
-[ ] After step.systemPrompt and memory injection, add:
+[x] After step.systemPrompt and memory injection, add:
     
     const aiRulesContent = await loadAiRules(runtimeContext?.workspaceDir || '');
     if (aiRulesContent) {
@@ -90,12 +108,12 @@ When a workspace contains a `.ai-rules/` folder, the model should automatically 
 **File:** `llm-ide/src/backend/orchestrationEngine.ts` (inside `runOrchestration()`, ~line 713+)
 
 ```
-[ ] At the top of runOrchestration():
+[x] At the top of runOrchestration():
     
     const aiRulesContent = await loadAiRules(runtimeContext?.workspaceDir || '');
     
-[ ] Pass aiRulesContent into runStepWithRetries() as a new parameter
-[ ] Use cached value instead of re-reading per step
+[x] Pass aiRulesContent into runStepWithRetries() as a new parameter (done as RuntimeContext.aiRulesContent)
+[x] Use cached value instead of re-reading per step
 ```
 
 #### 1.5 — Add `.ai-rules` awareness to tool descriptions (optional)
@@ -103,7 +121,7 @@ When a workspace contains a `.ai-rules/` folder, the model should automatically 
 **File:** `llm-ide/src/backend/toolRuntime.ts`
 
 ```
-[ ] Consider adding a note to the system prompt or tool definitions:
+[x] Consider adding a note to the system prompt or tool definitions:
     "This workspace may have an .ai-rules/ folder with coding conventions. 
      Respect those rules when making changes."
     
@@ -112,11 +130,11 @@ When a workspace contains a `.ai-rules/` folder, the model should automatically 
 
 ### Acceptance Criteria
 
-- [ ] Workspace **with** `.ai-rules/` → model receives rules as system context before every chat/orch request
-- [ ] Workspace **without** `.ai-rules/` → no change in behavior, no errors
-- [ ] Rules content is capped at ~8000 chars to protect context window
-- [ ] Event log shows `[ai-rules] injected workspace guidance.` when loaded
-- [ ] Orchestration caches the read (not re-read per step)
+- [x] Workspace **with** `.ai-rules/` → model receives rules as system context before every chat/orch request
+- [x] Workspace **without** `.ai-rules/` → no change in behavior, no errors
+- [x] Rules content is capped at ~8000 chars to protect context window (plus a 4000-char per-file cap)
+- [x] Event log shows `[ai-rules] injected workspace guidance.` when loaded
+- [x] Orchestration caches the read (not re-read per step)
 
 ---
 
@@ -673,15 +691,15 @@ Each preset includes full step definitions with:
 
 ```
 Phase 1: Foundation (no dependencies between items)
-├── 1.1  loadAiRules() helper in workspaceFs.ts          [ ] PENDING
+├── 1.1  loadAiRules() helper in workspaceFs.ts          [x] COMPLETE
 ├── 2.1  Toast HTML container                             [x] COMPLETE
 ├── 2.2  Toast CSS styles                                 [x] COMPLETE
 └── 3.1  README documentation updates                     [ ] PENDING
 
 Phase 2: Core Features (depends on Phase 1)
-├── 1.2  Chat flow .ai-rules injection                    [ ] PENDING
-├── 1.3  Orchestration flow .ai-rules injection           [ ] PENDING
-├── 1.4  Orchestration caching for .ai-rules              [ ] PENDING
+├── 1.2  Chat flow .ai-rules injection                    [x] COMPLETE
+├── 1.3  Orchestration flow .ai-rules injection           [x] COMPLETE
+├── 1.4  Orchestration caching for .ai-rules              [x] COMPLETE
 ├── 2.3  Ding sound (Web Audio API)                       [x] COMPLETE
 ├── 2.4  Toast helper function in app.js                  [x] COMPLETE
 ├── 3.3  Preset definitions                               [x] COMPLETE
@@ -702,7 +720,7 @@ Phase 3: Wiring & Polish (depends on Phase 2)
 
 | Feature | Status | Items Done |
 |---|---|---|
-| **1. `.ai-rules` Folder Auto-Loading** | ⏳ Not Started | 0/5 items |
+| **1. `.ai-rules` Folder Auto-Loading** | ✅ Complete | 5/5 items |
 | **2. Toast Notifications + Sounds** | ✅ Complete | 9/9 items |
 | **3. Documentation + Presets** | ✅ Complete | 7/7 items |
 
@@ -745,11 +763,11 @@ Phase 3: Wiring & Polish (depends on Phase 2)
 ### Testing Checklist
 
 #### Feature 1: `.ai-rules` Folder Auto-Loading
-- [ ] Test with workspace containing `.ai-rules/` (multiple .md files)
-- [ ] Test with workspace without `.ai-rules/`
-- [ ] Verify rules are injected as system messages before user prompt
-- [ ] Verify content is capped at ~8000 chars
-- [ ] Verify orchestration caches the read (not re-read per step)
+- [x] Test with workspace containing `.ai-rules/` (multiple .md files)
+- [x] Test with workspace without `.ai-rules/`
+- [x] Verify rules are injected as system messages before user prompt
+- [x] Verify content is capped at ~8000 chars
+- [x] Verify orchestration caches the read (not re-read per step)
 
 #### Feature 2: Toast Notifications + Sounds ✅
 - [x] Test toast appears on chat completion (success + ding sound)
