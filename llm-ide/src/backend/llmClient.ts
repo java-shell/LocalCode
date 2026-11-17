@@ -1,6 +1,7 @@
 import axios from 'axios';
-import { clampToolTurns, DEFAULT_CHAT_TOOL_TURNS } from '../shared/toolBudget';
+import { Readable } from 'node:stream';
 import { ChatMessage, LLMConfig, TokenUsage, ToolDefinition } from '../shared/types';
+import { clampToolTurns, DEFAULT_CHAT_TOOL_TURNS } from '../shared/toolBudget';
 
 interface CompletionResponse {
   choices?: Array<{
@@ -322,6 +323,51 @@ function parseOllamaUsage(response: OllamaNativeChatResponse): Omit<TokenUsage, 
     completionTokens,
     totalTokens: promptTokens + completionTokens
   };
+}
+
+/**
+ * Consume only an Axios HTTP error body, never its request/socket internals.
+ * Bounded to 64 KiB and two seconds; destroys oversized/stalled streams and
+ * retains the original status/error. Failed reads cannot trigger capability
+ * recovery. Mutates only this response; no logging or conversation access.
+ */
+async function readAxiosStreamErrorBody(error: unknown): Promise<void> {
+  if (!axios.isAxiosError(error) || !(error.response?.data instanceof Readable)) return;
+  const stream = error.response.data;
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  const timer = setTimeout(() => stream.destroy(), 2000);
+  timer.unref();
+  try {
+    for await (const chunk of stream) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      bytes += buffer.length;
+      if (bytes > 65536) {
+        stream.destroy();
+        error.response.data = '[HTTP error body exceeded 64 KiB]';
+        return;
+      }
+      chunks.push(buffer);
+    }
+    error.response.data = Buffer.concat(chunks).toString('utf8');
+  } catch {
+    error.response.data = '[HTTP error body unavailable]';
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Identify explicit Ollama HTTP 400 capability rejections only; unrelated errors never downgrade a model. */
+function unsupportedOllamaCapability(error: unknown): 'think' | 'tools' | undefined {
+  if (!axios.isAxiosError(error) || error.response?.status !== 400 || error.code === 'ERR_CANCELED') return undefined;
+  let data = error.response.data;
+  if (typeof data === 'string') {
+    try { data = JSON.parse(data); } catch { return undefined; }
+  }
+  const detail = typeof data?.error === 'string' ? data.error : '';
+  if (/\bdoes not support thinking\s*$/i.test(detail)) return 'think';
+  if (/\bdoes not support tools\s*$/i.test(detail)) return 'tools';
+  return undefined;
 }
 
 function summarizeResponseData(value: unknown): string {
@@ -1712,6 +1758,7 @@ async function streamOllamaNativeChat(
       signal
     });
   } catch (error) {
+    await readAxiosStreamErrorBody(error);
     throw error;
   }
 
@@ -2168,6 +2215,7 @@ export async function chatWithTools(
     ? config.endpoint
     : deriveOpenAIChatCompletionsEndpoint(config.endpoint);
   const requestTimeoutMs = resolveRequestTimeoutMs(config.requestTimeoutMs);
+  const unsupportedOllamaFields = new Set<'think' | 'tools'>();
   const usageTotals: TokenUsage = {
     promptTokens: 0,
     completionTokens: 0,
@@ -2216,6 +2264,42 @@ export async function chatWithTools(
 
   if (useOllamaNativeChat && ollamaNativeEndpoint && toPositiveInteger(config.contextWindowTokens)) {
     onEvent?.(`provider:ollama | using native /api/chat with options.num_ctx=${toPositiveInteger(config.contextWindowTokens)}`);
+  }
+
+  /**
+   * Share native transport and capability recovery across work, compaction,
+   * Side-Bar, and summary requests. Retry each explicitly rejected field once
+   * per run, before any tokens/tools execute; never change saved preferences.
+   * Tool rejection clears the active allowlist and announces text-only mode,
+   * so unsolicited tool calls cannot gain permissions. Successful models keep
+   * their original think true/false, tools, headers, timeout, and stream mode.
+   */
+  async function requestOllamaNative(payload: Record<string, unknown>, stream: boolean, token?: (text: string) => void): ReturnType<typeof streamOllamaNativeChat> {
+    const requestPayload = { ...payload };
+    for (const field of unsupportedOllamaFields) delete requestPayload[field];
+    while (true) {
+      if (signal?.aborted) throw new Error('Chat request canceled');
+      try {
+        if (stream) return await streamOllamaNativeChat(ollamaNativeEndpoint!, requestPayload, buildHeaders(config), requestTimeoutMs, signal, token);
+        const response = await axios.post<OllamaNativeChatResponse>(ollamaNativeEndpoint!, requestPayload, {
+          headers: buildHeaders(config), timeout: requestTimeoutMs, signal
+        });
+        return {
+          assistant: ollamaResponseToAssistant(response.data),
+          thinking: String(response.data.message?.thinking ?? '').trim(),
+          usage: parseOllamaUsage(response.data)
+        };
+      } catch (error) {
+        const field = unsupportedOllamaCapability(error);
+        if (signal?.aborted || !field || unsupportedOllamaFields.has(field) || !(field in requestPayload)) throw error;
+        unsupportedOllamaFields.add(field);
+        delete requestPayload[field];
+        if (field === 'tools') activeTools = [];
+        onEvent?.(field === 'think'
+          ? 'provider:ollama | model does not support thinking; retrying without think.'
+          : 'provider:ollama | model does not support tools; continuing text-only. Workspace/tool actions are unavailable.');
+      }
+    }
   }
 
   async function injectQueuedUserMessages(stage: string): Promise<number> {
@@ -2327,24 +2411,7 @@ export async function chatWithTools(
           []
         );
         const shouldStream = useStream && Boolean(config.ollamaStreaming ?? true);
-        const response = shouldStream
-          ? await streamOllamaNativeChat(
-              ollamaNativeEndpoint,
-              payload,
-              buildHeaders(config),
-              requestTimeoutMs,
-              signal,
-              countToken
-            )
-          : await axios.post<OllamaNativeChatResponse>(ollamaNativeEndpoint, payload, {
-              headers: buildHeaders(config),
-              timeout: requestTimeoutMs,
-              signal
-            }).then(result => ({
-              assistant: ollamaResponseToAssistant(result.data),
-              thinking: String(result.data.message?.thinking ?? '').trim(),
-              usage: parseOllamaUsage(result.data)
-            }));
+        const response = await requestOllamaNative(payload, shouldStream, countToken);
         const usage = response.usage;
         usageTotals.promptTokens += usage.promptTokens;
         usageTotals.completionTokens += usage.completionTokens;
@@ -2655,29 +2722,10 @@ export async function chatWithTools(
       const payload = buildOllamaNativePayload(config, normalizeForStrictSystemTemplates(ensureOllamaUserPrompt(requestMessages)), activeTools);
       try {
         const shouldStream = Boolean(config.ollamaStreaming ?? true);
-        if (shouldStream) {
-          const streamed = await streamOllamaNativeChat(
-            ollamaNativeEndpoint,
-            payload,
-            buildHeaders(config),
-            requestTimeoutMs,
-            signal,
-            onToken
-          );
-          assistant = streamed.assistant;
-          assistantThinking = String(streamed.thinking ?? '').trim();
-          usage = streamed.usage;
-        } else {
-          const response = await axios.post<OllamaNativeChatResponse>(ollamaNativeEndpoint, payload, {
-            headers: buildHeaders(config),
-            timeout: requestTimeoutMs,
-            signal
-          });
-
-          assistant = ollamaResponseToAssistant(response.data);
-          assistantThinking = String(response.data.message?.thinking ?? '').trim();
-          usage = parseOllamaUsage(response.data);
-        }
+        const response = await requestOllamaNative(payload, shouldStream, onToken);
+        assistant = response.assistant;
+        assistantThinking = String(response.thinking ?? '').trim();
+        usage = response.usage;
       } catch (error) {
         if (isContextOverflowError(error)) {
           overflowCompactionCount += 1;
@@ -2694,28 +2742,10 @@ export async function chatWithTools(
             onEvent?.('context:compacted-before-retry');
             const retryPayload = buildOllamaNativePayload(config, normalizeForStrictSystemTemplates(ensureOllamaUserPrompt(compacted)), activeTools);
             const retryStream = Boolean(config.ollamaStreaming ?? true);
-            if (retryStream) {
-              const streamed = await streamOllamaNativeChat(
-                ollamaNativeEndpoint,
-                retryPayload,
-                buildHeaders(config),
-                requestTimeoutMs,
-                signal,
-                onToken
-              );
-              assistant = streamed.assistant;
-              assistantThinking = String(streamed.thinking ?? '').trim();
-              usage = streamed.usage;
-            } else {
-              const response = await axios.post<OllamaNativeChatResponse>(ollamaNativeEndpoint, retryPayload, {
-                headers: buildHeaders(config),
-                timeout: requestTimeoutMs,
-                signal
-              });
-              assistant = ollamaResponseToAssistant(response.data);
-              assistantThinking = String(response.data.message?.thinking ?? '').trim();
-              usage = parseOllamaUsage(response.data);
-            }
+            const response = await requestOllamaNative(retryPayload, retryStream, onToken);
+            assistant = response.assistant;
+            assistantThinking = String(response.thinking ?? '').trim();
+            usage = response.usage;
           } else {
             throw formatAxiosFailure(error, {
               operation: 'Ollama native chat request',

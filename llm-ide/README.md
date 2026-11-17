@@ -100,6 +100,65 @@ Design, risk assessment, test evidence, and the task ledger are recorded in
 [CHAT_SIDEBAR.md](CHAT_SIDEBAR.md). Existing UI/theme conventions are retained
 instead of introducing the Flask-based Assistant Coach scaffold into Electron.
 
+## Ollama Capability Compatibility — 2026-11-13
+
+Compatibility fix for **1.0.1** (existing installers are unchanged until repackaged):
+
+- Native Ollama chat now retries an explicit HTTP 400 `does not support thinking`
+	rejection without `think`, and a `does not support tools` rejection without
+	tools. Each capability is retried at most once per run, including work turns,
+	overflow recovery, final summaries, and Side-Bar exchanges. The active tool
+	allowlist is cleared on tool rejection; an event announces **text-only mode**
+	and that workspace/tool actions are unavailable. This does not give a
+	completion-only model agent capabilities or guarantee useful chat responses.
+- Models that accept thinking/tools retain their original requests, including
+	explicit `think: false`. Saved settings are not rewritten. HTTP 500, unrelated
+	HTTP 400, and cancellation do not cause capability fallback; streaming and
+	non-streaming requests retain their original transport settings.
+- Streaming HTTP errors are decoded as response text instead of serialized
+	socket/Readable internals. Reads are bounded to 64 KiB and two seconds; displayed
+	response summaries retain the existing 800-character limit. Failed/oversized
+	reads cannot trigger capability recovery. No request objects/auth headers are logged.
+
+### Root Cause and Settings
+
+Live `/api/show` for `hf.co/mradermacher/Foundation-Sec-8B-i1-GGUF:Q4_K_M`
+advertises only `completion`. Direct synthetic probes verified `think: false`
+is accepted, `think: true` produces the reported thinking error, and tools with
+thinking disabled produce a separate `does not support tools` error. Chat sends
+the **Ollama Thinking** checkbox in its toolbar; loading a saved chat restores
+its session-specific value. Disabling thinking elsewhere does not prove that
+the active chat request has it disabled. For agentic coding, choose a model whose
+Ollama capabilities include `tools`.
+
+Design/risk: one shared per-run native request adapter replaces three duplicated
+transport branches; transport parsing stays separate from capability policy.
+Only explicit provider rejections permit degradation, and visible warnings and
+an empty tool allowlist prevent silent tool execution. No public API, dependencies,
+UI layout, provider selection, or saved preferences change.
+
+### Verification / TODO Ledger
+
+Completion references: this section and the Ollama capability commit on `main`.
+
+- [x] **AI-008:** Verify server capability, thinking true/false behavior, and tool rejection.
+- [x] **AI-009:** Add failing real-HTTP tests (6 failures / 4 passes before fix),
+	implement capability recovery and readable bounded streaming errors.
+- [x] **AI-010:** Build and editor diagnostics pass; all **54 LLM-client tests pass**
+	(including 15 new real-HTTP regressions). Full suite: **244 passed, 5 failed,
+	2 skipped**. The same five failures reproduce using the HEAD LLM client in an
+	in-memory baseline loader: one existing renderer source assertion and four
+	TurboVec tests whose environment cannot import `TurboQuantIndex`. Live compiled
+	Foundation-Sec probe recovered both capability failures, returned a streaming
+	text response, and executed no tools; the response was repetitive, not a useful
+	assistant answer. Quality checks have no gating regressions; public chat and
+	native-stream signatures are unchanged; whitespace checks pass. Existing
+	installer/unpacked packaging changes were not touched. Restart the source-run
+	application to load the rebuilt backend; existing installers need a new package.
+	Later update (2026-11-17): the renderer source assertion named above was corrected to match the
+	backend IPC tool allowlist, and the full suite now reports **269 tests, 267 passed, 0 failed,
+	2 skipped**. See [NEXT.md](../NEXT.md).
+
 ## Startup and Dependency Change Notes — 2026-11-01
 
 Working-tree fixes for version **1.0.1** (not yet packaged or committed):
