@@ -419,7 +419,8 @@ this window is minimized or hidden.
 | Orchestration complete | `orchestration.completed` (priority 3) |
 
 Configure under **Settings → External Notifications (ntfy)**. Model output is excluded
-unless **Include a response excerpt** is enabled. Full guide: [NTFY.md](../NTFY.md).
+unless **Include a response excerpt** is enabled. Full guide:
+[NTFY.md](../markdown-reference/NTFY.md).
 
 ### TurboVec Memory
 

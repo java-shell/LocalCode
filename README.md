@@ -20,6 +20,10 @@ It brings an editor, chat, workflow runner, and live terminal output into one lo
 | [llm-ide/src/preload.ts](llm-ide/src/preload.ts) | Context-isolated bridge API exposed to the renderer |
 | [llm-ide/src/backend](llm-ide/src/backend) | LLM client, orchestration engine, plan schema/storage, and tool runtime |
 | [llm-ide/renderer](llm-ide/renderer) | HTML/CSS/JS UI for the editor, chat, orchestration, and terminal panel |
+| [namespace_creator](namespace_creator) | TurboVec namespace ingest CLI |
+| [.ai-rules](.ai-rules) | Workspace guidance consumed by AI assistants |
+| [markdown-reference](markdown-reference) | Long-form design, remediation, and operations notes |
+| [NEXT.md](NEXT.md) | Review findings and prioritized next steps |
 
 ## Features
 
@@ -65,7 +69,8 @@ when the window is minimized. No account, no API key, and no new dependencies.
 
 Enable it under **Settings → External Notifications (ntfy)** and click **Send Test
 Notification** to verify delivery. Model output is never included unless you explicitly
-opt in. See [NTFY.md](NTFY.md) for setup, privacy notes, and troubleshooting.
+opt in. See [markdown-reference/NTFY.md](markdown-reference/NTFY.md) for setup, privacy notes, and
+troubleshooting.
 
 ## Runtime Tools
 
@@ -288,7 +293,7 @@ Settings → External Notifications (ntfy) → Topic → Send Test Notification
 | Include response excerpt | Off (off keeps model output on this machine) |
 
 Full setup, event semantics, privacy guarantees, self-hosting, and troubleshooting are in
-[NTFY.md](NTFY.md).
+[markdown-reference/NTFY.md](markdown-reference/NTFY.md).
 
 ## Default Orchestration Plan
 
@@ -306,7 +311,7 @@ Schema validation is implemented in [llm-ide/src/backend/schema.ts](llm-ide/src/
 - Path resolution enforces scope boundaries for filesystem operations.
 - Outbound notifications are configured only by the user and are never exposed as a
   model-callable tool, so a prompt-injected model cannot retarget them. The ntfy topic is
-  treated as a secret and redacted from logs. See [NTFY.md](NTFY.md).
+  treated as a secret and redacted from logs. See [markdown-reference/NTFY.md](markdown-reference/NTFY.md).
 
 ## Build Artifacts + Ignored Paths
 
@@ -322,7 +327,7 @@ The root [.gitignore](.gitignore) excludes generated and dependency-heavy direct
 | App does not launch | Ensure dependencies are installed in [llm-ide](llm-ide), then rebuild with `cd llm-ide && npm run build`. |
 | No models appear in dropdown | Verify the endpoint is reachable, exposes `/v1/models`, and has any required API key configured. |
 | Tool execution appears stalled | Inspect Model Terminal output, send required interactive input, or use `(ctrl+c)` to interrupt. |
-| ntfy notifications do not arrive | Re-run **Settings → Send Test Notification** and compare the topic name on the subscribing device. See [NTFY.md](NTFY.md#troubleshooting). |
+| ntfy notifications do not arrive | Re-run **Settings → Send Test Notification** and compare the topic name on the subscribing device. See [markdown-reference/NTFY.md](markdown-reference/NTFY.md#troubleshooting). |
 
 ## Development Notes
 
