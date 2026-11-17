@@ -138,7 +138,7 @@ UI; run the server without auth on a trusted network, or front it with a reverse
 
 | Concern | Detail |
 | --- | --- |
-| Implementation | [`llm-ide/src/backend/notify.ts`](llm-ide/src/backend/notify.ts) |
+| Implementation | [`llm-ide/src/backend/notify.ts`](../llm-ide/src/backend/notify.ts) |
 | Transport | `POST <server>/<topic>` with `Title`, `Priority`, `Tags` headers and a `text/plain` body |
 | Process | Electron **main** process, not the renderer |
 | Dependencies | None added — reuses the existing `axios` dependency |
@@ -169,5 +169,5 @@ throughput — use **Send Test Notification** to diagnose delivery separately.
 
 ## Related
 
-- [README](README.md) — project overview
-- [Toast Notifications](llm-ide/README.md#toast-notifications) — the in-app equivalent
+- [README](../README.md) — project overview
+- [Toast Notifications](../llm-ide/README.md#toast-notifications) — the in-app equivalent

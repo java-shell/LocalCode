@@ -26,17 +26,17 @@ This can be delivered safely in phases behind a feature flag so the current runn
 - This is useful for lightweight retrieval, but it is not a live browser and cannot represent dynamic JS-driven UIs accurately.
 
 Relevant code:
-- [llm-ide/src/backend/toolRuntime.ts](llm-ide/src/backend/toolRuntime.ts#L378)
-- [llm-ide/src/backend/toolRuntime.ts](llm-ide/src/backend/toolRuntime.ts#L1075)
-- [llm-ide/src/backend/toolRuntime.ts](llm-ide/src/backend/toolRuntime.ts#L2746)
+- [llm-ide/src/backend/toolRuntime.ts](../llm-ide/src/backend/toolRuntime.ts#L378)
+- [llm-ide/src/backend/toolRuntime.ts](../llm-ide/src/backend/toolRuntime.ts#L1075)
+- [llm-ide/src/backend/toolRuntime.ts](../llm-ide/src/backend/toolRuntime.ts#L2746)
 
 ### 2) Tool runtime architecture is already a strong extension point
 - All tool calls are centralized through `executeTool`, with existing allowlist filtering and orchestration/chat integration.
 - This is the right place to add browser tools for model actions.
 
 Relevant code:
-- [llm-ide/src/backend/toolRuntime.ts](llm-ide/src/backend/toolRuntime.ts#L2640)
-- [llm-ide/src/backend/toolRuntime.ts](llm-ide/src/backend/toolRuntime.ts#L2764)
+- [llm-ide/src/backend/toolRuntime.ts](../llm-ide/src/backend/toolRuntime.ts#L2640)
+- [llm-ide/src/backend/toolRuntime.ts](../llm-ide/src/backend/toolRuntime.ts#L2764)
 
 ### 3) Main process + preload IPC pattern is suitable for browser session control
 - `ipcMain.handle(...)` already hosts many feature services and emits events to renderer.
@@ -44,23 +44,23 @@ Relevant code:
 - This pattern can be mirrored for browser session commands/events.
 
 Relevant code:
-- [llm-ide/src/main.ts](llm-ide/src/main.ts#L1355)
-- [llm-ide/src/preload.ts](llm-ide/src/preload.ts#L1)
+- [llm-ide/src/main.ts](../llm-ide/src/main.ts#L1355)
+- [llm-ide/src/preload.ts](../llm-ide/src/preload.ts#L1)
 
 ### 4) Renderer currently has no Browser tab/view
 - Current tabs are: chat, orchestration, advanced orchestration, diagnostics.
 - No browser view container or navigation UI exists today.
 
 Relevant code:
-- [llm-ide/renderer/index.html](llm-ide/renderer/index.html#L95)
-- [llm-ide/renderer/app.js](llm-ide/renderer/app.js#L15)
-- [llm-ide/renderer/app.js](llm-ide/renderer/app.js#L1663)
+- [llm-ide/renderer/index.html](../llm-ide/renderer/index.html#L95)
+- [llm-ide/renderer/app.js](../llm-ide/renderer/app.js#L15)
+- [llm-ide/renderer/app.js](../llm-ide/renderer/app.js#L1663)
 
 ### 5) Dependency baseline does not include Playwright
 - No Playwright dependency exists in `package.json` currently.
 
 Relevant code:
-- [llm-ide/package.json](llm-ide/package.json#L1)
+- [llm-ide/package.json](../llm-ide/package.json#L1)
 
 ## What "True Browser" Means Here
 
@@ -102,8 +102,8 @@ Create `browserSessionManager.ts` in backend/main-process layer to own:
 - Event fan-out to renderer (`browser:event`) and tool runtime.
 
 Potential integration points:
-- [llm-ide/src/main.ts](llm-ide/src/main.ts#L1303)
-- [llm-ide/src/main.ts](llm-ide/src/main.ts#L2239)
+- [llm-ide/src/main.ts](../llm-ide/src/main.ts#L1303)
+- [llm-ide/src/main.ts](../llm-ide/src/main.ts#L2239)
 
 ### 2) Embedded browser surface
 Use `WebContentsView` attached to the main window and positioned over a renderer-declared browser region.
@@ -113,9 +113,9 @@ Use `WebContentsView` attached to the main window and positioned over a renderer
 - Browser tab activation toggles visibility.
 
 Renderer additions:
-- Add Browser tab and Browser panel container in [llm-ide/renderer/index.html](llm-ide/renderer/index.html).
-- Extend tab routing in [llm-ide/renderer/app.js](llm-ide/renderer/app.js#L1663).
-- Add style/layout updates in [llm-ide/renderer/styles.css](llm-ide/renderer/styles.css).
+- Add Browser tab and Browser panel container in [llm-ide/renderer/index.html](../llm-ide/renderer/index.html).
+- Extend tab routing in [llm-ide/renderer/app.js](../llm-ide/renderer/app.js#L1663).
+- Add style/layout updates in [llm-ide/renderer/styles.css](../llm-ide/renderer/styles.css).
 
 ### 3) IPC contract
 Add preload and main handlers for:
@@ -129,10 +129,10 @@ Add preload and main handlers for:
 - `browser:set-bounds`
 - `browser:on-event`
 
-Wire through preload similarly to existing APIs in [llm-ide/src/preload.ts](llm-ide/src/preload.ts).
+Wire through preload similarly to existing APIs in [llm-ide/src/preload.ts](../llm-ide/src/preload.ts).
 
 ### 4) Tool-runtime additions for model browsing
-Add new tools in [llm-ide/src/backend/toolRuntime.ts](llm-ide/src/backend/toolRuntime.ts):
+Add new tools in [llm-ide/src/backend/toolRuntime.ts](../llm-ide/src/backend/toolRuntime.ts):
 
 - `browser_open_page` (url)
 - `browser_get_snapshot` (current structured page summary)
@@ -186,7 +186,7 @@ Browser integration expands attack surface. Minimum controls:
 
 ## Data Contracts to Add
 
-In [llm-ide/src/shared/types.ts](llm-ide/src/shared/types.ts), add types like:
+In [llm-ide/src/shared/types.ts](../llm-ide/src/shared/types.ts), add types like:
 
 - `BrowserSessionState`
 - `BrowserNavigationRequest`
@@ -194,7 +194,7 @@ In [llm-ide/src/shared/types.ts](llm-ide/src/shared/types.ts), add types like:
 - `BrowserSnapshot`
 - `BrowserToolResult`
 
-Add corresponding preload signatures in [llm-ide/src/preload.ts](llm-ide/src/preload.ts).
+Add corresponding preload signatures in [llm-ide/src/preload.ts](../llm-ide/src/preload.ts).
 
 ## Phased Integration Plan (Non-Breaking)
 
@@ -243,13 +243,13 @@ Add corresponding preload signatures in [llm-ide/src/preload.ts](llm-ide/src/pre
 ## Expected File Touch Map
 
 Core likely files:
-- [llm-ide/src/main.ts](llm-ide/src/main.ts)
-- [llm-ide/src/preload.ts](llm-ide/src/preload.ts)
-- [llm-ide/src/backend/toolRuntime.ts](llm-ide/src/backend/toolRuntime.ts)
-- [llm-ide/src/shared/types.ts](llm-ide/src/shared/types.ts)
-- [llm-ide/renderer/index.html](llm-ide/renderer/index.html)
-- [llm-ide/renderer/app.js](llm-ide/renderer/app.js)
-- [llm-ide/renderer/styles.css](llm-ide/renderer/styles.css)
+- [llm-ide/src/main.ts](../llm-ide/src/main.ts)
+- [llm-ide/src/preload.ts](../llm-ide/src/preload.ts)
+- [llm-ide/src/backend/toolRuntime.ts](../llm-ide/src/backend/toolRuntime.ts)
+- [llm-ide/src/shared/types.ts](../llm-ide/src/shared/types.ts)
+- [llm-ide/renderer/index.html](../llm-ide/renderer/index.html)
+- [llm-ide/renderer/app.js](../llm-ide/renderer/app.js)
+- [llm-ide/renderer/styles.css](../llm-ide/renderer/styles.css)
 
 New likely files:
 - `llm-ide/src/backend/browserSessionManager.ts`
