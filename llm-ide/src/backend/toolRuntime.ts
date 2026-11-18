@@ -1119,6 +1119,29 @@ function toolIntentSummary(name: string, args: Record<string, unknown>): string 
   }
 }
 
+/**
+ * Gate file mutations that escape the selected workspace directory.
+ *
+ * Purpose: keep the "mutation outside workspace" approval dialog reserved for
+ * workspace/root scoped writes that leave the workspace, and let reference
+ * workspace scopes be gated solely by enforceReferenceWriteApproval, which
+ * honours each reference's allowWrite flag.
+ * Inputs: tool name, tool arguments (scope resolved from them) and runtime context.
+ * Outputs: the arguments to use for the tool call, escalated to scope "root"
+ * when a workspace-scoped escape was approved.
+ * Side effects: may call context.requestOutsideWorkspaceApproval.
+ * Errors: throws when the user denies an out-of-workspace mutation.
+ * Performance: O(targets) path comparisons; no I/O.
+ * Security: reference scopes stay subject to reference-base containment in
+ * resolveScopedPath, so exempting them here cannot widen their write range.
+ * Concurrency: awaited serially before the tool runs.
+ * Rationale: reference workspaces are outside the workspace directory by
+ * definition, so the previous check flagged every reference write as an escape.
+ * That blocked writable references behind the wrong dialog and double-prompted
+ * read-only references (outside-workspace approval plus reference-write
+ * approval). Unknown `ref:<id>` scopes are still rejected later by
+ * scopeBaseDir with "Unknown scope: ...".
+ */
 async function enforceWorkspaceMutationApproval(
   name: string,
   args: Record<string, unknown>,
@@ -1134,7 +1157,11 @@ async function enforceWorkspaceMutationApproval(
   }
 
   const scope = parseScope(args);
-  const scopeBase = scopeBaseDir(scope, context);
+  // Reference scopes are handled by enforceReferenceWriteApproval instead.
+  if (isReferenceScope(scope)) {
+    return args;
+  }
+
   const absoluteTargets = targetInputs.map(input => {
     try {
       return resolveScopedPath(input, scope, context);

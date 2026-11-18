@@ -6,7 +6,7 @@ Status legend: `[x]` done in this pass, `[ ]` still open.
 ## Task Start Declaration
 
 - **Task**: Review the application, record findings, and land the P0 cleanup items
-- **Type**: Multi-step with TODO Ledger (AI-011 … AI-023)
+- **Type**: Multi-step with TODO Ledger (AI-011 … AI-024)
 - **Applicable Rules**: Change Safety Protocol (§5), Testing Requirements (§6), Documentation Deliverables (§8), CI/CD Best Practices (§23), Token Optimization and Efficiency (§26)
 - **Breaking Changes**: None. `llm-ide/dist/` is removed from version control (build output moves to release assets); no runtime or API behavior changes.
 - **Clarifications Needed**: None
@@ -77,6 +77,27 @@ Largest files: [llm-ide/renderer/app.js](llm-ide/renderer/app.js) (8,281 lines),
   `v1.0.2` (or `v1.1.0`) and attach the AppImage/NSIS artifacts as release assets so
   `package.json`, the README version claims and shipped installers agree.
 
+## Bug fix — read/write reference workspaces were gated like out-of-workspace writes
+
+- [x] **AI-024 — RW reference mutations no longer trigger the outside-workspace dialog.** (`4c93ce0`)
+  `enforceWorkspaceMutationApproval()` in
+  [llm-ide/src/backend/toolRuntime.ts](llm-ide/src/backend/toolRuntime.ts) filtered mutation targets
+  against `context.workspaceDir` alone. A reference workspace is outside that directory by definition,
+  so every `scope: "ref:<id>"` mutation raised "Approve File Mutation Outside Workspace" — including
+  references the user had explicitly marked read/write — and read-only references were prompted twice
+  (that dialog plus the correct reference-write dialog). Reference scopes now return before the
+  outside-workspace check, leaving `enforceReferenceWriteApproval()` as the single gate: writable
+  references write silently, read-only ones prompt exactly once. Scope containment
+  (`resolveScopedPath`), the unknown-scope error and the approved-workspace-escape → `root` escalation
+  are unchanged.
+  Regression coverage in
+  [llm-ide/src/tests/toolRuntime.referenceScopes.test.ts](llm-ide/src/tests/toolRuntime.referenceScopes.test.ts)
+  adds a fixture with `workspaceDir` separate from the reference path — the previous fixture set them
+  equal, which is why the bug survived — plus eight cases covering all seven mutating tools, the
+  no-callbacks case, single-prompt read-only behavior, denial, escaping paths, workspace escapes and
+  ungated in-workspace writes. Documented in [llm-ide/README.md](llm-ide/README.md) and the root
+  [README.md](README.md) scope sections.
+
 ## P1 — Real gaps in the roadmap
 
 - [x] **AI-018 — `.ai-rules` auto-injection implemented (5/5).** (`026aa65`)
@@ -146,9 +167,11 @@ App-local design notes stay beside the app: [llm-ide/CHAT_SIDEBAR.md](llm-ide/CH
 
 ## Verification
 
-- `cd llm-ide && npm test` → **285 tests, 283 passed, 0 failed, 2 skipped** (the two skips are the
+- `cd llm-ide && npm test` → **294 tests, 292 passed, 0 failed, 2 skipped** (the two skips are the
   Electron-native crash minidump test and the context-isolation preload test, both environment-gated).
-  The `.ai-rules` work added 16 tests across three files.
+  The `.ai-rules` work added 16 tests across three files, and AI-024 added 8 reference-scope gating
+  tests.
 - `git status` after the commits is clean apart from ignored `dist/`, `out/` and `node_modules/`.
-- No runtime source changed in this pass except the test assertion; behavior of chat, orchestration,
-  tool runtime and packaging is unchanged.
+- The P0 pass changed no runtime source except the test assertion; behavior of chat, orchestration,
+  tool runtime and packaging was unchanged. AI-018 added `.ai-rules` prompt injection, and AI-024
+  changed reference-scope mutation gating only.

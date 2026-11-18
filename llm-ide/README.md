@@ -43,6 +43,36 @@ no-`.ai-rules` no-op, sub-agent inheritance and self-load) and
 injects 8000 characters of `README.md`, `RULES-QUICKREF.md` and `AI-RULES-REVIEW.md` per request;
 `rules.md` (105 KB) is not reachable within the budget, which is why the quick reference exists.
 
+## Reference Workspace Write Gating — 2026-11-17
+
+A reference workspace marked **read/write** (`allowWrite: true`) can now be modified without any
+approval prompt. Previously `enforceWorkspaceMutationApproval()` in
+[`src/backend/toolRuntime.ts`](src/backend/toolRuntime.ts) compared every mutation target against
+`context.workspaceDir` only, and a reference workspace always lives outside that directory, so a
+`replace_in_file`, `write_file`, `create_file`, `insert_in_file`, `create_directory`, `move_path` or
+`delete_path` call with `scope: "ref:<id>"` raised the **"Approve File Mutation Outside Workspace"**
+dialog. Read-only references were prompted twice — once by that dialog and again by the correct
+"Approve Write To Read-Only Reference Workspace" dialog.
+
+**Fix:** reference scopes now return from `enforceWorkspaceMutationApproval()` before the
+outside-workspace check, so `enforceReferenceWriteApproval()` is the single gate for them. It already
+honours `allowWrite` (`isScopeWritable()`), so writable references are ungated and read-only
+references prompt exactly once. Containment is unchanged: `resolveScopedPath()` still rejects paths
+that escape the reference base directory, and an unknown `ref:<id>` still fails with
+`Unknown scope: ...`. Workspace/root behavior is untouched — a workspace-scoped mutation that
+escapes the workspace still requires approval and is escalated to `scope: "root"` once approved.
+
+**Tests:** `src/tests/toolRuntime.referenceScopes.test.ts` gains a fixture that keeps
+`workspaceDir` separate from the reference path (the old fixture conflated them, which is why the
+bug was invisible) plus eight cases: all seven mutating tools on a writable reference with zero
+approval calls, writable writes with no approval callbacks configured at all, read-only references
+prompting exactly once, read-only denial blocking the write, escaping paths rejected, workspace
+escapes still approved/blocked, and in-workspace writes needing no approval.
+Full suite: **294 tests, 292 passed, 0 failed, 2 skipped**.
+
+**Non-breaking:** read-only references keep their approval prompt; only the redundant
+outside-workspace prompt is removed.
+
 ## Tool-Call Budget — 1000 turns (2026-11-17)
 
 The maximum tool-call budget is now **1000 tool turns** for chat, orchestration
@@ -376,6 +406,7 @@ terminal/guidance changes outside this diagnostics addition; no incompatible cal
 - Chat panel with streaming responses, tool calling, and TurboVec memory integration.
 - Simple and Advanced orchestration for multi-step AI workflows.
 - Automatic `.ai-rules/` workspace guidance injected into chat, orchestration and sub-agent requests.
+- Reference workspaces reachable through tool `scope`, with read/write access honored without prompts.
 - Toast notifications with audio alerts for completion and errors.
 
 ## Feature Reference
@@ -397,6 +428,7 @@ terminal/guidance changes outside this diagnostics addition; no incompatible cal
 | **MCP Server Settings** | Add/remove MCP servers in Settings and enable each server for chat, orchestration, or both; persisted in app user data |
 | **MCP Runtime Lifecycle** | Refresh/connect MCP servers from Settings, view per-server health/lifecycle status, discovered tool count, and last runtime error |
 | **Prompt Policy Version** | Switch between `v1` legacy system-prompt assembly and `v2` revised policy sections without removing the fallback path |
+| **Reference Workspaces** | Add extra directories in Settings and reach them with `scope: "ref:<id>"`. Read/write references are written without prompting; read-only references ask once per write |
 | **Presets** | Quick-apply common configurations (Ollama, OpenAI-compatible, etc.) |
 
 ### Orchestration Panel (Simple)
@@ -552,6 +584,7 @@ Tool calls also support `scope`:
 
 - `workspace` (default): selected top-level workspace directory
 - `root`: LocalCode app root directory
+- `ref:<id>`: a reference workspace added in Settings, read/write or read-only
 
 Line-oriented file tools use 1-based numbering consistently:
 

@@ -74,7 +74,8 @@ troubleshooting.
 
 ## Runtime Tools
 
-The tool runtime supports scoped operations, either `workspace` or `root`, with guardrails.
+The tool runtime supports scoped operations — `workspace`, `root` or a reference workspace
+(`ref:<id>`) — with guardrails.
 
 | Category | Tools | Description |
 | --- | --- | --- |
@@ -89,12 +90,16 @@ The tool runtime supports scoped operations, either `workspace` or `root`, with 
 
 - **`workspace`** (default): Operations are restricted to the selected workspace directory
 - **`root`**: Operations target the LocalCode application root directory
-- All paths are resolved relative to their scope; absolute paths outside scope trigger approval dialogs
+- **`ref:<id>`**: Operations target a reference workspace added in Settings
+- All paths are resolved relative to their scope; paths that escape the scope are rejected
 
 ### Mutation Safety
 
 - Mutating tools are restricted to the selected scope.
-- Outside-workspace mutation requests trigger an approval dialog.
+- Mutations that leave the selected workspace directory trigger an approval dialog.
+- Reference workspace scopes are gated by their own access flag, not by the
+  outside-workspace dialog: a reference marked read/write is written without prompting, and a
+  read-only reference triggers a single "Approve Write To Read-Only Reference Workspace" prompt.
 - `delete_path` and destructive commands require explicit tool enablement per step.
 
 ### query_user Tool
