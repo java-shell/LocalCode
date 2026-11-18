@@ -79,7 +79,7 @@ Largest files: [llm-ide/renderer/app.js](llm-ide/renderer/app.js) (8,281 lines),
 
 ## Bug fix — read/write reference workspaces were gated like out-of-workspace writes
 
-- [x] **AI-024 — RW reference mutations no longer trigger the outside-workspace dialog.** (`4c93ce0`)
+- [x] **AI-024 — RW reference mutations no longer trigger the outside-workspace dialog.** (`0cad2c4`)
   `enforceWorkspaceMutationApproval()` in
   [llm-ide/src/backend/toolRuntime.ts](llm-ide/src/backend/toolRuntime.ts) filtered mutation targets
   against `context.workspaceDir` alone. A reference workspace is outside that directory by definition,
