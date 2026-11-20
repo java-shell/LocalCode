@@ -156,6 +156,8 @@ export interface ChatStreamRequest {
   chatDebugDumpsEnabled?: boolean;
   promptSpecVersion?: PromptSpecVersion;
   notify?: NotifySettings;
+  /** When false, `.ai-rules/` guidance is not injected. Omitted or true means inject. */
+  aiRulesInjectionEnabled?: boolean;
 }
 
 export interface OrchestrationRunRequest {
@@ -169,6 +171,8 @@ export interface OrchestrationRunRequest {
   requestTimeoutMs?: number;
   promptSpecVersion?: PromptSpecVersion;
   notify?: NotifySettings;
+  /** When false, `.ai-rules/` guidance is not injected into any stage. Omitted or true means inject. */
+  aiRulesInjectionEnabled?: boolean;
 }
 
 export interface TokenUsage {

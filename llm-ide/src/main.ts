@@ -1439,7 +1439,9 @@ ipcMain.handle(
     const systemPromptSections: string[] = [];
     const promptSpecVersion = normalizePromptSpecVersion(payload.promptSpecVersion);
     // Workspace guidance from .ai-rules/, read once per request and reused by sub-agents.
-    const aiRules = await loadAiRules(selectedWorkspaceDir);
+    // Settings can turn the feature off, in which case nothing is read or injected.
+    const aiRulesInjectionEnabled = payload.aiRulesInjectionEnabled !== false;
+    const aiRules = aiRulesInjectionEnabled ? await loadAiRules(selectedWorkspaceDir) : null;
     let recalledMemorySystemSection = '';
     let recalledPromptTokens = 0;
     const normalizedHistoryMessages = Array.isArray(payload.historyMessages)
@@ -2682,6 +2684,9 @@ ipcMain.handle(
         return mcpServerManager.invokeTool(toolName, toolArgs);
       },
       activeNamespaces: orchestrationNamespaces.length > 0 ? orchestrationNamespaces : undefined,
+      // An explicit null disables the engine's own .ai-rules read for the run and its sub-agents.
+      // When enabled the key stays absent so the engine performs its own single cached read.
+      ...(payload.aiRulesInjectionEnabled === false ? { aiRulesContent: null } : {}),
       promptSpecVersion
     };
 

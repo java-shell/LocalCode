@@ -44,6 +44,7 @@ const settingsState = {
   orchestrationMemoryNamespace: '',
   orchestrationMemoryGlobalNamespace: '',
   chatDebugDumpsEnabled: true,
+  aiRulesInjectionEnabled: true,
   promptSpecVersion: 'v2',
   notifyEnabled: false,
   notifyNtfyTopic: '',
@@ -1317,6 +1318,7 @@ function loadSettings() {
     settingsState.orchestrationMemoryGlobalNamespace =
       String(parsed.orchestrationMemoryGlobalNamespace ?? settingsState.orchestrationMemoryGlobalNamespace).trim();
     settingsState.chatDebugDumpsEnabled = Boolean(parsed.chatDebugDumpsEnabled ?? true);
+    settingsState.aiRulesInjectionEnabled = Boolean(parsed.aiRulesInjectionEnabled ?? true);
     settingsState.promptSpecVersion = normalizePromptSpecVersion(parsed.promptSpecVersion ?? settingsState.promptSpecVersion);
     settingsState.notifyEnabled = Boolean(parsed.notifyEnabled ?? false);
     settingsState.notifyNtfyTopic = String(parsed.notifyNtfyTopic ?? settingsState.notifyNtfyTopic).trim();
@@ -1398,6 +1400,7 @@ function loadSettings() {
     settingsState.orchestrationMemoryNamespace = '';
     settingsState.orchestrationMemoryGlobalNamespace = '';
     settingsState.chatDebugDumpsEnabled = true;
+    settingsState.aiRulesInjectionEnabled = true;
     settingsState.promptSpecVersion = 'v2';
     settingsState.notifyEnabled = false;
     settingsState.notifyNtfyTopic = '';
@@ -2590,6 +2593,7 @@ function initSettingsMenu() {
   const refreshMcpRuntimeButton = document.getElementById('settingRefreshMcpRuntime');
   const mcpStatusEl = document.getElementById('settingMcpStatus');
   const chatDebugDumpsInput = document.getElementById('settingChatDebugDumpsEnabled');
+  const aiRulesInjectionInput = document.getElementById('settingAiRulesInjectionEnabled');
   const promptSpecVersionInput = document.getElementById('settingPromptSpecVersion');
   const notifyEnabledInput = document.getElementById('settingNotifyEnabled');
   const notifyTopicInput = document.getElementById('settingNotifyNtfyTopic');
@@ -3017,6 +3021,7 @@ function initSettingsMenu() {
     setMcpStatus(`Loaded ${modalMcpServers.length} server(s). Connected: ${connectedCount}.`);
 
     chatDebugDumpsInput.checked = settingsState.chatDebugDumpsEnabled;
+    aiRulesInjectionInput.checked = settingsState.aiRulesInjectionEnabled !== false;
     promptSpecVersionInput.value = normalizePromptSpecVersion(settingsState.promptSpecVersion);
     notifyEnabledInput.checked = settingsState.notifyEnabled;
     notifyTopicInput.value = settingsState.notifyNtfyTopic;
@@ -3079,6 +3084,7 @@ function initSettingsMenu() {
     settingsState.subAgentApiKey = settingsState.subAgentProfiles[0].apiKey;
     settingsState.subAgentContextWindowTokens = settingsState.subAgentProfiles[0].contextWindowTokens;
     settingsState.chatDebugDumpsEnabled = Boolean(chatDebugDumpsInput.checked);
+    settingsState.aiRulesInjectionEnabled = aiRulesInjectionInput.checked;
     settingsState.promptSpecVersion = normalizePromptSpecVersion(promptSpecVersionInput.value);
     settingsState.notifyEnabled = Boolean(notifyEnabledInput.checked);
     settingsState.notifyNtfyTopic = notifyTopicInput.value.trim();
@@ -5169,6 +5175,7 @@ async function initChat() {
         memoryNamespace: selectedChatMemoryNamespace() || undefined,
         memoryGlobalNamespace: selectedChatMemoryGlobalNamespace() || undefined,
         chatDebugDumpsEnabled: settingsState.chatDebugDumpsEnabled,
+        aiRulesInjectionEnabled: settingsState.aiRulesInjectionEnabled !== false,
         notify: buildNotifyPayload(),
         promptSpecVersion: normalizePromptSpecVersion(settingsState.promptSpecVersion),
         maxToolTurns: settingsState.maxToolTurns,
@@ -6331,7 +6338,8 @@ async function initOrchestration() {
         memoryGlobalNamespace: selectedOrchestrationMemoryGlobalNamespace() || undefined,
         requestTimeoutMs: settingsState.requestTimeoutMs,
         notify: buildNotifyPayload(),
-        promptSpecVersion: normalizePromptSpecVersion(settingsState.promptSpecVersion)
+        promptSpecVersion: normalizePromptSpecVersion(settingsState.promptSpecVersion),
+        aiRulesInjectionEnabled: settingsState.aiRulesInjectionEnabled !== false
       });
       renderOrchestrationOutput(result, promptText, parsed);
       renderOutputLogEntry(result, promptText, parsed);
@@ -7595,7 +7603,8 @@ async function initAdvancedOrchestration() {
         prompt: promptText,
         subAgentConfigs: buildSubAgentConfigs(),
         requestTimeoutMs: settingsState.requestTimeoutMs,
-        notify: buildNotifyPayload()
+        notify: buildNotifyPayload(),
+        aiRulesInjectionEnabled: settingsState.aiRulesInjectionEnabled !== false
       });
       renderOutput(result);
       recordOutputLog(result, promptText);

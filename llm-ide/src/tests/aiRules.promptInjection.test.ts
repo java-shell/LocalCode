@@ -225,3 +225,78 @@ test('spawn_sub_agent loads .ai-rules itself when the parent did not cache any',
   assert.ok(captured);
   assert.ok(captured.some(message => message.content.includes('Self-loaded rules body marker.')));
 });
+
+test('runOrchestration skips .ai-rules when the context disables injection', async () => {
+  const workspaceDir = await makeWorkspaceWithRules({ 'rules.md': 'Disabled rules body marker.' });
+  const plan = makeSingleStepPlan('Stage objective: no injection.');
+  const events: string[] = [];
+  const captured: ChatMessage[][] = [];
+
+  await withMockedChatWithTools(async (_config, messages) => {
+    captured.push(messages);
+    return {
+      text: 'TASK_COMPLETE done',
+      usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10, requests: 1 }
+    };
+  }, async () => {
+    await runOrchestration(plan, 'summarize', undefined, event => events.push(event), {
+      workspaceDir,
+      rootDir: workspaceDir,
+      aiRulesContent: null
+    } as any);
+  });
+
+  assert.ok(captured.length >= 1);
+  for (const messages of captured) {
+    assert.equal(
+      messages.some(message => message.content.includes('Disabled rules body marker.')),
+      false,
+      'disabled runs must not receive .ai-rules guidance'
+    );
+    assert.equal(
+      messages.some(message => message.content.includes('.ai-rules')),
+      false,
+      'disabled runs must not mention .ai-rules at all'
+    );
+  }
+  assert.deepEqual(events.filter(event => event.includes('[ai-rules]')), []);
+});
+
+test('spawn_sub_agent skips .ai-rules when the parent context disables injection', async () => {
+  const workspaceDir = await makeWorkspaceWithRules({ 'rules.md': 'Must stay out of sub-agents.' });
+  const captured: ChatMessage[] = [];
+
+  await withMockedChatWithTools(async (_config, messages) => {
+    captured.push(...messages);
+    return {
+      text: 'Sub-agent findings ready.',
+      usage: { promptTokens: 4, completionTokens: 4, totalTokens: 8, requests: 1 }
+    };
+  }, async () => {
+    const result = await executeTool(
+      'spawn_sub_agent',
+      { prompt: 'Inspect the module' },
+      {
+        workspaceDir,
+        rootDir: workspaceDir,
+        subAgentConfig: {
+          provider: 'openai-compatible' as const,
+          endpoint: 'http://localhost:11435/v1/chat/completions',
+          model: 'sub-agent-model',
+          temperature: 0.2
+        } as LLMConfig,
+        allowedToolNames: ['spawn_sub_agent', 'read_file'],
+        aiRulesContent: null
+      } as any
+    );
+
+    assert.equal((result as { ok?: boolean; error?: string }).ok, true, (result as { error?: string }).error);
+  });
+
+  assert.equal(
+    captured.some(message => message.content.includes('Must stay out of sub-agents.')),
+    false,
+    'a disabled parent must not re-read .ai-rules for its sub-agent'
+  );
+  assert.equal(captured.some(message => message.content.includes('.ai-rules')), false);
+});

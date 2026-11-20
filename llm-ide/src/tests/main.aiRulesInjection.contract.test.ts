@@ -31,6 +31,19 @@ test('chat flow loads .ai-rules once per request and injects it before the user 
     // The cached copy must be handed to sub-agents instead of re-reading per spawn.
     assert.match(source, /aiRulesContent:\s*aiRules\?\.content\s*\?\?\s*null/, file);
 
+    // The settings toggle must gate the read itself, not just the injection, and must default
+    // to enabled (only an explicit false disables it).
+    assert.match(source, /payload\.aiRulesInjectionEnabled\s*!==\s*false/, file);
+    assert.match(source, /aiRulesInjectionEnabled\s*\?\s*await\s*(\(0, workspaceFs_1\.)?loadAiRules\)?/, file);
+
+    // Orchestration must forward the disabled state as an explicit null so the engine and its
+    // sub-agents skip their own fallback read.
+    assert.match(
+      source,
+      /payload\.aiRulesInjectionEnabled === false \? \{ aiRulesContent: null \}/,
+      file
+    );
+
     // Injection must happen before the single joined system message.
     const pushIndex = source.indexOf('systemPromptSections.push(aiRulesGuidance)');
     const joinIndex = source.indexOf("systemPromptSections.join('\\n\\n')");
