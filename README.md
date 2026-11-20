@@ -183,6 +183,10 @@ Create a `.ai-rules/` folder in your workspace to provide automatic guidance to 
 
 ### How It Works
 
+Injection is **on by default**. Turn it off with **Settings → Chat Behavior → "Inject .ai-rules
+workspace guidance (chat, orchestration, sub-agents)"**. When off, the folder is not read at all and
+no guidance reaches chat, orchestration stages or sub-agents.
+
 1. Place `.md` files inside `.ai-rules/` at your workspace root
 2. On every chat or orchestration request, LocalCode reads the `.md` files in that folder
    (`README.md` and `RULES-QUICKREF.md` first, then alphabetical). Nested folders are not read.

@@ -8,7 +8,8 @@ It is not a VS Code extension.
 A workspace that contains a `.ai-rules/` folder now has its guidance injected automatically
 into every model request. Previously the root README described this behavior but no code
 implemented it; `loadAiRules()` in [`src/backend/workspaceFs.ts`](src/backend/workspaceFs.ts)
-closes that gap.
+closes that gap. Injection is on by default and can be turned off from
+**Settings → Chat Behavior** (see **Settings Toggle** below).
 
 **Loading rules** — direct `.md` children of `.ai-rules/` only (nested folders are not read,
 so a stray subdirectory cannot widen the read scope). `README.md` and `RULES-QUICKREF.md` come
@@ -32,12 +33,26 @@ sub-agents never re-read disk. `formatAiRulesGuidance()` keeps the wording ident
 three paths and states that the rules refine, but do not override, the system policies above
 them — workspace-authored text is treated as guidance, not elevated privilege.
 
+### Settings Toggle — 2026-11-19
+
+**Settings → Chat Behavior → "Inject .ai-rules workspace guidance (chat, orchestration, sub-agents)"**
+controls the feature and is **on by default**. Unchecking it means `loadAiRules()` is never called:
+the chat handler skips the read, `ChatStreamRequest.aiRulesInjectionEnabled` /
+`OrchestrationRunRequest.aiRulesInjectionEnabled` carry the flag to the main process, and
+orchestration receives an explicit `aiRulesContent: null`, which suppresses both the engine's own
+cached read and the `spawn_sub_agent` fallback read. So one checkbox turns the feature off for chat,
+every orchestration stage and all sub-agents at once, and the `[ai-rules] injected workspace
+guidance.` event is not emitted. The value persists with the other settings in `localStorage` and is
+sent with each chat, simple-orchestration and advanced-orchestration request.
+
 **Verification:** `src/tests/workspaceFs.aiRules.test.ts` (absent folder, empty folder,
 ordering, per-file and total caps, nested-path rejection, unreadable file),
 `src/tests/aiRules.promptInjection.test.ts` (orchestration stage placement, per-run caching,
-no-`.ai-rules` no-op, sub-agent inheritance and self-load) and
-`src/tests/main.aiRulesInjection.contract.test.ts` (chat wiring in both `src/main.ts` and
-`out/main.js`). Full suite: **285 tests, 283 passed, 0 failed, 2 skipped**.
+no-`.ai-rules` no-op, sub-agent inheritance and self-load, and the disabled paths for both
+orchestration and sub-agents), `src/tests/main.aiRulesInjection.contract.test.ts` (chat wiring in
+both `src/main.ts` and `out/main.js`, plus the toggle gating the read) and
+`src/tests/renderer.aiRulesSettings.contract.test.ts` (checkbox markup, enabled default, and the
+three request payloads). Full suite: **299 tests, 297 passed, 0 failed, 2 skipped**.
 
 **Non-breaking:** workspaces without `.ai-rules/` are unaffected. In this repository the feature
 injects 8000 characters of `README.md`, `RULES-QUICKREF.md` and `AI-RULES-REVIEW.md` per request;
@@ -429,6 +444,7 @@ terminal/guidance changes outside this diagnostics addition; no incompatible cal
 | **MCP Runtime Lifecycle** | Refresh/connect MCP servers from Settings, view per-server health/lifecycle status, discovered tool count, and last runtime error |
 | **Prompt Policy Version** | Switch between `v1` legacy system-prompt assembly and `v2` revised policy sections without removing the fallback path |
 | **Reference Workspaces** | Add extra directories in Settings and reach them with `scope: "ref:<id>"`. Read/write references are written without prompting; read-only references ask once per write |
+| **`.ai-rules` Injection** | Workspace `.ai-rules/` guidance injected into chat, orchestration stages and sub-agents. Toggle in Settings → **Chat Behavior**; on by default |
 | **Presets** | Quick-apply common configurations (Ollama, OpenAI-compatible, etc.) |
 
 ### Orchestration Panel (Simple)

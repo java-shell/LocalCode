@@ -6,7 +6,7 @@ Status legend: `[x]` done in this pass, `[ ]` still open.
 ## Task Start Declaration
 
 - **Task**: Review the application, record findings, and land the P0 cleanup items
-- **Type**: Multi-step with TODO Ledger (AI-011 … AI-024)
+- **Type**: Multi-step with TODO Ledger (AI-011 … AI-025)
 - **Applicable Rules**: Change Safety Protocol (§5), Testing Requirements (§6), Documentation Deliverables (§8), CI/CD Best Practices (§23), Token Optimization and Efficiency (§26)
 - **Breaking Changes**: None. `llm-ide/dist/` is removed from version control (build output moves to release assets); no runtime or API behavior changes.
 - **Clarifications Needed**: None
@@ -119,6 +119,19 @@ Largest files: [llm-ide/renderer/app.js](llm-ide/renderer/app.js) (8,281 lines),
   `workspaceFs.aiRules.test.ts`, `aiRules.promptInjection.test.ts`,
   `main.aiRulesInjection.contract.test.ts`.
 
+- [x] **AI-025 — `.ai-rules` injection is now a user setting (TODO item 1.6).** (`50303cd`)
+  **Settings → Chat Behavior → "Inject .ai-rules workspace guidance (chat, orchestration,
+  sub-agents)"**, on by default. Turning it off skips the `loadAiRules()` read entirely rather than
+  reading and discarding the result, and the flag travels with the request
+  (`aiRulesInjectionEnabled` on `ChatStreamRequest` / `OrchestrationRunRequest`) so orchestration gets
+  an explicit `aiRulesContent: null` — which suppresses both the engine's cached read and the
+  `spawn_sub_agent` fallback read. One checkbox therefore covers chat, every orchestration stage and
+  all sub-agents, and the `[ai-rules] injected workspace guidance.` event stops firing. Persisted in
+  `localStorage` alongside the other settings. Coverage: two disabled-path cases in
+  `aiRules.promptInjection.test.ts`, a toggle assertion in `main.aiRulesInjection.contract.test.ts`
+  and a new `renderer.aiRulesSettings.contract.test.ts` guarding the checkbox markup, the enabled
+  default and the three request payloads.
+
 - [ ] **AI-019 — No CI and no linter.**
   [.github/](.github) contains only `copilot-instructions.md`; there is no `workflows/`, no
   ESLint/Prettier/Biome configuration and no `CHANGELOG.md`. Add a CI job running
@@ -167,10 +180,10 @@ App-local design notes stay beside the app: [llm-ide/CHAT_SIDEBAR.md](llm-ide/CH
 
 ## Verification
 
-- `cd llm-ide && npm test` → **294 tests, 292 passed, 0 failed, 2 skipped** (the two skips are the
+- `cd llm-ide && npm test` → **299 tests, 297 passed, 0 failed, 2 skipped** (the two skips are the
   Electron-native crash minidump test and the context-isolation preload test, both environment-gated).
-  The `.ai-rules` work added 16 tests across three files, and AI-024 added 8 reference-scope gating
-  tests.
+  The `.ai-rules` work added 16 tests across three files, AI-024 added 8 reference-scope gating
+  tests, and AI-025 added 5 toggle tests.
 - `git status` after the commits is clean apart from ignored `dist/`, `out/` and `node_modules/`.
 - The P0 pass changed no runtime source except the test assertion; behavior of chat, orchestration,
   tool runtime and packaging was unchanged. AI-018 added `.ai-rules` prompt injection, and AI-024

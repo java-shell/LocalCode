@@ -29,6 +29,10 @@ Two deliberate refinements to the original plan:
 - **Sub-agents inherit the rules.** The plan did not say whether `spawn_sub_agent` children should
   see `.ai-rules`. They now do: the parent request loads the rules once and passes them down via
   `RuntimeContext.aiRulesContent`, so nested and parallel children comply without extra disk reads.
+- **The feature is user-toggleable (item 1.6).** Injection is on by default, but **Settings → Chat
+  Behavior → "Inject .ai-rules workspace guidance"** can turn it off. When off, the files are never
+  read at all — not just left out of the prompt — and the disable flag is forwarded to orchestration
+  and sub-agents so no layer re-reads them.
 
 ### Goal
 
@@ -128,6 +132,19 @@ When a workspace contains a `.ai-rules/` folder, the model should automatically 
   This is optional — the auto-injection above handles most of it.
 ```
 
+#### 1.6 — Settings toggle for injection (added 2026-11-19)
+
+**Files:** `llm-ide/renderer/index.html`, `llm-ide/renderer/app.js`, `llm-ide/src/shared/types.ts`,
+`llm-ide/src/main.ts`
+
+```
+[x] Add a settings checkbox, on by default, that controls whether .ai-rules guidance is injected.
+[x] Persist it with the other settings (localStorage) and send it with the chat, simple
+    orchestration and advanced orchestration requests.
+[x] When disabled, skip the loadAiRules() read entirely and forward the disabled state to
+    orchestration (aiRulesContent: null) so stages and sub-agents do not re-read the folder.
+```
+
 ### Acceptance Criteria
 
 - [x] Workspace **with** `.ai-rules/` → model receives rules as system context before every chat/orch request
@@ -135,6 +152,8 @@ When a workspace contains a `.ai-rules/` folder, the model should automatically 
 - [x] Rules content is capped at ~8000 chars to protect context window (plus a 4000-char per-file cap)
 - [x] Event log shows `[ai-rules] injected workspace guidance.` when loaded
 - [x] Orchestration caches the read (not re-read per step)
+- [x] Settings toggle defaults to **on**; turning it off removes the guidance from chat, every
+      orchestration stage and all sub-agents, and suppresses the `[ai-rules]` event
 
 ---
 
@@ -720,7 +739,7 @@ Phase 3: Wiring & Polish (depends on Phase 2)
 
 | Feature | Status | Items Done |
 |---|---|---|
-| **1. `.ai-rules` Folder Auto-Loading** | ✅ Complete | 5/5 items |
+| **1. `.ai-rules` Folder Auto-Loading** | ✅ Complete | 6/6 items |
 | **2. Toast Notifications + Sounds** | ✅ Complete | 9/9 items |
 | **3. Documentation + Presets** | ✅ Complete | 7/7 items |
 
@@ -733,6 +752,7 @@ Phase 3: Wiring & Polish (depends on Phase 2)
 | `llm-ide/src/backend/workspaceFs.ts` | #1 | New function: `loadAiRules()` |
 | `llm-ide/src/main.ts` | #1, #3 | Inject `.ai-rules` into chat messages + plan preset IPC handlers |
 | `llm-ide/src/backend/orchestrationEngine.ts` | #1 | Inject `.ai-rules` into orchestration steps + caching |
+| `llm-ide/src/shared/types.ts` | #1 | `aiRulesInjectionEnabled` on `ChatStreamRequest` and `OrchestrationRunRequest` |
 | `llm-ide/src/backend/schema.ts` | #3 | Orchestration plan presets (3 presets) |
 | `llm-ide/src/preload.ts` | #3 | IPC bridge for plan preset listing and retrieval |
 | `llm-ide/renderer/index.html` | #2, #3 | Toast container + preset selector HTML + Import Preset button |
@@ -768,6 +788,8 @@ Phase 3: Wiring & Polish (depends on Phase 2)
 - [x] Verify rules are injected as system messages before user prompt
 - [x] Verify content is capped at ~8000 chars
 - [x] Verify orchestration caches the read (not re-read per step)
+- [x] Verify the settings toggle defaults to enabled and disables injection in chat, orchestration
+      stages and sub-agents when unchecked
 
 #### Feature 2: Toast Notifications + Sounds ✅
 - [x] Test toast appears on chat completion (success + ding sound)
