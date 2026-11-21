@@ -3,6 +3,67 @@
 LocalCode is a standalone desktop platform built with Electron.
 It is not a VS Code extension.
 
+## Chat Markdown Rendering — 2026-11-20
+
+Chat, orchestration logs, the query dialogs and the editor markdown preview all render through one
+pipeline in [`renderer/app.js`](renderer/app.js): normalize the markdown, parse, sanitize, paint, then
+post-process the fragment. Three reported defects were traced to three different layers.
+
+**Tables.** `.assistant-markdown table` carried `display: block` with `width: 100%`. A block-level
+table splits `thead` and `tbody` into separate anonymous tables, so the box followed `width: 100%`
+while the grid kept its intrinsic width — measured in Chromium as a 494 px box whose last cell ended
+369 px short of the table edge, with `overflow-x: auto` inert (`scrollLeft` moved 0 px). Tables are
+now `display: table` with `max-width: 100%`, and `wrapMarkdownTables()` puts each one in a
+`.markdown-table-scroll` wrapper that owns the horizontal scrolling. Re-measured in a 719 px chat
+column: a narrow table is 107 px wide with a 1 px gap to its last cell, and a 12-column URL table
+measures 5,052 px and scrolls. `th[align=…]`/`td[align=…]` rules were added because
+`text-align: left` on cells outranks the `align` attribute marked emits, so GFM alignment
+(`|:---|:---:|---:|`) was previously dead. Orchestration log tables now share these rules instead of
+carrying a divergent copy.
+
+**Parsing.** `normalizeMarkdownTables()` forces a blank line before and after every table block and
+pads a separator row that has fewer cells than the header. marked 18.2.1 otherwise absorbs a
+paragraph that directly follows a table into the table body, rejects a short separator row entirely
+(literal pipes reach the screen), and flips a half-written separator row between `<p>` and `<table>`
+while streaming. Fenced code blocks are left untouched, so markdown examples stay verbatim.
+
+**Graphs.** ` ```mermaid ` fences previously produced an inert code block — mermaid was not loaded
+anywhere. [`renderer/vendor/`](renderer/vendor/) now ships marked 18.2.1, DOMPurify 3.4.18 and
+mermaid 11.17.2, and `renderMarkdownDiagrams()` renders `pre > code.language-mermaid` with
+`securityLevel: 'strict'`, `startOnLoad: false` and `suppressErrorRendering: true`. Rendering is
+debounced 350 ms per host element and runs once per block (`data-mermaid-rendered`), so a streaming
+reply does not re-parse a growing diagram on every animation frame. A diagram that fails to parse
+keeps its source block and gains a visible note. Verified under the app CSP: a flowchart produced an
+SVG with zero CSP violations.
+
+**Embedded HTML.** `Here is <div class="callout">a note</div> inline.` parses as
+`<p>Here is </p><div class="callout">a note</div> inline.<p></p>` — the trailing text falls outside
+any paragraph and the empty paragraphs add stray gaps. `normalizeRenderedParagraphs()` removes the
+empty paragraphs and re-wraps the loose text, and `collapseRedundantLineBreaks()` collapses the
+`<br><br><br>` that `breaks: true` produced for a line containing only `<br/>`. Standalone block HTML
+(`<details>`, `<table>`, `<svg>`, markdown nested inside HTML) renders as authored.
+
+**Sanitization is now fail-closed.** The old code returned raw marked output whenever DOMPurify was
+unavailable; in a real browser under the app CSP an injected `<style>` recolored the document to
+`rgb(0, 255, 0)` and a `javascript:` href survived. `sanitizeRenderedHtml()` now returns `null` when
+no sanitizer is present and `renderMarkdownToHtml()` falls back to escaped plain text. The profile
+keeps `details`/`summary`, `svg`, `kbd`, `mark`, `blockquote`, `colspan`/`rowspan`, `ol start` and the
+`align` attributes, and strips `style`, `form`, `input`, `button`, `center`, `font`, `iframe`,
+`object`, `embed`, `noscript` plus `style`/`id`/`srcset`/`data-*` attributes. CSP `img-src` gained
+`https:` so markdown images load (previously every remote image measured `naturalWidth 0`).
+
+**Non-breaking:** no request, tool or storage behavior changed; only rendering. Vendored libraries
+ship automatically because `build.files` already includes `renderer/**/*`. The unpinned
+`cdn.jsdelivr.net/npm/marked` tag (which served 15.0.12) is gone, so the parser version is now fixed
+to the tested build. Monaco remains on CDN.
+
+**Verification:** `src/tests/renderer.markdown.contract.test.ts` (13 tests) asserts the vendored
+script tags, the absence of an unpinned marked CDN URL, the CSP `img-src`, the table CSS and
+alignment rules, the mermaid wiring, that `renderMarkdownInto()` is the only markdown paint site, that
+the pipeline never returns unsanitized HTML, and the table-normalization behaviour against the
+vendored marked build itself. Full suite: **312 tests, 310 passed, 0 failed, 2 skipped**. Rendering
+was additionally verified in real Chromium against the shipped renderer files under the app CSP.
+
 ## `.ai-rules` Workspace Guidance — 2026-11-17
 
 A workspace that contains a `.ai-rules/` folder now has its guidance injected automatically
@@ -431,6 +492,7 @@ terminal/guidance changes outside this diagnostics addition; no incompatible cal
 | Feature | Description |
 | --- | --- |
 | **Streaming Responses** | Token-by-token display of model output in markdown |
+| **Markdown Rendering** | GFM tables (scrollable, alignment honoured), ` ```mermaid ` diagrams rendered to SVG, embedded block HTML, and sanitized output that falls back to escaped text when no sanitizer is available |
 | **Tool Calling** | 23+ tools available (filesystem, git, web, memory, interaction, delegation, MCP introspection) |
 | **Tool-Call Budget** | Up to 1000 tool turns per chat run, orchestration step or `spawn_sub_agent` child (chat default 250, sub-agent default 8). Set in Settings → **Max Tool Turns** |
 | **Session Management** | Create, switch, and delete chat sessions with full history |
@@ -475,7 +537,7 @@ terminal/guidance changes outside this diagnostics addition; no incompatible cal
 | **Tab Management** | Multiple open files with dirty-state tracking |
 | **File Tree Explorer** | Browse workspace files with expandable directory tree |
 | **Disk Change Detection** | Detect and prompt on external file modifications |
-| **Markdown Preview** | Toggle rendered markdown view for `.md` files |
+| **Markdown Preview** | Toggle rendered markdown view for `.md` files, using the same pipeline as chat (tables, diagrams, sanitization) |
 
 ### Model Terminal
 

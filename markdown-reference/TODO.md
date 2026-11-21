@@ -2,11 +2,12 @@
 
 ## Overview
 
-Three feature areas to implement in LocalCode (llm-ide):
+Four feature areas have been implemented in LocalCode (llm-ide):
 
 1. **`.ai-rules` folder auto-injection** — Models read workspace `.ai-rules/` guidance before acting.
 2. **Completion toast notification + "Ding" sound** — Visual + audio alert when chat/orchestration finishes.
 3. **Enhanced documentation + Preset definitions** — Better docs and one-click preset configurations.
+4. **Chat markdown rendering fixes** — Tables, `mermaid` diagrams and embedded HTML render correctly (added 2026-11-20).
 
 ---
 
@@ -706,6 +707,50 @@ Each preset includes full step definitions with:
 
 ---
 
+## 4. Chat Markdown Rendering Fixes (added 2026-11-20)
+
+### Status: ✅ COMPLETE (`557541a`, NEXT.md AI-026)
+
+Reported as: "some tables and graphs fail to render properly, and embedded html in the markdown
+always fails." Three separate causes — CSS, a missing library and a sanitizer gap. Full findings and
+measurements are in [NEXT.md](../NEXT.md#chat-markdown-rendering--findings-and-fixes) (AI-026) and
+[llm-ide/README.md](../llm-ide/README.md#chat-markdown-rendering--2026-11-20).
+
+**Files:** `llm-ide/renderer/app.js`, `llm-ide/renderer/styles.css`, `llm-ide/renderer/index.html`,
+`llm-ide/renderer/vendor/` (new)
+
+```
+[x] Vendor marked 18.2.1, DOMPurify 3.4.18 and mermaid 11.17.2; drop the unpinned marked CDN tag
+[x] Remove display:block from markdown tables; scroll them in a .markdown-table-scroll wrapper
+[x] Honour GFM align="left|center|right" on th/td
+[x] Normalize tables: blank line before/after each table, pad short separator rows
+[x] Fail closed when no sanitizer is available instead of returning raw parser output
+[x] Render ```mermaid fences to SVG with mermaid securityLevel 'strict', debounced per host element
+[x] Repair the empty-paragraph / loose-text artifacts from inline block HTML and collapse <br> runs
+[x] Allow https: images in CSP img-src
+[x] Route all 16 markdown call sites through one renderMarkdownInto() entry point
+```
+
+### Acceptance Criteria
+
+- [x] Narrow table renders at intrinsic width with no dead bordered area past the last column
+      (measured 107 px table, 1 px gap; previously a 494 px box with a 369 px dead area)
+- [x] Wide table scrolls horizontally (`scrollLeft` 4,333 on a 5,052 px table in a 719 px column;
+      previously `overflow-x: auto` moved 0 px)
+- [x] `|:---|:---:|---:|` computes `left` / `center` / `right`
+- [x] A paragraph directly after a table stays a paragraph
+- [x] A separator row shorter than the header still renders as a table
+- [x] ` ```mermaid ` produces an SVG under the app CSP with zero violations; a malformed diagram
+      keeps its source and shows a failure note
+- [x] `<details>`, `<svg>`, `<table>` and markdown nested inside HTML render as authored
+- [x] Injected `<style>`, `<form>`/`<input>`/`<button>` and `javascript:` hrefs never reach the DOM,
+      including when DOMPurify is unavailable
+- [x] A remote `https:` markdown image loads (`naturalWidth 120`)
+- [x] `src/tests/renderer.markdown.contract.test.ts` — 13 tests; full suite 312 tests, 310 passed,
+      0 failed, 2 skipped
+
+---
+
 ## Implementation Order & Dependencies
 
 ```
@@ -742,6 +787,7 @@ Phase 3: Wiring & Polish (depends on Phase 2)
 | **1. `.ai-rules` Folder Auto-Loading** | ✅ Complete | 6/6 items |
 | **2. Toast Notifications + Sounds** | ✅ Complete | 9/9 items |
 | **3. Documentation + Presets** | ✅ Complete | 7/7 items |
+| **4. Chat Markdown Rendering Fixes** | ✅ Complete | 9/9 items |
 
 ---
 

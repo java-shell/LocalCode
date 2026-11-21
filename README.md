@@ -41,6 +41,9 @@ It brings an editor, chat, workflow runner, and live terminal output into one lo
 - Stream responses and model events into the chat output.
 - Enable or disable model tool access by name.
 - Adjust max tool turns, bounded from `1` to `1000`.
+- Render model output as sanitized markdown: GFM tables with working alignment and horizontal
+  scrolling, ` ```mermaid ` diagrams rendered to SVG, and embedded block HTML. See
+  [llm-ide/README.md](llm-ide/README.md#chat-markdown-rendering--2026-11-20).
 
 ### Orchestration Workflows
 

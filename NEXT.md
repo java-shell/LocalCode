@@ -6,7 +6,7 @@ Status legend: `[x]` done in this pass, `[ ]` still open.
 ## Task Start Declaration
 
 - **Task**: Review the application, record findings, and land the P0 cleanup items
-- **Type**: Multi-step with TODO Ledger (AI-011 … AI-025)
+- **Type**: Multi-step with TODO Ledger (AI-011 … AI-026)
 - **Applicable Rules**: Change Safety Protocol (§5), Testing Requirements (§6), Documentation Deliverables (§8), CI/CD Best Practices (§23), Token Optimization and Efficiency (§26)
 - **Breaking Changes**: None. `llm-ide/dist/` is removed from version control (build output moves to release assets); no runtime or API behavior changes.
 - **Clarifications Needed**: None
@@ -20,7 +20,7 @@ native crash diagnostics. Supporting pieces: [namespace_creator/](namespace_crea
 CLI), [.ai-rules/](.ai-rules) (rules framework), [markdown-reference/](markdown-reference)
 (roadmap and design docs).
 
-Largest files: [llm-ide/renderer/app.js](llm-ide/renderer/app.js) (8,281 lines),
+Largest files: [llm-ide/renderer/app.js](llm-ide/renderer/app.js) (8,800 lines),
 [llm-ide/src/backend/llmClient.ts](llm-ide/src/backend/llmClient.ts) (3,198),
 [llm-ide/src/backend/toolRuntime.ts](llm-ide/src/backend/toolRuntime.ts) (2,967),
 [llm-ide/src/main.ts](llm-ide/src/main.ts) (2,930).
@@ -144,6 +144,90 @@ Largest files: [llm-ide/renderer/app.js](llm-ide/renderer/app.js) (8,281 lines),
   E5 (tune thresholds from observed telemetry) unchecked. `npm run analyze:compaction` already
   exists to feed that tuning.
 
+## Chat markdown rendering — findings and fixes
+
+Reported symptom: "some tables and graphs fail to render properly, and embedded HTML in the
+markdown always fails." Each symptom came from a different layer, so each got its own fix.
+
+### Findings (measured, not inferred)
+
+- **Tables were a CSS defect, not a parser defect.** `.assistant-markdown table` carried
+  `display: block` with `width: 100%`. A block-level table splits `thead` and `tbody` into separate
+  anonymous tables, and the box then follows `width: 100%` while the grid keeps its intrinsic width.
+  Measured in Chromium in a 496 px chat column: table box 494 px, last cell ended 369 px short of
+  the table edge (a dead bordered area past the last column), thead/tbody grids measured
+  `[63, 62, 63, 62]`, and `overflow-x: auto` was inert — setting `scrollLeft` moved 0 px.
+- **GFM alignment was dead.** marked emits `align="left|center|right"`, but
+  `.assistant-markdown th, td { text-align: left }` outranks the presentational attribute, so
+  `|:---|:---:|---:|` rendered left-aligned.
+- **Graphs never rendered at all.** `mermaid` appeared nowhere in the repository. A ` ```mermaid `
+  fence produced an inert `<pre><code class="language-mermaid">` block.
+- **Three table-parsing traps in marked 18.2.1.** A paragraph directly after a table is absorbed as
+  a table row with a trailing empty cell; a separator row with fewer cells than the header is not
+  parsed at all (literal pipes reach the screen); a half-written separator row during streaming
+  flips between `<p>` and `<table>`, which shows up as flicker.
+- **"Embedded HTML always fails" is a parse artifact, not stripping.** marked turns
+  `Here is <div class="callout">a note</div> inline.` into
+  `<p>Here is </p><div class="callout">a note</div> inline.<p></p>`. The trailing text lands outside
+  any paragraph (no paragraph spacing) and the empty paragraphs add stray gaps. Standalone block
+  HTML (`<details>`, `<table>`, `<svg>`, markdown nested inside HTML) already rendered correctly.
+- **The sanitizer could be skipped entirely.** `renderMarkdownToHtml()` returned raw marked output
+  whenever `window.DOMPurify` was unavailable. Proven live in Chromium under the app's own CSP: an
+  injected `<style>` recolored the document to `rgb(0, 255, 0)`, an `<iframe>` was injected (only
+  CSP `child-src` blocked framing) and a `javascript:` href survived. CSP happened to block the
+  `onerror` case because `script-src` has no `'unsafe-inline'`, but CSS injection and `javascript:`
+  links were not covered.
+- **Every remote markdown image was blocked.** CSP `img-src 'self' data: file:` — measured
+  `naturalWidth 0, complete false`.
+- **Version drift.** `index.html` loaded an unpinned `cdn.jsdelivr.net/npm/marked/marked.min.js`,
+  which served 15.0.12 while npm latest was 18.2.1; DOMPurify was pinned at 3.1.6 against a 3.4.18
+  latest.
+- **A `<br/>` line produced three breaks.** With `breaks: true`, `Line one\n<br/>\nLine two`
+  rendered as `<br><br><br>`.
+
+- [x] **AI-026 — Markdown pipeline hardened; tables, diagrams and embedded HTML fixed.** (`557541a`)
+  - **Vendored the render libraries** into [llm-ide/renderer/vendor/](llm-ide/renderer/vendor/):
+    marked 18.2.1 (52,941 B), DOMPurify 3.4.18 (29,298 B) and mermaid 11.17.2 (3,572,661 B, chosen
+    over 12.3.0's 5,537,838 B). [llm-ide/renderer/index.html](llm-ide/renderer/index.html) now loads
+    `./vendor/*` instead of the unpinned CDN builds, so the parser and the sanitizer can no longer
+    fail to load or drift to an untested version. `build.files` already ships `renderer/**/*`, so
+    no packaging change was needed.
+  - **Fail-closed sanitization.** `sanitizeRenderedHtml()` returns `null` when DOMPurify is missing,
+    and `renderMarkdownToHtml()` then falls back to `renderMarkdownAsEscapedText()`. Untrusted HTML
+    can no longer reach the DOM. The "balanced" profile keeps `details`/`summary`, `svg`, `kbd`,
+    `mark`, `blockquote`, `colspan`/`rowspan`, `ol start` and the `align` attributes, and strips
+    `style`, `form`, `input`, `button`, `center`, `font`, `iframe`, `object`, `embed`, `noscript`,
+    `style`/`id`/`srcset`/`data-*`.
+  - **Markdown normalization.** `normalizeMarkdownTables()` forces a blank line before and after each
+    table block and pads a short separator row to the header width, fence-aware so fenced samples are
+    untouched. This fixes the absorbed paragraph, the unparsed short separator and the streaming
+    flicker in one pass.
+  - **Post-render repair.** `normalizeRenderedParagraphs()` drops the empty paragraphs and re-wraps
+    the loose text node left by inline block HTML; `collapseRedundantLineBreaks()` collapses runs of
+    `<br>` into one.
+  - **Table layout.** `display: block` removed; tables are `display: table` with `max-width: 100%`
+    inside a `.markdown-table-scroll` wrapper inserted by `wrapMarkdownTables()`. Re-measured in the
+    real DOM chain (719 px chat column): narrow table 107 px with a 1 px gap to its last cell (was a
+    369 px dead area), a 12-column URL table measures 5,052 px and scrolls (`scrollLeft` 4,333), and
+    `align="left|center|right"` now computes `left`/`center`/`right`. Orchestration log tables share
+    the same rules instead of a divergent copy.
+  - **Diagrams render.** `renderMarkdownDiagrams()` renders `pre > code.language-mermaid` with
+    mermaid `securityLevel: 'strict'`, `startOnLoad: false` and `suppressErrorRendering: true`,
+    debounced 350 ms per host element and once per block (`data-mermaid-rendered`) so streaming does
+    not re-parse a growing diagram. A failing diagram keeps its source and gains a note. Verified in
+    Chromium under the app CSP: a flowchart produced an SVG with zero CSP violations, and a malformed
+    diagram produced the parse-error note instead of disappearing.
+  - **Images.** CSP `img-src` extended to `'self' data: file: https:`. The remote test image now
+    loads (`naturalWidth 120, complete true`).
+  - **One entry point.** All 16 markdown call sites now go through `renderMarkdownInto()`, so chat,
+    streaming, the editor markdown preview, orchestration logs and the query dialogs all get the same
+    normalization, table wrapping, paragraph repair and diagram pass.
+  - Coverage: new [llm-ide/src/tests/renderer.markdown.contract.test.ts](llm-ide/src/tests/renderer.markdown.contract.test.ts)
+    (13 tests) asserting the vendored script tags, the absence of an unpinned marked CDN URL, the CSP
+    `img-src`, the table CSS, the alignment rules, the mermaid wiring, that only
+    `renderMarkdownInto()` paints markdown, that the pipeline never returns unsanitized HTML, and
+    the table-normalization behaviour against the vendored marked build itself.
+
 ## P2 — Safety follow-up to the 1000-turn ceiling
 
 - [ ] **AI-021 — Add a wall-clock or request-count guard.**
@@ -180,11 +264,19 @@ App-local design notes stay beside the app: [llm-ide/CHAT_SIDEBAR.md](llm-ide/CH
 
 ## Verification
 
-- `cd llm-ide && npm test` → **299 tests, 297 passed, 0 failed, 2 skipped** (the two skips are the
+- `cd llm-ide && npm test` → **312 tests, 310 passed, 0 failed, 2 skipped** (the two skips are the
   Electron-native crash minidump test and the context-isolation preload test, both environment-gated).
   The `.ai-rules` work added 16 tests across three files, AI-024 added 8 reference-scope gating
-  tests, and AI-025 added 5 toggle tests.
+  tests, AI-025 added 5 toggle tests and AI-026 added 13 markdown contract tests.
+- `cd llm-ide && npx tsc -p tsconfig.json` → clean.
+- AI-026 was also verified in real Chromium against the shipped renderer files (extracted pipeline +
+  the real `styles.css` + the vendored libraries, loaded under the app's own CSP): narrow, aligned,
+  short-separator, wide (scrollable) and paragraph-after-table cases all rendered as tables with a
+  1 px gap to the last cell; `align` computed to `left`/`center`/`right`; `<details>`, `<svg>` and
+  markdown-nested-in-HTML rendered; injected `<style>`, `<form>`/`<input>`/`<button>` and
+  `javascript:` hrefs were removed; a mermaid flowchart produced an SVG and a malformed one produced
+  a failure note; a remote `https:` image loaded. Zero CSP violations and zero page errors.
 - `git status` after the commits is clean apart from ignored `dist/`, `out/` and `node_modules/`.
 - The P0 pass changed no runtime source except the test assertion; behavior of chat, orchestration,
-  tool runtime and packaging was unchanged. AI-018 added `.ai-rules` prompt injection, and AI-024
-  changed reference-scope mutation gating only.
+  tool runtime and packaging was unchanged. AI-018 added `.ai-rules` prompt injection, AI-024
+  changed reference-scope mutation gating only, and AI-026 changed markdown rendering only.
