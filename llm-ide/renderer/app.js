@@ -2080,26 +2080,536 @@ function renderBasicMarkdownToHtml(markdownText) {
   return text;
 }
 
-function renderMarkdownToHtml(markdownText) {
-  const markdownLib = window.marked;
+/**
+ * DOMPurify profile shared by every markdown render in the app.
+ *
+ * Purpose: keep the useful HTML that models emit (div/span/details/summary/table/svg/img and
+ * inline formatting) while removing the constructs that let model output attack the shell.
+ * Inputs: none (read by sanitizeRenderedHtml).
+ * Outputs: the options object passed to DOMPurify.sanitize.
+ * Side effects: none.
+ * Errors: none.
+ * Performance: one constant object reused per render.
+ * Security/privacy: FORBID_TAGS drops `style` (a `<style>` nested in a paragraph otherwise
+ * survives sanitization and restyles the whole document), `form`/`input`/`button` (cross-origin
+ * `action` was allowed by DOMPurify 3.1.6 defaults) and the legacy `center`/`font` tags.
+ * FORBID_ATTR drops `style` (remote `url()` fetches), `id` (markdown ids collided with app
+ * element ids such as #conversation) and `srcset`. ALLOW_DATA_ATTR is off so model output cannot
+ * seed `data-*` hooks. ADD_ATTR re-admits the table attributes GFM alignment syntax produces,
+ * which the default profile does not guarantee.
+ * Concurrency: read-only.
+ * Rationale: measured against the vendored DOMPurify build; the stripped set was chosen from the
+ * observed allow/strip matrix rather than from defaults.
+ */
+const MARKDOWN_SANITIZE_OPTIONS = {
+  ALLOW_DATA_ATTR: false,
+  ADD_ATTR: ['align', 'colspan', 'rowspan', 'start', 'width', 'height', 'loading', 'decoding', 'target', 'rel'],
+  FORBID_ATTR: ['style', 'id', 'srcset', 'formaction', 'action', 'background', 'dynsrc', 'lowsrc'],
+  FORBID_TAGS: [
+    'style', 'form', 'input', 'button', 'select', 'textarea', 'center', 'font', 'marquee',
+    'object', 'embed', 'iframe', 'noscript', 'xmp', 'meta', 'link', 'base', 'title'
+  ]
+};
+
+const TABLE_ROW_LINE = /^ {0,3}.*\|/;
+const TABLE_DELIMITER_LINE = /^ {0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
+const MARKDOWN_FENCE_LINE = /^ {0,3}(```|~~~)/;
+const STANDALONE_BREAK_LINE = /^ {0,3}<br\s*\/?>\s*$/i;
+const MERMAID_RENDER_DEBOUNCE_MS = 350;
+
+/**
+ * Count the cells in a GFM table row the way marked does.
+ *
+ * Purpose: table parsing needs the header cell count so a short separator row can be padded.
+ * Inputs: one markdown line.
+ * Outputs: the number of cells (>= 1).
+ * Side effects: none.
+ * Errors: none; malformed lines still return a usable count.
+ * Performance: O(line length).
+ * Security: none; pure string work.
+ * Concurrency: pure function.
+ * Rationale: marked v18 rejects a table whose separator row has fewer cells than the header and
+ * emits the literal pipes instead, which is one of the reported "tables fail" cases.
+ */
+function countTableCells(line) {
+  let body = String(line).trim();
+  if (body.startsWith('\\|')) {
+    body = body.slice(2);
+  }
+  if (body.startsWith('|')) {
+    body = body.slice(1);
+  }
+  if (body.endsWith('|') && !body.endsWith('\\|')) {
+    body = body.slice(0, -1);
+  }
+  if (!body.includes('|')) {
+    return 1;
+  }
+  return body.replace(/\\\|/g, '@@').split('|').length;
+}
+
+/**
+ * Rebuild a GFM separator row with at least `cellCount` cells, preserving alignment markers.
+ *
+ * Purpose: `| A | B | C |` over `|---|---|` is not a table to marked; padding rescues it.
+ * Inputs: the separator line and the required cell count.
+ * Outputs: a normalized separator row such as `| --- | :--- | ---: |`.
+ * Side effects: none.
+ * Errors: none.
+ * Performance: O(line length + missing cells).
+ * Security: none.
+ * Concurrency: pure function.
+ * Rationale: models frequently emit a separator row that is one cell short.
+ */
+function padTableDelimiter(delimiterLine, cellCount) {
+  const indent = /^ {0,3}/.exec(delimiterLine)?.[0] ?? '';
+  let body = String(delimiterLine).trim();
+  if (body.startsWith('|')) {
+    body = body.slice(1);
+  }
+  if (body.endsWith('|')) {
+    body = body.slice(0, -1);
+  }
+  const cells = body.split('|').map(cell => {
+    const trimmed = cell.trim();
+    if (trimmed.startsWith(':') && trimmed.endsWith(':')) return ':---:';
+    if (trimmed.endsWith(':')) return '---:';
+    if (trimmed.startsWith(':')) return ':---';
+    return '---';
+  });
+  while (cells.length < cellCount) {
+    cells.push('---');
+  }
+  return `${indent}| ${cells.join(' | ')} |`;
+}
+
+/**
+ * Normalize GFM tables so marked parses them and neighbouring paragraphs stay separate.
+ *
+ * Purpose: marked absorbs a paragraph that sits directly before or after a table into the table
+ * body (measured: `Outro text` became a table row), and a table whose separator row is short is
+ * not parsed at all. Both produced the literal-pipe output users reported.
+ * Inputs: raw markdown text.
+ * Outputs: the same text with a blank line forced before and after each table block, and padded
+ * separator rows. Fenced code blocks are left untouched.
+ * Side effects: none.
+ * Errors: none; unrecognized input is returned unchanged.
+ * Performance: single pass over the lines, O(document size).
+ * Security: none; it only inserts newlines and separator dashes.
+ * Concurrency: pure function, safe to call from the streaming render path.
+ * Rationale: fixing this in the markdown (rather than in a marked extension) keeps the vendored
+ * marked build unmodified and also stabilizes streaming, where a half-written separator row would
+ * otherwise flip between a paragraph and a table.
+ */
+function normalizeMarkdownTables(markdownText) {
+  const source = String(markdownText || '').replace(/\r\n/g, '\n');
+  if (!source.includes('|')) {
+    return source;
+  }
+
+  const lines = source.split('\n');
+  const normalized = [];
+  let fenceMarker = '';
+
+  const isFenceLine = line => MARKDOWN_FENCE_LINE.test(line);
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+
+    if (fenceMarker) {
+      if (line.trim().startsWith(fenceMarker)) {
+        fenceMarker = '';
+      }
+      normalized.push(line);
+      continue;
+    }
+    if (isFenceLine(line)) {
+      fenceMarker = line.trim().slice(0, 3);
+      normalized.push(line);
+      continue;
+    }
+
+    const nextLine = lines[index + 1];
+    const isTableStart = TABLE_ROW_LINE.test(line)
+      && nextLine !== undefined
+      && TABLE_DELIMITER_LINE.test(nextLine)
+      && nextLine.includes('-')
+      && line.includes('|');
+
+    if (!isTableStart) {
+      normalized.push(line);
+      continue;
+    }
+
+    if (normalized.length && normalized[normalized.length - 1].trim() !== '') {
+      normalized.push('');
+    }
+    normalized.push(line);
+    normalized.push(padTableDelimiter(nextLine, countTableCells(line)));
+    index += 1;
+
+    while (index + 1 < lines.length) {
+      const candidate = lines[index + 1];
+      if (!TABLE_ROW_LINE.test(candidate) || TABLE_DELIMITER_LINE.test(candidate) || !candidate.includes('|')) {
+        break;
+      }
+      index += 1;
+      normalized.push(candidate);
+    }
+
+    if (index + 1 < lines.length && lines[index + 1].trim() !== '') {
+      normalized.push('');
+    }
+  }
+
+  return normalized.join('\n');
+}
+
+/**
+ * Sanitize rendered markdown HTML, or report that no sanitizer is available.
+ *
+ * Purpose: single entry point so no call site can accidentally skip sanitization.
+ * Inputs: the HTML string produced by marked or the fallback renderer.
+ * Outputs: the sanitized HTML string, or null when window.DOMPurify is missing.
+ * Side effects: none.
+ * Errors: none; a missing sanitizer is reported through the null return.
+ * Performance: one DOMPurify pass per render.
+ * Security/privacy: this is the guard against model-authored HTML. Returning null instead of the
+ * input forces callers into the escaped-text path, because the previous code returned the raw
+ * marked output whenever DOMPurify failed to load, which let a `<style>` tag in model output
+ * recolor the whole document (measured: computed color rgb(0, 255, 0)).
+ * Concurrency: DOMPurify is re-entrant for string input.
+ * Rationale: fail closed.
+ */
+function sanitizeRenderedHtml(html) {
   const purifier = window.DOMPurify;
+  if (!purifier || typeof purifier.sanitize !== 'function') {
+    return null;
+  }
+  return purifier.sanitize(String(html || ''), MARKDOWN_SANITIZE_OPTIONS);
+}
+
+/**
+ * Render markdown as escaped plain text when no sanitizer is present.
+ *
+ * Purpose: last-resort path that keeps chat readable without ever injecting untrusted HTML.
+ * Inputs: raw markdown text.
+ * Outputs: HTML containing only escaped text and `<br>` separators.
+ * Side effects: none.
+ * Errors: none.
+ * Performance: O(text length).
+ * Security/privacy: escapes `& < > " '` so nothing can execute; formatting is lost by design.
+ * Concurrency: pure function.
+ * Rationale: losing formatting is acceptable; executing model-authored HTML is not.
+ */
+function renderMarkdownAsEscapedText(markdownText) {
+  return escapeHtml(String(markdownText || '')).replace(/\n/g, '<br>');
+}
+
+function renderMarkdownToHtml(markdownText) {
+  const normalizedMarkdown = normalizeMarkdownTables(markdownText || '');
+  const markdownLib = window.marked;
 
   if (markdownLib && typeof markdownLib.parse === 'function') {
-    const rawHtml = markdownLib.parse(markdownText || '', {
+    const sanitized = sanitizeRenderedHtml(markdownLib.parse(normalizedMarkdown, {
       gfm: true,
       breaks: true
-    });
-    if (purifier && typeof purifier.sanitize === 'function') {
-      return purifier.sanitize(rawHtml);
+    }));
+    if (sanitized !== null) {
+      return sanitized;
     }
-    return rawHtml;
+  } else {
+    const sanitized = sanitizeRenderedHtml(renderBasicMarkdownToHtml(normalizedMarkdown));
+    if (sanitized !== null) {
+      return sanitized;
+    }
   }
 
-  const fallbackHtml = renderBasicMarkdownToHtml(markdownText || '');
-  if (purifier && typeof purifier.sanitize === 'function') {
-    return purifier.sanitize(fallbackHtml);
+  return renderMarkdownAsEscapedText(normalizedMarkdown);
+}
+
+/**
+ * Wrap every table in a horizontal scroll container.
+ *
+ * Purpose: a `display: table` table keeps its intrinsic width, so a wide table must scroll in a
+ * wrapper. The old `display: block` on the table itself made `overflow-x: auto` inert (setting
+ * scrollLeft produced no movement) and stretched the table box past its last column.
+ * Inputs: the element that just received markdown HTML.
+ * Outputs: none; mutates the DOM by inserting `.markdown-table-scroll` divs.
+ * Side effects: DOM mutation only.
+ * Errors: none; tables already wrapped are skipped, so nested tables are left alone.
+ * Performance: O(tables in the rendered fragment).
+ * Security: none.
+ * Concurrency: synchronous, called right after innerHTML assignment.
+ * Rationale: measured in Chromium - a wrapped `display: table` table scrolls (scrollLeft 477 on a
+ * 971px table in a 494px host) while a narrow table keeps an intrinsic 100px box with no dead
+ * bordered area.
+ */
+function wrapMarkdownTables(element) {
+  if (!element) return;
+  for (const table of Array.from(element.querySelectorAll('table'))) {
+    if (table.closest('.markdown-table-scroll')) continue;
+    const wrapper = document.createElement('div');
+    wrapper.className = 'markdown-table-scroll';
+    table.parentNode?.insertBefore(wrapper, table);
+    wrapper.appendChild(table);
   }
-  return fallbackHtml;
+}
+
+let mermaidInitialized = false;
+let mermaidRenderSequence = 0;
+let mermaidRenderInFlight = false;
+const mermaidRenderTimers = new WeakMap();
+
+/**
+ * Configure the vendored mermaid once, with the strict security level.
+ *
+ * Purpose: mermaid defaults to `startOnLoad: true`, which would try to scan the whole document on
+ * page load; the app renders diagrams explicitly after each markdown paint.
+ * Inputs: the vendored mermaid global.
+ * Outputs: none; calls mermaid.initialize once.
+ * Side effects: mutates mermaid global configuration.
+ * Errors: swallowed - a broken mermaid config must not break chat rendering.
+ * Performance: one initialize for the app lifetime.
+ * Security/privacy: `securityLevel: 'strict'` is mermaid's hardened mode - it sanitizes the emitted
+ * SVG and disables diagram click handlers and link navigation, so a crafted diagram cannot run
+ * script or send the user elsewhere.
+ * Concurrency: guarded by mermaidInitialized.
+ * Rationale: the app is dark-themed, so the dark mermaid theme matches the chat surface.
+ */
+function initializeMermaid(mermaidLib) {
+  if (mermaidInitialized) return;
+  mermaidInitialized = true;
+  try {
+    mermaidLib.initialize({
+      startOnLoad: false,
+      securityLevel: 'strict',
+      theme: 'dark',
+      fontFamily: 'inherit',
+      suppressErrorRendering: true
+    });
+  } catch (error) {
+    console.warn('mermaid initialize failed', error);
+  }
+}
+
+/**
+ * Keep a labelled source block when a diagram cannot be rendered.
+ *
+ * Purpose: a malformed diagram must still show its source instead of silently disappearing.
+ * Inputs: the `<pre>` holding the diagram source and the render error.
+ * Outputs: none; annotates the DOM.
+ * Side effects: DOM mutation.
+ * Errors: none.
+ * Performance: O(1).
+ * Security: the note text is assigned through textContent, so error text cannot inject HTML.
+ * Concurrency: synchronous.
+ * Rationale: silent failure was the original symptom - ```mermaid blocks rendered as inert code
+ * with no indication that a diagram was intended.
+ */
+function markMermaidFailure(preElement, error) {
+  if (!preElement) return;
+  preElement.classList.add('mermaid-diagram-failed');
+  if (preElement.dataset.mermaidNote) return;
+  preElement.dataset.mermaidNote = 'true';
+  const note = document.createElement('div');
+  note.className = 'mermaid-diagram-note';
+  note.textContent = `Diagram could not be rendered: ${String(error?.message || error || 'unknown error')}`;
+  preElement.parentNode?.insertBefore(note, preElement.nextSibling);
+}
+
+/**
+ * Render every not-yet-rendered mermaid block inside an element.
+ *
+ * Purpose: turn ```mermaid fences into real SVG diagrams, which nothing in the app did before.
+ * Inputs: the element that just received markdown HTML.
+ * Outputs: none; replaces each diagram `<pre>` with a `.mermaid-diagram` holder.
+ * Side effects: async mermaid rendering and DOM mutation.
+ * Errors: per-diagram - a failing diagram keeps its source block and gains an error note.
+ * Performance: mermaid parsing is the expensive part; blocks are debounced and only rendered once
+ * each (marked with data-mermaid-rendered) so streaming does not re-render a growing diagram on
+ * every animation frame.
+ * Security: relies on mermaid `securityLevel: 'strict'` for SVG sanitization; the source text comes
+ * from the code element's textContent, which is already escaped output.
+ * Concurrency: a single global in-flight flag serializes renders and re-queues the element if the
+ * flag is held, so two chat surfaces cannot render diagrams simultaneously.
+ * Rationale: measured with the vendored mermaid 11.17.2 bundle under the app CSP - a flowchart
+ * rendered to a 234x324 SVG with no CSP violations.
+ */
+async function renderMarkdownDiagrams(element) {
+  const mermaidLib = window.mermaid;
+  if (!mermaidLib || typeof mermaidLib.render !== 'function' || !element) {
+    return;
+  }
+
+  const pending = Array.from(element.querySelectorAll('pre > code.language-mermaid'))
+    .filter(code => !code.dataset.mermaidRendered);
+  if (!pending.length) {
+    return;
+  }
+
+  if (mermaidRenderInFlight) {
+    queueMermaidRender(element);
+    return;
+  }
+
+  mermaidRenderInFlight = true;
+  try {
+    initializeMermaid(mermaidLib);
+    for (const codeElement of pending) {
+      if (!codeElement.isConnected) continue;
+      codeElement.dataset.mermaidRendered = 'true';
+      const preElement = codeElement.closest('pre') || codeElement;
+      try {
+        const rendered = await mermaidLib.render(`localcode-diagram-${(mermaidRenderSequence += 1)}`, codeElement.textContent || '');
+        const svg = typeof rendered === 'string' ? rendered : rendered?.svg;
+        if (!svg) {
+          throw new Error('mermaid returned no SVG');
+        }
+        const holder = document.createElement('div');
+        holder.className = 'mermaid-diagram';
+        holder.innerHTML = svg;
+        preElement.replaceWith(holder);
+      } catch (error) {
+        markMermaidFailure(preElement, error);
+      }
+    }
+  } finally {
+    mermaidRenderInFlight = false;
+  }
+}
+
+/**
+ * Debounce diagram rendering for one markdown host element.
+ *
+ * Purpose: streaming re-paints the whole assistant block on every animation frame; rendering a
+ * diagram per frame would re-parse a growing diagram dozens of times per second.
+ * Inputs: the markdown host element.
+ * Outputs: none; schedules (or reschedules) a single timer per element.
+ * Side effects: sets a timer tracked in a WeakMap keyed by the element.
+ * Errors: none.
+ * Performance: collapses a frame-rate stream of paints into one render per MERMAID_RENDER_DEBOUNCE_MS.
+ * Security: none.
+ * Concurrency: one timer per element; a replaced element is garbage collected with its timer.
+ * Rationale: 350 ms is long enough that a mid-stream paint rarely triggers a diagram render, and
+ * short enough that a finished diagram appears essentially immediately after the reply completes.
+ */
+function queueMermaidRender(element) {
+  if (!window.mermaid || typeof window.mermaid.render !== 'function' || !element) {
+    return;
+  }
+  const existing = mermaidRenderTimers.get(element);
+  if (existing) {
+    clearTimeout(existing);
+  }
+  mermaidRenderTimers.set(element, setTimeout(() => {
+    mermaidRenderTimers.delete(element);
+    renderMarkdownDiagrams(element);
+  }, MERMAID_RENDER_DEBOUNCE_MS));
+}
+
+/**
+ * Render markdown into an element and apply the markdown post-processing passes.
+ *
+ * Purpose: one entry point for every markdown surface (chat, editor preview, orchestration logs,
+ * query dialogs) so tables, diagrams and sanitization behave identically everywhere.
+ * Inputs: target element, markdown text, and options ({ renderDiagrams: boolean }).
+ * Outputs: none; sets innerHTML and post-processes the fragment.
+ * Side effects: DOM mutation, and schedules async mermaid rendering.
+ * Errors: none; a null element is ignored.
+ * Performance: synchronous paint plus a debounced diagram pass.
+ * Security: HTML reaches the DOM only through renderMarkdownToHtml, which always sanitizes or falls
+ * back to escaped text.
+ * Concurrency: safe to call repeatedly on the same element during streaming.
+ * Rationale: previously each call site assigned innerHTML itself, so a fix to tables or diagrams had
+ * to be repeated at 16 places.
+ */
+/**
+ * Repair the paragraph artifacts marked produces around embedded block-level HTML.
+ *
+ * Purpose: `Here is <div class="callout">a note</div> inline.` parses as
+ * `<p>Here is </p><div class="callout">a note</div> inline.<p></p>`. The trailing text node sits
+ * outside any paragraph (so it gets no paragraph spacing) and the empty paragraphs add stray
+ * vertical gaps, which is what made embedded HTML look broken.
+ * Inputs: the element that just received markdown HTML.
+ * Outputs: none; mutates the DOM by removing empty paragraphs and wrapping loose text nodes.
+ * Side effects: DOM mutation only.
+ * Errors: none; a fragment without artifacts is left untouched.
+ * Performance: O(child nodes of the host element); only top-level nodes are visited.
+ * Security: none; text nodes are moved, never re-parsed as HTML.
+ * Concurrency: synchronous, called right after innerHTML assignment.
+ * Rationale: fixing the shape after parsing avoids rewriting model-authored markdown, which would
+ * risk changing the meaning of the text.
+ */
+function normalizeRenderedParagraphs(element) {
+  if (!element) return;
+
+  for (const paragraph of Array.from(element.querySelectorAll(':scope > p'))) {
+    const hasContent = paragraph.childNodes.length > 0
+      && (paragraph.textContent.trim() !== '' || paragraph.querySelector('*'));
+    if (!hasContent) {
+      paragraph.remove();
+    }
+  }
+
+  for (const node of Array.from(element.childNodes)) {
+    if (node.nodeType !== 3 || !node.textContent.trim()) {
+      continue;
+    }
+    const paragraph = document.createElement('p');
+    node.replaceWith(paragraph);
+    paragraph.appendChild(node);
+  }
+}
+
+/**
+ * Collapse runs of consecutive `<br>` elements into a single break.
+ *
+ * Purpose: with `breaks: true`, a markdown line that is only `<br/>` becomes three breaks
+ * (measured: `Line one\n<br/>\nLine two` rendered as `<br><br><br>`), because the hard line
+ * breaks around the tag are added on top of the tag itself.
+ * Inputs: the element that just received markdown HTML.
+ * Outputs: none; removes the redundant break nodes.
+ * Side effects: DOM mutation only.
+ * Errors: none.
+ * Performance: O(br elements in the fragment).
+ * Security: none.
+ * Concurrency: synchronous, called right after innerHTML assignment.
+ * Rationale: models emit `<br/>` liberally, and the extra blank lines were visible in chat output.
+ */
+function collapseRedundantLineBreaks(element) {
+  if (!element) return;
+
+  for (const breakElement of Array.from(element.querySelectorAll('br'))) {
+    // Drop whitespace-only text nodes that sit between two breaks, then drop the extra break.
+    for (;;) {
+      let next = breakElement.nextSibling;
+      while (next && next.nodeType === 3 && !next.textContent.trim()) {
+        const following = next.nextSibling;
+        if (following && following.nodeName === 'BR') {
+          next.remove();
+          next = following;
+        } else {
+          break;
+        }
+      }
+      if (!next || next.nodeName !== 'BR') {
+        break;
+      }
+      next.remove();
+    }
+  }
+}
+
+function renderMarkdownInto(element, markdownText, options = {}) {
+  if (!element) return;
+  element.innerHTML = renderMarkdownToHtml(markdownText);
+  wrapMarkdownTables(element);
+  normalizeRenderedParagraphs(element);
+  collapseRedundantLineBreaks(element);
+  if (options.renderDiagrams !== false) {
+    queueMermaidRender(element);
+  }
 }
 
 function createModelUri(kind, value) {
@@ -2129,7 +2639,7 @@ function renderActiveMarkdownPreview() {
     return;
   }
   markdownPreviewEl.className = 'markdown-preview assistant-markdown';
-  markdownPreviewEl.innerHTML = renderMarkdownToHtml(tab.model.getValue());
+  renderMarkdownInto(markdownPreviewEl, tab.model.getValue());
 }
 
 function syncMarkdownEditorView() {
@@ -3435,7 +3945,7 @@ async function initChat() {
 
     const assistantMarkdown = document.createElement('div');
     assistantMarkdown.className = 'assistant-markdown';
-    assistantMarkdown.innerHTML = renderMarkdownToHtml(markdownText || '');
+    renderMarkdownInto(assistantMarkdown, markdownText || '');
 
     assistantRow.appendChild(assistantLabel);
     assistantRow.appendChild(assistantMarkdown);
@@ -3500,7 +4010,7 @@ async function initChat() {
 
     const title = document.createElement('div');
     title.className = 'query-user-question';
-    title.innerHTML = renderMarkdownToHtml(
+    renderMarkdownInto(title,
       `### Recoverable Chat Run\nA prior chat run ended while still in progress (${String(run.status || 'running')}).`
     );
     card.appendChild(title);
@@ -3565,7 +4075,7 @@ async function initChat() {
 
     const title = document.createElement('div');
     title.className = 'query-user-question';
-    title.innerHTML = renderMarkdownToHtml(
+    renderMarkdownInto(title,
       `### Interrupted Turn Recovered\nYour last turn was interrupted around ${formatChatTimestamp(checkpoint.updatedAt)}.`
     );
     card.appendChild(title);
@@ -4080,7 +4590,7 @@ async function initChat() {
     if (!assistantMarkdownRaw) return;
     ensureAssistantMessageRendered();
     if (!assistantMarkdownEl) return;
-    assistantMarkdownEl.innerHTML = renderMarkdownToHtml(assistantMarkdownRaw);
+    renderMarkdownInto(assistantMarkdownEl, assistantMarkdownRaw);
     conversation.scrollTop = conversation.scrollHeight;
   }
 
@@ -4095,7 +4605,7 @@ async function initChat() {
 
   function closeAssistantBlock() {
     if (assistantMarkdownEl && assistantMarkdownRaw) {
-      assistantMarkdownEl.innerHTML = renderMarkdownToHtml(assistantMarkdownRaw);
+      renderMarkdownInto(assistantMarkdownEl, assistantMarkdownRaw);
     }
     assistantRowEl = null;
     assistantMarkdownEl = null;
@@ -4334,7 +4844,7 @@ async function initChat() {
     // Render markdown question
     const questionEl = document.createElement('div');
     questionEl.className = 'query-user-question';
-    questionEl.innerHTML = renderMarkdownToHtml(question);
+    renderMarkdownInto(questionEl, question);
     queryCard.appendChild(questionEl);
 
     // Create response area
@@ -5376,7 +5886,7 @@ async function initOrchestration() {
 
     const title = document.createElement('div');
     title.className = 'query-user-question';
-    title.innerHTML = renderMarkdownToHtml(
+    renderMarkdownInto(title,
       `### Recoverable Orchestration Run\nA previous orchestration appears unfinished (${String(run.status || 'running')}).`
     );
     card.appendChild(title);
@@ -5671,7 +6181,7 @@ async function initOrchestration() {
 
       const meta = document.createElement('div');
       meta.className = 'orchestration-log-meta assistant-markdown orchestration-log-markdown-content';
-      meta.innerHTML = renderMarkdownToHtml([
+      renderMarkdownInto(meta, [
         `**Prompt:** ${entry.promptText || '(empty prompt)'}`,
         `**Completion:** ${entry.markerInfo}`
       ].join('\n\n'));
@@ -5695,7 +6205,7 @@ async function initOrchestration() {
 
           const body = document.createElement('div');
           body.className = 'assistant-markdown orchestration-log-markdown-content orchestration-log-step-body';
-          body.innerHTML = renderMarkdownToHtml(step.output || '(empty output)');
+          renderMarkdownInto(body, step.output || '(empty output)');
           stepDetails.appendChild(body);
 
           if (toolCallCount > 0) {
@@ -5770,7 +6280,7 @@ async function initOrchestration() {
 
     const summaryCard = document.createElement('div');
     summaryCard.className = 'assistant-markdown orchestration-log-markdown-content orchestration-output-card';
-    summaryCard.innerHTML = renderMarkdownToHtml([
+    renderMarkdownInto(summaryCard, [
       `## ${planSnapshot.name || 'Workflow'} output`,
       `**Prompt:** ${promptText || '(empty prompt)'}`,
       `**Iterations:** ${result.iterations || 1}`,
@@ -5796,7 +6306,7 @@ async function initOrchestration() {
 
         const stepBody = document.createElement('div');
         stepBody.className = 'assistant-markdown orchestration-log-markdown-content orchestration-log-step-body';
-        stepBody.innerHTML = renderMarkdownToHtml(step.output || '(empty output)');
+        renderMarkdownInto(stepBody, step.output || '(empty output)');
         stepDetails.appendChild(stepBody);
 
         if (toolCalls.length) {
@@ -5848,7 +6358,7 @@ async function initOrchestration() {
     outputEl.innerHTML = '';
     const card = document.createElement('div');
     card.className = 'assistant-markdown orchestration-log-markdown-content orchestration-output-card';
-    card.innerHTML = renderMarkdownToHtml(`## Run failed\n\n\`\`\`\n${String(errorText || 'Unknown orchestration error')}\n\`\`\``);
+    renderMarkdownInto(card, `## Run failed\n\n\`\`\`\n${String(errorText || 'Unknown orchestration error')}\n\`\`\``);
     outputEl.appendChild(card);
     outputEl.scrollTop = outputEl.scrollHeight;
   }
@@ -7439,7 +7949,7 @@ async function initAdvancedOrchestration() {
 
         const meta = document.createElement('div');
         meta.className = 'orchestration-log-meta assistant-markdown orchestration-log-markdown-content';
-        meta.innerHTML = renderMarkdownToHtml([
+        renderMarkdownInto(meta, [
           `**Prompt:** ${entry.promptText || '(empty prompt)'}`,
           `**Completed:** ${entry.completion ? 'yes' : 'no'}`,
           `**Completion Marker:** ${entry.completionMarker || '(none)'}`
@@ -7465,7 +7975,7 @@ async function initAdvancedOrchestration() {
 
             const stepBody = document.createElement('div');
             stepBody.className = 'assistant-markdown orchestration-log-markdown-content orchestration-log-step-body';
-            stepBody.innerHTML = renderMarkdownToHtml(step.output || '(empty output)');
+            renderMarkdownInto(stepBody, step.output || '(empty output)');
             stepDetails.appendChild(stepBody);
 
             appendToolCallsDetails(stepDetails, toolCalls);

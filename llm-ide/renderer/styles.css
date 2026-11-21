@@ -1334,17 +1334,7 @@ button.btn-danger:hover:not(:disabled) {
   padding: 0;
 }
 
-.orchestration-log-markdown-content table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-.orchestration-log-markdown-content th,
-.orchestration-log-markdown-content td {
-  border: 1px solid var(--border);
-  padding: 6px 8px;
-  text-align: left;
-}
+/* Table styling for orchestration logs lives with the chat markdown rules further down. */
 
 .orchestration-log-tool-calls {
   margin: 6px 10px 10px;
@@ -1856,18 +1846,82 @@ button.btn-danger:hover:not(:disabled) {
   color: #61d5ff;
 }
 
-.assistant-markdown table {
-  width: 100%;
-  border-collapse: collapse;
-  display: block;
+/*
+ * Markdown tables. `display: block` (the previous rule) splits thead/tbody into separate
+ * anonymous tables and sizes the box from width:100% while the grid keeps its intrinsic width,
+ * which leaves a dead bordered area past the last column and makes overflow-x:auto inert.
+ * Tables now stay display:table and the .markdown-table-scroll wrapper inserted by
+ * wrapMarkdownTables() in app.js owns the horizontal scrolling.
+ */
+.assistant-markdown .markdown-table-scroll,
+.orchestration-log-markdown-content .markdown-table-scroll {
+  max-width: 100%;
   overflow-x: auto;
 }
 
+.assistant-markdown table,
+.orchestration-log-markdown-content table {
+  display: table;
+  width: auto;
+  max-width: 100%;
+  border-collapse: collapse;
+}
+
 .assistant-markdown th,
-.assistant-markdown td {
+.assistant-markdown td,
+.orchestration-log-markdown-content th,
+.orchestration-log-markdown-content td {
   border: 1px solid var(--border);
   padding: 6px 8px;
   text-align: left;
+}
+
+/* GFM alignment markers emit align="left|center|right"; the text-align above would win. */
+.assistant-markdown th[align="left"],
+.assistant-markdown td[align="left"],
+.orchestration-log-markdown-content th[align="left"],
+.orchestration-log-markdown-content td[align="left"] {
+  text-align: left;
+}
+
+.assistant-markdown th[align="center"],
+.assistant-markdown td[align="center"],
+.orchestration-log-markdown-content th[align="center"],
+.orchestration-log-markdown-content td[align="center"] {
+  text-align: center;
+}
+
+.assistant-markdown th[align="right"],
+.assistant-markdown td[align="right"],
+.orchestration-log-markdown-content th[align="right"],
+.orchestration-log-markdown-content td[align="right"] {
+  text-align: right;
+}
+
+/* Mermaid diagrams rendered from ```mermaid fences. */
+.assistant-markdown .mermaid-diagram {
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 12px 0;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(6, 12, 22, 0.55);
+}
+
+.assistant-markdown .mermaid-diagram svg {
+  max-width: 100%;
+  height: auto;
+}
+
+.assistant-markdown pre.mermaid-diagram-failed {
+  border-left: 3px solid #ff8861;
+}
+
+.assistant-markdown .mermaid-diagram-note {
+  margin: 6px 0 12px;
+  color: #ffb08f;
+  font-size: 13px;
 }
 
 .assistant-markdown hr {
