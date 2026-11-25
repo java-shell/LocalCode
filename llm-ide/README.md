@@ -183,6 +183,66 @@ both environment-gated). New coverage: `src/tests/toolBudget.test.ts`,
 `src/tests/planSchema.toolBudget.test.ts`,
 `src/tests/renderer.toolBudget.contract.test.ts`, and two reworked sub-agent
 ceiling tests.
+## Windows Terminal Shell — feature v1.1.1 (2026-11-24)
+
+`run_terminal_command` now runs commands in **PowerShell** on Windows instead of
+`cmd.exe`, because models write PowerShell far more fluently than cmd.exe batch
+syntax. Resolution order: `pwsh.exe` (PowerShell 7) when installed, then Windows
+PowerShell 5.1 from `System32`, then `ComSpec`/`cmd.exe` as the last resort.
+Non-Windows platforms keep `$SHELL`/`/bin/sh` unchanged.
+
+Selection lives in [src/shared/shellConfig.ts](src/shared/shellConfig.ts) and is
+resolved once per process, so the prompt guidance and the spawned shell can never
+disagree.
+
+**Override:** set `LOCALCODE_SHELL` to `cmd`, `powershell`, `pwsh`, or an explicit
+executable path to pin the shell. An unusable value falls back to the normal order.
+
+Two defects were found and fixed while making this change:
+
+1. **Quoted commands silently did nothing.** `spawn('cmd.exe', ['/d','/s','/c', command])`
+   without `windowsVerbatimArguments: true` makes Node re-quote the command line and
+   cmd.exe then mis-parses it. `node -e "console.log(1)"` returned exit code 0 with
+   empty stdout and empty stderr — a false success the model could not detect. Any
+   command containing a double quote was affected. cmd.exe now spawns in verbatim mode.
+2. **Native exit codes were hidden.** PowerShell collapses every native program failure
+   to exit code 1. A `$LASTEXITCODE` guard is appended so the real code reaches the
+   model (`node -e "process.exit(7)"` reports 7, not 1).
+
+**`&&` and `||` keep working.** Windows PowerShell 5.1 rejects both tokens, so the
+runner rewrites them into `if ($?) { ... }` / `if (-not $?) { ... }` blocks, which
+reproduce the same short-circuit behaviour. Operators inside quotes are never split.
+PowerShell 7 needs no rewrite.
+
+The model is told which shell it has, in two places: the environment system block
+(`src/shared/environment.ts`) lists the concrete shell and its real rules, and the
+`run_terminal_command` schema carries a one-line shell name so the full block is not
+duplicated into every tool definition.
+
+### Verification and TODO Ledger
+
+- [x] **AI-001:** Reproduce the cmd.exe quoting defect and measure PowerShell behaviour
+  (exit-code propagation, `&&` rejection, `$?` semantics, Unix-ism availability,
+  spaced-path handling) before changing anything.
+- [x] **AI-002:** Add `src/shared/shellConfig.ts` (resolution, `&&`/`||` rewrite,
+  exit-code guard) and wire it into `runTerminalCommand`, including verbatim arguments
+  for cmd.exe.
+- [x] **AI-003:** Name the shell in the environment block and the tool schema.
+- [x] **AI-004:** Make `toolRuntime.terminalTimeout.test.ts` shell-aware — it interpolates
+  `process.execPath`, and PowerShell needs `& "path"` to run a quoted path.
+- [x] **AI-005:** Add `src/tests/shellConfig.test.ts` (**26 pass**: resolution order,
+  `LOCALCODE_SHELL` override, verbatim-argument rule, operator rewriting, guidance blocks,
+  and four end-to-end `run_terminal_command` integrations).
+- [x] **AI-006:** Build clean. Full suite: **254 passed, 5 failed, 2 skipped** (261 tests).
+  The Windows terminal-timeout assertion that previously failed now passes. The five
+  remaining failures predate this change: one renderer reference-workspace assertion and
+  four TurboVec assertions from the broken Python environment (`No module named 'numpy'`,
+  `pyvenv.cfg` missing).
+
+**Change risk:** `run_terminal_command` output on Windows changes for commands that
+relied on cmd.exe-only syntax (`%VAR%`, `dir`, `type`). Such commands failed under the
+old shell anyway, and `cmd /c "..."` still reaches cmd.exe. No IPC channels, settings,
+dependencies or packaging changed. `LOCALCODE_SHELL=cmd` restores the previous shell.
 
 ## MCP HTTP Headers — feature v1.1.0 (2026-11-06)
 
@@ -544,6 +604,7 @@ terminal/guidance changes outside this diagnostics addition; no incompatible cal
 | Feature | Description |
 | --- | --- |
 | **Live Output** | Real-time stdout/stderr streaming from tool-invoked commands |
+| **PowerShell on Windows** | Model commands run in PowerShell (pwsh, then Windows PowerShell, then cmd.exe); `&&`/`||` are rewritten for PowerShell 5.1. Override with `LOCALCODE_SHELL` |
 | **Interactive Input** | Send stdin to running processes |
 | **Process Interrupt** | Kill active processes with `(ctrl+c)` |
 | **Clear Output** | Reset terminal buffer |
@@ -677,6 +738,7 @@ Line-oriented file tools use 1-based numbering consistently:
 - [src/backend/llmClient.ts](src/backend/llmClient.ts) Streaming + tool-call chat client
 - [src/backend/orchestrationEngine.ts](src/backend/orchestrationEngine.ts) Step runner
 - [src/backend/toolRuntime.ts](src/backend/toolRuntime.ts) Local tool implementations
+- [src/shared/shellConfig.ts](src/shared/shellConfig.ts) Shell selection and command translation for terminal tools
 - [src/backend/schema.ts](src/backend/schema.ts) Plan schema, validation, and presets
 - [src/shared/toolBudget.ts](src/shared/toolBudget.ts) Tool-turn ceiling and defaults shared by every layer
 - [src/backend/notify.ts](src/backend/notify.ts) Outbound ntfy notifications

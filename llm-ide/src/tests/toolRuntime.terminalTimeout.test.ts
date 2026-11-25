@@ -1,7 +1,26 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { runTerminalCommand } from '../backend/toolRuntime';
+import { resolveShellInvocation } from '../shared/shellConfig';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+
+/**
+ * Build a command that runs Node for a fixed duration under the selected shell.
+ *
+ * Purpose: keep the timeout fixture valid regardless of which shell the runner picks.
+ * `process.execPath` usually contains spaces ("C:\Program Files\nodejs\node.exe"), and
+ * PowerShell requires the call operator `&` to execute a quoted path — a bare quoted
+ * path is a parse error. cmd.exe and sh accept the bare quoted path.
+ *
+ * @returns Shell-appropriate command string.
+ */
+function longRunningNodeCommand(): string {
+  const script = 'setTimeout(() => process.exit(0), 2500)';
+  const shell = resolveShellInvocation();
+  return shell.isPowerShell
+    ? `& "${process.execPath}" -e "${script}"`
+    : `${process.execPath} -e "${script}"`;
+}
 
 /**
  * Validate timeoutAction=continue returns control without killing the running process.
@@ -16,7 +35,7 @@ test('runTerminalCommand reports timedOut/running when timeoutAction is continue
 
   const result = await runTerminalCommand(
     {
-      command: `${process.execPath} -e "setTimeout(() => process.exit(0), 2500)"`,
+      command: longRunningNodeCommand(),
       timeoutMs: 1000,
       timeoutAction: 'continue',
       scope: 'workspace'

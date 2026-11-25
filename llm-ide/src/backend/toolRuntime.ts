@@ -17,6 +17,7 @@ import type { TurboVecMemory, TurboVecNamespaceDiagnostics } from './turboVecMem
 import type { BrowserSessionManager } from './browserSessionManager';
 import { clampSubAgentToolTurns, DEFAULT_SUB_AGENT_TOOL_TURNS, MAX_SUB_AGENT_TOOL_TURNS } from '../shared/toolBudget';
 import { loadAiRules, formatAiRulesGuidance } from './workspaceFs';
+import { buildShellCommand, describeShellBriefly, resolveShellInvocation } from '../shared/shellConfig';
 
 interface RuntimeSubAgentProfile {
   id: string;
@@ -997,6 +998,21 @@ export function getAllowedToolDefinitions(names: string[], context?: RuntimeCont
       changed = true;
     }
 
+    // Name the actual shell in the tool schema: models read tool descriptions closely
+    // and this is where they decide whether to write cmd.exe or PowerShell syntax.
+    // Kept to one line because the full rules ship in the environment system block.
+    // Refs: AI-003.
+    if (tool.function.name === 'run_terminal_command') {
+      return {
+        ...tool,
+        function: {
+          ...tool.function,
+          description: `${tool.function.description} ${describeShellBriefly(resolveShellInvocation())}`,
+          parameters: { ...params, properties: nextProperties }
+        }
+      };
+    }
+
     if (tool.function.name === 'spawn_sub_agent' && Array.isArray(context?.subAgentProfiles)) {
       const profileIds = context.subAgentProfiles.map(profile => profile.id).filter(Boolean);
       if (profileIds.length > 0) {
@@ -1873,15 +1889,14 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
   const rawTimeoutMs = Number(args.timeoutMs ?? 30000);
   const timeoutMs = rawTimeoutMs <= 0 ? 0 : Math.max(1000, Math.min(120000, rawTimeoutMs));
   const timeoutAction = String(args.timeoutAction ?? 'continue').trim().toLowerCase() === 'kill' ? 'kill' : 'continue';
-  const shellConfig = process.platform === 'win32'
-    ? {
-        executable: process.env.ComSpec || 'cmd.exe',
-        args: ['/d', '/s', '/c', command]
-      }
-    : {
-        executable: process.env.SHELL || '/bin/sh',
-        args: ['-lc', command]
-      };
+  // Shell choice is resolved once per process (PowerShell preferred on Windows) and
+  // the command is translated for it, because models write PowerShell far more often
+  // than cmd.exe batch syntax. Refs: AI-001, AI-002.
+  const shell = resolveShellInvocation();
+  const shellConfig = {
+    executable: shell.executable,
+    args: [...shell.args, buildShellCommand(command, shell)]
+  };
   const terminalCwd = path.relative(scopeBase, cwd) || '.';
 
   // Validate the cwd exists before spawning — Node.js reports ENOENT on the
@@ -1918,7 +1933,10 @@ export async function runTerminalCommand(args: Record<string, unknown>, context?
   }>(resolve => {
     const child = spawn(shellConfig.executable, shellConfig.args, {
       cwd,
-      env: process.env
+      env: process.env,
+      // cmd.exe only receives the command line intact in verbatim mode; without it
+      // Node re-quotes the line and cmd.exe silently drops quoted arguments.
+      windowsVerbatimArguments: shell.verbatimArguments
     });
 
     context?.onTerminalEvent?.({
