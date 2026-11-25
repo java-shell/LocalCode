@@ -96,6 +96,37 @@ test('renderer ships vendored markdown libraries instead of unpinned CDN builds'
   );
 });
 
+test('markdown libraries load before Monaco installs its AMD loader', async () => {
+  const { html } = await readMarkdownSources();
+  const scripts = [...html.matchAll(/<script\b([^>]*)>/gi)].map(match => ({
+    attributes: match[1],
+    src: match[1].match(/\bsrc\s*=\s*["']([^"']+)["']/i)?.[1] ?? ''
+  }));
+  const monacoLoader = scripts.findIndex(script =>
+    script.src === 'https://cdn.jsdelivr.net/npm/monaco-editor@0.52.2/min/vs/loader.js'
+  );
+
+  assert.ok(monacoLoader >= 0, 'Expected the Monaco AMD loader script tag.');
+  assert.doesNotMatch(
+    scripts[monacoLoader].attributes,
+    /\basync\b/i,
+    'Monaco must not load asynchronously; its position defines when AMD define() becomes global.'
+  );
+  for (const file of ['marked.umd.js', 'purify.min.js', 'mermaid.min.js']) {
+    const markdownLibrary = scripts.findIndex(script => script.src === `./vendor/${file}`);
+    assert.ok(markdownLibrary >= 0, `Expected a script tag for ./vendor/${file}.`);
+    assert.doesNotMatch(
+      scripts[markdownLibrary].attributes,
+      /\b(?:async|type\s*=\s*["']module["'])/i,
+      `${file} must execute as an ordered classic script, not race Monaco's AMD loader.`
+    );
+    assert.ok(
+      markdownLibrary < monacoLoader,
+      `${file} must execute before Monaco installs global AMD define(); reversing this order previously broke Mermaid initialization.`
+    );
+  }
+});
+
 test('vendored markdown libraries exist and are not empty', async () => {
   const vendorDir = path.resolve(__dirname, '..', '..', 'renderer', 'vendor');
   for (const file of ['marked.umd.js', 'purify.min.js', 'mermaid.min.js']) {

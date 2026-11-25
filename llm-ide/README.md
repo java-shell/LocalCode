@@ -27,6 +27,14 @@ paragraph that directly follows a table into the table body, rejects a short sep
 (literal pipes reach the screen), and flips a half-written separator row between `<p>` and `<table>`
 while streaming. Fenced code blocks are left untouched, so markdown examples stay verbatim.
 
+**Recurring script-load-order regression (second occurrence).** The vendored markdown libraries
+must execute before Monaco's AMD loader. Loading Monaco first defines a global AMD `define()` that
+the bundled Mermaid script can detect, causing `Can only have one anonymous define call per script
+file` and preventing Mermaid initialization. Keep these as ordered classic scripts (not `async` or
+module scripts); [renderer.markdown.contract.test.ts](src/tests/renderer.markdown.contract.test.ts)
+guards both their script-tag order and the execution mode so a future HTML reorder cannot silently
+break Mermaid again.
+
 **Graphs.** ` ```mermaid ` fences previously produced an inert code block — mermaid was not loaded
 anywhere. [`renderer/vendor/`](renderer/vendor/) now ships marked 18.2.1, DOMPurify 3.4.18 and
 mermaid 11.17.2, and `renderMarkdownDiagrams()` renders `pre > code.language-mermaid` with
